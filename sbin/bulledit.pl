@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 #  User manager for PhotonBBS
-#  (C) 2009-2020 Andrew Wyatt
+#  (C) 2009-2020 Fewtarius
 #  GNU GPL v2
 #
 

@@ -1,6 +1,6 @@
 # PhotonBBS
 A simple chat server for Unix / Linux
-Copyright (C) 2002-2022, Andrew Wyatt
+Copyright (C) 2002-2022, Fewtarius
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 The latest version of this software can be downloaded from:
 
-https://github.com/andrewwyatt/photonbbs
+https://github.com/fewtarius/photonbbs
 
 ## About
 
@@ -88,7 +88,7 @@ appears below.
 
 PhotonBBS can be deployed from Docker Hub with a single command.
 
-    docker container run -dti --restart unless-stopped --net host --device=/dev/tty0 -v appdata:/appdata:rw -v /dev:/dev -v /lib/modules:/lib/modules -v /sys/fs/cgroup:/sys/fs/cgroup --privileged awyatt/photonbbs
+    docker container run -dti --restart unless-stopped --net host --device=/dev/tty0 -v appdata:/appdata:rw -v /dev:/dev -v /lib/modules:/lib/modules -v /sys/fs/cgroup:/sys/fs/cgroup --privileged fewtarius/photonbbs
 
 The BBS will be started and listening on port 23 within a minute or two.  
 

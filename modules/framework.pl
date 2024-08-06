@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 #  Photon BBS Framework
-#  (C) 2002-2013 Andrew Wyatt
+#  (C) 2002-2013 Fewtarius
 
 sub doevents {
   $currenttime=time;

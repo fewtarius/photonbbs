@@ -2,7 +2,7 @@ version: '2'
 services:
   photonbbs:
     build: .
-    image: awyatt/photonbbs
+    image: fewtarius/photonbbs
     hostname: photonbbs
     network_mode: bridge
     devices:
