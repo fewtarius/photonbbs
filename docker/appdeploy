@@ -1,18 +1,14 @@
 ###
-### Install the dependencies
+### Install PhotonBBS
 ###
 
-yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
-yum -y install tcp_wrappers xinetd telnet-server cronie perl git fail2ban rsyslog nano rsyslog-mmjsonparse bind-utils procps
-yum -y install http://download1.rpmfusion.org/free/el/updates/6/i386/dosemu-1.4.0.8-15.20130205git.el6.i686.rpm
-
-cd /opt && git clone https://github.com/fewtarius/photonbbs.git
+cd /opt && git clone https://github.com/andrewwyatt/photonbbs.git
 
 ###
 ### Install the PhotonBBS Configuration files.
 ###
 
-cp /etc/skel/.* /opt/photonbbs ||:
+cp -rf /etc/skel/.* /opt/photonbbs ||:
 cp -rf /opt/photonbbs/configs/etc/cron.d/* /etc/cron.d
 cp -rf /opt/photonbbs/configs/etc/default/* /etc/default
 cp -rf /opt/photonbbs/configs/etc/xinetd.d/* /etc/xinetd.d
@@ -21,7 +17,7 @@ cp -rf /opt/photonbbs/configs/etc/xinetd.d/* /etc/xinetd.d
 ### Fail2ban
 ###
 
-cp /opt/photonbbs/configs/etc/fail2ban/filter.d/photonbbs.conf /etc/fail2ban/filter.d
+cp -rf /opt/photonbbs/configs/etc/fail2ban/filter.d/photonbbs.conf /etc/fail2ban/filter.d
 cat /opt/photonbbs/configs/etc/fail2ban/add_to_jail.conf >> /etc/fail2ban/jail.conf
 
 ###
