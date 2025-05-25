@@ -1,0 +1,124 @@
+#!/usr/bin/perl
+
+#    PhotonBBS -- Simple BBS / Chat server for *nix
+#    Copyright (C) 2002-2013, Fewtarius
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+
+# Load default configuration from defaults
+sub require_module {
+    my ($mod) = @_;
+    my $sys_path = "/opt/photonbbs/modules/$mod";
+    my $local_path = "./modules/$mod";
+    if (-e $sys_path) {
+        require $sys_path;
+    } elsif (-e $local_path) {
+        require $local_path;
+    } else {
+        die "Cannot find required module $mod in /opt/photonbbs/modules or ./modules";
+    }
+}
+
+our %config;
+require_module("pb-defaults");
+
+if (-e "/etc/default/photonbbs") {
+  open(in,"</etc/default/photonbbs");
+  while (<in>) {
+    $line=$_;
+    chomp $line;
+    ($key,$value)=split(/\=/,$line);
+    $value=~s/^\"//;
+    $value=~s/\".*$//;
+    $config{$key}=$value;
+  }
+  close(in);
+}
+
+unless ( $config{'host'} ne "" ) {
+  chomp ($sysinfo{'host'}=`hostname -f`);
+}
+chomp ($sysinfo{'os'}=`uname -s`);
+chomp ($sysinfo{'ip'}=`hostname -i`);
+###
+
+$|=1;
+$BSD_STYLE=1;
+
+require ($config{'home'}."/modules/pb-framework");
+require ($config{'home'}."/modules/pb-usertools");
+require ($config{'home'}."/modules/pb-main");
+require ($config{'home'}."/modules/pb-doors");
+require	($config{'home'}."/modules/pb-lastcallers");
+require ($config{'home'}."/modules/pb-oneliners");
+
+chomp ($mytty=`tty`);
+
+main: {
+  $SIG{KILL}=sub {errorout ("SIGKILL..");};
+  $SIG{HUP}=sub {errorout ("SIGHUP..");};
+  $SIG{TERM}=sub {errorout ("SIGTERM..");};
+  $SIG{QUIT}=sub {errorout ("SIGQUIT..");};
+
+  $debug=1;
+  hi();
+  logger("NOTICE: Connection from ".$info{'connect'}." via ".$info{'proto'});
+  colorize();
+  applytheme($config{'theme'});
+  cbreak(on);
+  begin: {
+    if (-e "$config{'home'}$config{'text'}/welcome.$info{'ext'}") {
+      readfile("welcome.$info{'ext'}");
+      $readit=1;
+    }
+    if (-e "$config{'home'}$config{'text'}/welcome.txt" && $readit ne "1") {
+      readfile("welcome.txt");
+      $readit=1;
+    }
+    authenticate();
+    if ($info{'banned'} eq "Y") {
+        logger("NOTICE: ".$info{'handle'}." is banned, terminating.");
+        writeline($theme{'banned'});
+        bye();
+    }
+  }
+
+  iamat($info{'handle'},"Heading to Chat");
+
+  $readit=0;
+  if (-e "$config{'home'}$config{'text'}/login.txt") {
+     readfile("login.txt");
+     $readit=1;
+   }
+   if (-e "$config{'home'}$config{'text'}/login.$info{'ext'}" && $readit ne "1") {
+     readfile("login.$info{'ext'}");
+     $readit=1;
+   }
+  applytheme($config{'theme'});
+  lastcallers();
+
+  bulletins();
+  oneliners();
+  setupdoors();
+  iamat($info{'handle'},"Logging in");
+  whosonline();
+  iamat($info{'handle'},"Menuing System");
+  logger("NOTICE: ".$info{'handle'}." entered the main menu.");
+  while (1) {
+      my $result = show_menu($config{'home'}.$config{'data'}."/main.mnu");
+      last if $result && $result eq 'exit';
+  }
+  bye();
+}

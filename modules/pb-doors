@@ -1,0 +1,82 @@
+#!/usr/bin/perl
+use File::Path qw(make_path);
+
+sub setupdoors {
+    # Defensive: ensure all fields are defined and trimmed
+    my $node      = $info{'node'}      // 1;
+    my $handle    = $info{'handle'}    // 'UNKNOWN'; $handle    =~ s/^\s+|\s+$//g;
+    my $location  = $info{'location'}  // 'UNKNOWN'; $location  =~ s/^\s+|\s+$//g;
+    my $ansi = $info{'ansi'} // 'Y';
+    $ansi = ($ansi =~ /^1|Y/i) ? 'Y' : 'N';;
+    my $security  = $info{'security'}  // 10;
+    my $timeleft  = $info{'timeleft'}  // 60;
+    my $sysop     = $config{'sysop'}   // 'SysOp';
+    my $system    = $config{'systemname'} // 'PhotonBBS';
+
+    my $doors_dir = "$config{'doors'}/nodes/$node";
+    unless (-d $doors_dir) {
+        make_path($doors_dir);
+    }
+
+    # --- DORINFOx.DEF ---
+    my $dorfile = "$doors_dir/dorinfo$node.def";
+    lockfile($dorfile);
+    open(my $out, ">", $dorfile) or die "Cannot write $dorfile: $!";
+    print $out
+        "$system\r\n" .         # 1. BBS Name
+        "$sysop\r\n" .          # 2. SysOp Name
+        "\r\n" .                # 3. Blank
+        "COM1:\r\n" .           # 4. COM Port
+        "19200 BAUD,N,8,1\r\n". # 5. Baud/Settings
+        "$node\r\n" .           # 6. Node Number
+        "$handle\r\n" .         # 7. User Name/Handle
+        "\r\n" .                # 8. Blank
+        "$location\r\n" .       # 9. User Location
+        "$ansi\r\n" .           # 10. ANSI (Y/N)
+        "$security\r\n" .       # 11. Security Level
+        "$timeleft\r\n" .       # 12. Minutes Left
+        "$timeleft\r\n";        # 13. Minutes Left (again)
+    close($out);
+    unlockfile($dorfile);
+
+    # --- DOOR.SYS (minimal, for compatibility) ---
+    my $doorsys = "$doors_dir/door.sys";
+    lockfile($doorsys);
+    open($out, ">", $doorsys) or die "Cannot write $doorsys: $!";
+    print $out
+        "COM1:\r\n" .
+        "19200\r\n" .
+        "8\r\n" .
+        "1\r\n" .
+        "19200\r\n" .
+        "$ansi\r\n" .
+        "$ansi\r\n" .
+        "$ansi\r\n" .
+        "$ansi\r\n" .
+        "$handle\r\n" .
+        "$location\r\n" .
+        "555-5555\r\n" . # Placeholder phone
+        "555-5555\r\n" .
+        "PASSWORD\r\n" .
+        "$security\r\n" .
+        "$timeleft\r\n";
+    close($out);
+    unlockfile($doorsys);
+
+    # --- fusiondoor (legacy, for fallback) ---
+    my $fusiondoor = "$doors_dir/fusiondoor";
+    lockfile($fusiondoor);
+    open($out, ">", $fusiondoor) or die "Cannot write $fusiondoor: $!";
+    print $out
+        "username=$handle\n" .
+        "servername=$system\n" .
+        "node=$node\n" .
+        "security=$security\n" .
+        "ansi=$ansi\n";
+    close($out);
+    unlockfile($fusiondoor);
+
+    return 1;
+}
+
+return 1;

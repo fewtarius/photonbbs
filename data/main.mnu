@@ -1,0 +1,25 @@
+# Menu commands file - PIPE separated
+#
+# Fields:
+# 1 - Key (what to type at the menu prompt)
+# 2 - Description (shown in menu)
+# 3 - Script to execute (for external) or subroutine (for internal)
+# 4 - Minimum Security required to run command
+# 5 - Command Hidden (1 = hidden unless sysop, 0 = visible)
+# 6 - Type of command (external, internal)
+# 7 - Concurrency Limit (0 = unlimited)
+########################################################################
+# KEY|DESCRIPTION|SCRIPT_OR_SUB|SECLEVEL|HIDDEN|TYPE
+########################################################################
+#A|Tradewars 2002|tw2002.sh|10|0|external|0
+#B|LORD|lord.sh|10|0|external|0
+#C|Lunatix|luna.sh|10|0|external|0
+#D|Barren Realms Elite|bre.sh|10|0|external|0
+#E|Operation Overkill II|ooii.sh|10|0|external|0
+#F|Simpsons|simp.sh|10|0|external|0
+#G|Darkness|darkness.sh|10|0|external|0
+#H|Dopewars|dopewars.sh|10|0|external|0
+W|User Edit|useredit|500|1|external|0
+X|Bulletin Editor|bulledit|500|1|external|0
+Y|Dos Prompt|dosemu.sh|900|1|external|0
+Z|Bash Shell|shell.sh|900|1|external|0

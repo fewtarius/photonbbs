@@ -22,12 +22,12 @@ if (-e "/etc/default/photonbbs") {
   die "Please configure your BBS (/etc/default/photonbbs)";
 }
 
-require ($config{'home'}."/modules/framework.pl");
-require ($config{'home'}."/modules/usertools.pl");
+require ($config{'home'}."/modules/pb-framework");
+require ($config{'home'}."/modules/pb-usertools");
 
 $|=1;
 
-$node=@ARGV[2];
+$node=@ARGV[1];
 if (-e "$config{'doors'}/nodes/$node/fusiondoor") {
   open (in,"<$config{'doors'}/nodes/$node/fusiondoor");
   while (<in>) {
@@ -209,11 +209,11 @@ for (;;) {
 }
 
 sub chtheme {
-    opthe: {
-    writeline($config{'themecolor'}."Please enter a new theme to use: ");
-    $info{'theme'}=getline(text,20,"",1);
-    unless (-e $config{'home'}.$config{'themes'}."/".$info{'theme'}) {
-      writeline($RED."That theme does not exist, please choose another.",1);
+  opthe: {
+    writeline($config{'themecolor'} . "Please enter a new theme to use: ");
+    $info{'theme'} = getline(text, 20, "", 1);
+    unless (-e $config{'home'} . $config{'themes'} . "/" . $info{'theme'}) {
+      writeline($RED . "That theme does not exist, please choose another.", 1);
       goto opthe;
     }
   }
@@ -221,10 +221,10 @@ sub chtheme {
 }
 
 sub chdefault {
-  writeline($config{'themecolor'}."Please enter a new default channel: ");
-  $info{'defchan'}=getline(text,20,"",1);
-  $info{'defchan'}=uc($info{'defchan'});
-  $info{'defchan'}=~s/\ /_/gi;
+  writeline($config{'themecolor'} . "Please enter a new default channel: ");
+  $info{'defchan'} = getline(text, 20, "", 1);
+  $info{'defchan'} = uc($info{'defchan'});
+  $info{'defchan'} =~ s/\ /_/gi;
   updateuser();
 }
 

@@ -15,14 +15,14 @@ then
   touch /appdata/.migrated
 fi
 
-if [ ! -h '/opt/photonbbs/sbin' ]
+if [ ! -h '/opt/photonbbs/doorexec' ]
 then
-  if [ ! -d '/appdata/sbin' ]
+  if [ ! -d '/appdata/doorexec' ]
   then
-    mv /opt/photonbbs/sbin /appdata
+    mv /opt/photonbbs/doorexec /appdata
   fi
-  rm -rf /opt/photonbbs/sbin
-  ln -s /appdata/sbin /opt/photonbbs
+  rm -rf /opt/photonbbs/doorexec
+  ln -s /appdata/doorexec /opt/photonbbs
 fi
 
 if [ ! -h '/opt/photonbbs/doors' ]
@@ -94,5 +94,8 @@ then
   ln -s /appdata/default/photonbbs /etc/default 2>/dev/null
 fi
 
-chown -R bbs:bbs /appdata
+### The BBS won't manage this since it's a link
+chown -R nobody:nobody /appdata /opt/photonbbs/data
 
+export PATH="/bin:/doorexec:/usr/bin:/usr/doorexec"
+/opt/photonbbs/photonbbs

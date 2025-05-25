@@ -1,7 +1,7 @@
 ###
 ### Photon BBS Configuration File
 ###
-### This configuration file will override defaults found in bbs.pl
+### This configuration file will override defaults found in bin/photonbbs-client
 ### allowing you to customize your system without editing the scripts.
 ###
 ### Format:
@@ -17,7 +17,7 @@ nodes="/data/nodes";            ## Node information path
 text="/data/text";              ## Ansi & BBS text files
 themes="/data/themes";          ## BBS Skin file
 users="/data/users";            ## User information path
-sbin="/sbin";                   ## Script bin -> Path to door scripts
+doorexec="/doorexec";           ## Script bin -> Path to door scripts
 doors="/opt/photonbbs/doors";   ## Node info -> Drop files etc
 help="?";                       ## Key to press for help
 authretries="3";                ## Number of password retries

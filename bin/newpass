@@ -1,6 +1,19 @@
 #!/usr/bin/perl
+use strict;
+use warnings;
+
 if ( ! $ARGV[1] ) {
   print "Usage: ./newpass {handle} {password}\n";
   exit 1;
 }
-print crypt($ARGV[1],$ARGV[0].$ARGV[1])."\n";
+
+my $handle = $ARGV[0];
+my $password = $ARGV[1];
+
+# Generate a random salt for SHA-256
+my @chars = ('A'..'Z', 'a'..'z', 0..9, '.', '/');
+my $salt = '$5$' . join('', map { $chars[rand @chars] } 1..16) . '$';
+
+my $hashed_password = crypt($password, $salt);
+
+print "$hashed_password\n";

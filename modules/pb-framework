@@ -3,6 +3,8 @@
 #  Photon BBS Framework
 #  (C) 2002-2013 Fewtarius
 
+use Fcntl qw(:DEFAULT :flock);
+
 sub doevents {
   $currenttime=time;
   $idletime=$currenttime-$idle;
@@ -27,6 +29,19 @@ sub doevents {
   }
 }
 
+sub section_header {
+    my ($label) = @_;
+    use constant BORDER_LEN => 79;
+    my $pad = int((BORDER_LEN - length($label) - 4) / 2);
+    # ───┤ label ├─── using CP437 box drawing
+    return (chr(196) x $pad) . chr(180) . " $label " . chr(195) . (chr(196) x ($pad + (BORDER_LEN - length($label) - 4) % 2));
+}
+
+sub section_footer {
+    my $border = chr(196) x 79;
+    return chr(192) . $border . chr(217);
+}
+
 sub usersonline {
   @userlst=<$config{'home'}$config{'nodes'}/*>;
   $sysinfo{'users'}=scalar(@userlst);
@@ -37,65 +52,114 @@ sub usersonline {
 }
 
 sub whosonline {
-  writeline($config{'themecolor'}."\nWho's Online".$config{'promptcolor'}.":");
+  writeline($config{'themecolor'}."\nWho's Online".$config{'promptcolor'}.":",1);
 
-  @whosonline=();
-  @wholst=<$config{'home'}$config{'nodes'}/*>;
-  foreach $whoon(@wholst) {
-    open(in,"<$whoon");
-    $person=<in>;
-    close(in);
-    push(@whosonline,$person);
+  # Collect all node files
+  my @whosonline = ();
+  my @node_files = <$config{'home'}$config{'nodes'}/*>;
+
+  foreach my $node_file (@node_files) {
+    open(my $fh, "<", $node_file) or next;
+    my $line = <$fh>;
+    close($fh);
+    chomp($line);
+
+    # Parse the node file data
+    my ($ip, $node, $pid, $time, $user, $proto, $location) = split(/\|/, $line);
+
+    # Validate the data format
+    next unless defined $ip && defined $node && defined $pid && defined $time && defined $user && defined $proto && defined $location;
+
+    # Calculate idle time
+    my $idle_time = int(time - $time);
+    my $idle_display = $idle_time > 60 ? sprintf("%dm", $idle_time / 60) : sprintf("%ds", $idle_time);
+
+    # Load user status
+    my $status = "Avail"; # Shortened for 80 cols
+    my $uid = finduserid($user);
+    my $is_hidden = 0;
+    if ($uid ne "") {
+      my $user_file = "$config{'home'}$config{'data'}/users/$uid.dat";
+      if (open(my $ufh, "<", $user_file)) {
+        while (<$ufh>) {
+          $status .= "/DND" if /^dnd=1/;
+          if (/^hidden=Y/) {
+            $status .= "/Inv";
+            $is_hidden = 1;
+          }
+        }
+        close($ufh);
+      }
+    }
+
+    # Skip hidden users unless the current user has sec_sysop or higher
+    if ($is_hidden == 1 && $info{'sec_level'} < $config{'sec_sysop'}) {
+      next;
+    }
+
+    # Format the data for display
+    push @whosonline, {
+      node      => sprintf("%03d", $node),
+      user      => $user,
+      proto     => $proto,
+      location  => $location,
+      idle_time => $idle_display,
+      status    => $status,
+    };
   }
-  @whosonline=sort {$a <=> $b} @whosonline;
-  writeline($config{'systemcolor'},1);
-format whosonline =
-@<<<< @<<<<<< @<<<<<<<<<<<<<<<  .....  @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-$whonode,$whoproto,$whouser,$whowhere
-.
-  $whonode="Node"; $whouser="User-ID"; $whoproto="Via";$whowhere="Location";
-  $~="whosonline";
-  write;
-  $~="stdout";
-  writeline($config{'datacolor'});
-  foreach $node(@whosonline) {
-    chomp ($node);
-    ($ip,$whonode,$pid,$time,$whouser,$whoproto,$whowhere)=split(/\|/,$node);
-    $whonode=sprintf("%03D",$whonode);
-    $~="whosonline";
-    write;
-    $~="stdout";
+
+  # Sort by node number
+  @whosonline = sort { $a->{node} <=> $b->{node} } @whosonline;
+
+  # Display the header (widen Location to 32 chars for longer descriptions)
+  writeline($config{'systemcolor'} . sprintf("%-4s %-10s %-7s %-32s %-5s %-10s", "Node", "User", "Via", "Location", "Idle", "Status"), 1);
+
+  # Display each user's data (truncate fields as needed)
+  foreach my $entry (@whosonline) {
+    my $node      = $entry->{node};
+    my $user      = substr($entry->{user}, 0, 10);
+    my $proto     = substr($entry->{proto}, 0, 7);
+    my $location  = substr($entry->{location}, 0, 32);
+    my $idle_time = substr($entry->{idle_time}, 0, 5);
+    my $status    = substr($entry->{status}, 0, 10);
+    printf "%-4s %-10s %-7s %-32s %-5s %-10s\n",
+      $node, $user, $proto, $location, $idle_time, $status;
   }
+
+  # If no users are online, display a message
+  if (scalar(@whosonline) == 0) {
+    writeline($config{'systemcolor'}."No users are currently online.", 1);
+  }
+
   writeline($RST."\n");
-  unless ($_[0] =~/nopause/) {
+  unless ($_[0] =~ /nopause/) {
     pause();
   }
 }
-
 
 sub iamat {
   unless (-d "$config{'home'}$config{'nodes'}") {
     mkdir "$config{'home'}$config{'nodes'}";
   }
   unless ($info{'hidden'} eq "Y") {
-   $who=$_[0];
+    $who = $_[0];
   } else {
-   $who="*** HIDDEN ***";
+    $who = "*** HIDDEN ***";
   }
-   $location=$_[1];
-   $whofile=$config{'home'}.$config{'nodes'}."/".$info{'node'};
-   lockfile("$whofile");
-   open (who,">$whofile");
-    print who $sysinfo{'ip'}."|".$info{'node'}."|".$$."|".time."|".$who."|".$info{'proto'}."|".$location;
-   close (who);
-   unlockfile("$whofile");
+  $location = $_[1];
+  $whofile = $config{'home'} . $config{'nodes'} . "/" . $info{'node'};
+  lockfile("$whofile");
+  open(who, ">$whofile");
+  print who $sysinfo{'ip'} . "|" . $info{'node'} . "|" . $$ . "|" . time . "|" . $info{'handle'} . "|" . $info{'proto'} . "|" . $location;
+  close(who);
+  unlockfile("$whofile");
 }
 
 
 sub errorout {
   cbreak(off);
   logger ("ERROR".$config{'promptcolor'}.": ".$_[0]." ".$info{'handle'}." on node ".$info{'node'}." Exiting..");
-  writeline("\n".$config{'errorcolor'}."ERROR".$config{'promptcolor'}.": ".$config{'datacolor'}.$_[0]."\nExiting..",1);
+  writeline ("\n".$config{'errorcolor'}."ERROR".$config{'promptcolor'}.": ".$config{'datacolor'}.$_[0]."\e[K\nExiting..\e[K\n",1);
   bye();
 }
 
@@ -144,7 +208,35 @@ sub bye {
     system ("rm -rf $config{'doors'}/nodes/$info{'node'} 2>/dev/null");
   }
 
-  unlink ("$config{'home'}$config{'nodes'}/$info{'node'}");
+  # Only remove node file if it matches our PID
+  my $nodefile = "$config{'home'}$config{'nodes'}/$info{'node'}";
+  if (-e $nodefile) {
+    open(my $fh, '<', $nodefile);
+    my $line = <$fh>;
+    close($fh);
+    my (undef, undef, $npid, undef, undef, undef, undef) = split(/\|/, $line);
+    if ($npid && $npid == $$) {
+      unlink $nodefile;
+    }
+  }
+
+  # Remove user's IP from iplist
+  if ($config{'nodupes'} eq "1" && -e "$config{'home'}$config{'data'}/iplist") {
+    lockfile("$config{'home'}$config{'data'}/iplist");
+    open(my $in, "<", "$config{'home'}$config{'data'}/iplist");
+    open(my $out, ">", "$config{'home'}$config{'data'}/iplist_");
+    while (<$in>) {
+      chomp;
+      next if /$info{'connect'}/i; # Skip the user's IP
+      print $out "$_\n";
+    }
+    close($in);
+    close($out);
+    unlockfile("$config{'home'}$config{'data'}/iplist");
+    unlink("$config{'home'}$config{'data'}/iplist");
+    rename("$config{'home'}$config{'data'}/iplist_", "$config{'home'}$config{'data'}/iplist");
+  }
+
   kill getppid;
   exit(0);
 }
@@ -258,6 +350,11 @@ sub lockfile {
   $tolock=$_[0];
   $lockwait=5;
   while (-e "$tolock.lock") {
+    # If lockfile is stale (>60s), remove it
+    if (-e "$tolock.lock" && (time - (stat("$tolock.lock"))[9]) > 60) {
+      unlink("$tolock.lock");
+      last;
+    }
     --$lockwait;
     if ($lockwait eq 0) {
       last;
@@ -371,7 +468,7 @@ sub writeline {
   $wrline =~s/\@BMG/$BMG/g;
   $wrline =~s/\@BCN/$BCN/g;
   $wrline =~s/\@BWH/$BWH/g;
-  print $wrline;
+  print $wrline . "\e[K";
   if ($_[1] eq "1") {
     print "\n";
   }
@@ -420,33 +517,35 @@ sub getline {
       }
       return ($retmsg);
     }
+    # Enhanced backspace/delete logic
     if ($key =~/\c?/ || $key =~/\ch/) {
-      unless ($result eq "") {
-        @parts=split(//,$result);
-        $junk=pop(@parts);
-        $result=join('',@parts);
+      if (length($result) > 0) {
+        # Always delete just one character for DOB
+        $result = substr($result, 0, -1);
         print "\e[1D \e[1D";
       }
       next;
     }
-    if (ord($key) >= "32" && ord($key) <= "126") {
+    if (ord($key) >= 32 && ord($key) <= 126) {
       if ($input{'type'} eq "dob") {
         $input{'length'}=10;
-        unless ($key =~/[0-9]/) {
-          $key="";
+        # Only allow digits and slashes
+        unless ($key =~ /[0-9\/]/) {
+          $key = "";
           next;
         }
-        if (length($result) eq 1) {
-          $key=$key."/";
+        # If user types a slash, only allow at positions 2 or 5
+        if ($key eq "/") {
+          unless (length($result) == 2 || length($result) == 5) {
+            next;
+          }
         }
-        if (length($result) eq 2) {
-          $key="/".$key;
-        }
-        if (length($result) eq 4) {
-          $key=$key."/";
-        }
-        if (length($result) eq 5) {
-          $key="/".$key;
+        # If user types a digit, auto-insert slash after MM and DD if not present
+        if ($key =~ /[0-9]/) {
+          if ((length($result) == 2 || length($result) == 5) && substr($result, -1) ne "/") {
+            $result .= "/";
+            print "/";
+          }
         }
       }
       if ($input{'type'} eq "phone") {
@@ -474,13 +573,13 @@ sub getline {
           $key="-".$key;
         }
       }
-      unless (length($result) eq $input{'length'}) {
+      unless (length($result) == $input{'length'}) {
         unless ($input{'type'} =~/password/) {
           print $key;
         } elsif ($key ne "") {
           print $config{'passchr'};
         }
-        $result=$result.$key;
+        $result = $result . $key;
         if ($input{'type'} =~/chat/) {
           if ($result eq "$config{'help'}") {
             $retmsg=$result;
@@ -605,7 +704,7 @@ sub readfile {
       }
     }
 
-    if ($gotapage eq "1") {
+    if ($inteleconf eq "1" && $gotapage eq "1") {
       writeline($RST.$config{'inputcolor'}.$config{'promptchr'}." ".$result);
     }
 
@@ -643,25 +742,42 @@ sub pause {
 
 sub hi {
   $ppid=getppid;
+
+  # --- Use server-assigned node number from ARGV[2] ---
+  my $nodeid = $ARGV[2];
+  if (!$nodeid || $nodeid !~ /^\d+$/) {
+    writeline("No node number provided by server, cannot continue.");
+    logger("ERROR: No node number provided by server, disconnecting.");
+    exit 1;
+  }
+  $info{'node'} = $nodeid;
+
   if ( $ARGV[1] =~ /sftp/i  || $ARGV[1] =~ /scp/i || $ARGV[1] =~ /exec/i ) {
     writeline("Attempt reported.",1);
     logger("ERROR: Connection attempt via SCP or SFTP from (@ARGV).");
     exit 0;
   }
-  unless ($info{'connect'} ne "") {
-    if ($ARGV[1] ne "") {
-      $info{'connect'}=$ARGV[1];
-      $info{'proto'}="TELNET";
-    } else {
-      if($ENV{'SSH_CLIENT'}) {
-        @sshprts=split(/\ /,$ENV{'SSH_CLIENT'});
-        $info{'connect'}=shift(@sshprts);
-        $info{'proto'}="SSH";
-      } else {
-        $info{'connect'}=$mtty;
-        $info{'proto'}="LOCAL";
-      }
-    }
+
+  # Robust protocol/IP detection for all telnetd variants
+  if ($ARGV[0] && $ARGV[1] && $ARGV[0] !~ /^-/) {
+      # Standard: proto, connect
+      $info{'proto'}   = $ARGV[0];
+      $info{'connect'} = $ARGV[1];
+  } elsif ($ARGV[1] && $ARGV[1] !~ /^-/) {
+      # in.telnetd: proto, connect
+      $info{'proto'}   = $ARGV[0] // "TELNET";
+      $info{'connect'} = $ARGV[1];
+  } elsif ($ARGV[2] && $ARGV[2] !~ /^-/) {
+      # BSD/BusyBox: -h, connect, -p
+      $info{'proto'}   = "TELNET";
+      $info{'connect'} = $ARGV[2];
+  } elsif ($ENV{'SSH_CLIENT'}) {
+      @sshprts = split(/\ /, $ENV{'SSH_CLIENT'});
+      $info{'connect'} = shift(@sshprts);
+      $info{'proto'} = "SSH";
+  } else {
+      $info{'connect'} = $mtty;
+      $info{'proto'} = "LOCAL";
   }
 
   $cli=join(' ',@ARGV);
@@ -679,36 +795,35 @@ sub hi {
        print out "UNKNOWNUSER\n";
       close(out);
     }
-    if (-e "$config{'home'}$config{'data'}/iplist") {
-      lockfile("$config{'home'}$config{'data'}/iplist");
-      open (in,"<$config{'home'}$config{'data'}/iplist");
-      lockfile("$config{'home'}$config{'data'}/iplist_");
-      open (out,">$config{'home'}$config{'data'}/iplist_");
-       while (<in>) {
-        chomp $_;
-        if ($_ =~/$info{'connect'}/i) {
-          writeline ($config{'systemcolor'}."\nIP ".$config{'usercolor'}.$info{'connect'}.$config{'systemcolor'}." is already logged on ..",1);
-          ($kpid,$kip)=split(/:/,$_);
-          logger("WARN: Duplicate IP ".$info{'connect'}." connected. Killing PID ".$kpid);
-	        kill 15,$kpid;
-          bye();
-        }
+    # Always lock before reading or writing
+    lockfile("$config{'home'}$config{'data'}/iplist");
+    open (in,"<$config{'home'}$config{'data'}/iplist");
+    my @lines = <in>;
+    close(in);
+
+    # Check for duplicates
+    foreach my $line (@lines) {
+      chomp $line;
+      if ($line =~/$info{'connect'}/i) {
+        writeline ($config{'systemcolor'}."\nIP ".$config{'usercolor'}.$info{'connect'}.$config{'systemcolor'}." is already logged on ..",1);
+        ($kpid,$kip)=split(/:/,$line);
+        logger("WARN: Duplicate IP ".$info{'connect'}." connected. Killing PID ".$kpid);
+        kill 15,$kpid;
+        unlockfile("$config{'home'}$config{'data'}/iplist");
+        bye();
       }
-
-
-      print out getppid."".$config{'promptcolor'}.":".$info{'connect'}."\n";
-      close(out);
-      unlockfile("$config{'home'}$config{'data'}/iplist_");
-      close(in);
-      unlockfile("$config{'home'}$config{'data'}/iplist");
-      unlink ("$config{'home'}$config{'data'}/iplist");
-      rename ("$config{'home'}$config{'data'}/iplist_","$config{'home'}$config{'data'}/iplist");
     }
+
+    # Add this session
+    open (out,">>$config{'home'}$config{'data'}/iplist");
+    print out getppid.":".$info{'connect'}."\n";
+    close(out);
+    unlockfile("$config{'home'}$config{'data'}/iplist");
   }
 
   cbreak(on);
   eval {
-    if ( $config{'clearlogin'} = "1" ) {
+    if ( $config{'clearlogin'} eq "1" ) {
        print "\e[2J\e[0H";
     }
     if ($config{'headers'} eq 1) {
@@ -747,7 +862,7 @@ sub hi {
     local $SIG{ALRM} = sub {$tchr="c";next;};
     while ($tchr=$tchr.getc(STDIN)) {
       if ($tchr =~/c$/i) {
-        last;
+        break;
       }
     }
     alarm 0;
@@ -764,27 +879,8 @@ sub hi {
   print ".";
   chomp ($info{'tty'}=`tty | sed -e s#/##g -e s#[a-z]##g`);
 
-  ###
-  ### Multinode support requires generating the node number without the tty, and
-  ### doors support requires the node number to be less than 100 for most.  So..
-  ### support a total of 99 nodes (configurable)
-  ###
-
-  for (1..$config{'totalnodes'}) {
-    $info{'node'}=$_;
-    unless (-e "$config{'home'}$config{'nodes'}/$info{'node'}") {
-     iamat("CONNECT","Logging on");
-     last;
-    }
-  }
-
-  unless ($info{'tty'} =~/[0-9]/i) {
-    @parts=split(//,$info{'tty'});
-    $tty=pop(@parts);
-    $node=ord($tty);
-    $node=$node-96;
-    $info{'node'}=$node;
-  }
+  # Now that the node is reserved, write initial session info
+  iamat("CONNECT", "Logging on");
 
   if (-e "$config{'home'}$config{'messages'}/$info{'node'}.page") {
     unlink("$config{'home'}$config{'messages'}/$info{'node'}.page");
@@ -797,8 +893,8 @@ sub hi {
         chomp $_;
           if ($info{'connect'} =~/$_/i) {
             writeline ($config{'systemcolor'}."\nHost ".$config{'usercolor'}.$info{'connect'}.$config{'systemcolor'}." has been ".$config{'errorcolor'}."banned".$config{'systemcolor'}.", terminating connection ..",1);
-	          logger("WARN: Banned User connected from".$config{'promptcolor'}.": ".$info{'connect'});
-	          close(in);
+              logger("WARN: Banned User connected from".$config{'promptcolor'}.": ".$info{'connect'});
+              close(in);
             unlockfile("$config{'home'}$config{'data'}/banned_ip");
             bye();
           }
@@ -819,9 +915,8 @@ sub hi {
   lockfile("$config{'home'}/$config{'data'}/totalcalls");
   open (tcalls,">$config{'home'}/$config{'data'}/totalcalls");
    print tcalls $config{'totcalls'};
-  close (out);
+  close (tcalls);
   unlockfile("$config{'home'}/$config{'data'}/totalcalls");
-
 }
 
 sub logger {
@@ -835,6 +930,30 @@ sub logger {
     }
     system ('curl -X POST --data-urlencode "payload={\"channel\": \"'.$config{'slackchannel'}.'\", \"username\": \"'.$config{'slackuser'}.'\", \"text\": \"'.$_[0].'\", \"icon_emoji\": \"'.$config{'slackemoji'}.'\"}" "https://hooks.slack.com/services/'.$config{'slackapipath'}.'" >/dev/null 2>&1');
   }
+  # --- Discord Webhook Integration ---
+  if ( $config{'discordintegration'} eq "1" && $config{'discordwebhook'} ne "" ) {
+    if ( $config{'discorderrors'} eq "0" && "$_[0]" =~ /^ERR/ ) {
+      return;
+    }
+    if ( $config{'discordwarnings'} eq "0" && "$_[0]" =~ /^WARN/ ) {
+      return;
+    }
+    my $discord_payload = '{'.
+      '"username": "'.$config{'discorduser'}.'",'.
+      ($config{'discordavatar'} ne "" ? '"avatar_url": "'.$config{'discordavatar'}.'",' : '').
+      '"content": "'.escape_discord($_[0]).'"'.
+      '}';
+    system('curl -H "Content-Type: application/json" -X POST -d \''.$discord_payload.'\' "'.$config{'discordwebhook'}.'" >/dev/null 2>&1');
+  }
+}
+
+# Helper: Escape Discord special chars (basic)
+sub escape_discord {
+  my $msg = shift;
+  $msg =~ s/"/\\"/g;
+  $msg =~ s/\n/\\n/g;
+  $msg =~ s/\r//g;
+  return $msg;
 }
 
 sub bulletins {
@@ -921,6 +1040,36 @@ sub bullmenu {
     writeline("\n");
   }
   $inteleconf=1;
+}
+
+# Add a function to enumerate active sessions/nodes for external tools
+sub list_sessions {
+  my @sessions;
+  my $nodes_dir = $config{'home'}.$config{'nodes'};
+  opendir(my $dh, $nodes_dir) or return ();
+  while (my $node = readdir($dh)) {
+    next if $node =~ /^\./;
+    my $file = "$nodes_dir/$node";
+    next unless -f $file;
+    open(my $fh, '<', $file) or next;
+    my $line = <$fh>;
+    close($fh);
+    chomp $line;
+    # $line format: ip|node|pid|time|user|proto|location
+    my ($ip, $nodeid, $pid, $time, $user, $proto, $location) = split(/\|/, $line);
+    push @sessions, {
+      ip       => $ip,
+      node     => $nodeid,
+      pid      => $pid,
+      time     => $time,
+      user     => $user,
+      proto    => $proto,
+      location => $location,
+      file     => $file,
+    };
+  }
+  closedir($dh);
+  return @sessions;
 }
 
 return 1;

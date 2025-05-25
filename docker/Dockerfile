@@ -15,9 +15,10 @@ FROM rockylinux:9
 WORKDIR /
 
 RUN yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
-RUN yum -y install tcp_wrappers xinetd telnet-server cronie perl git fail2ban rsyslog nano rsyslog-mmjsonparse bind-utils procps
+RUN yum -y install perl git nano bind-utils procps systemd shadow-utils telnet-server which
 RUN yum -y install http://download1.rpmfusion.org/free/el/updates/6/i386/dosemu-1.4.0.8-15.20130205git.el6.i686.rpm
 
+COPY photonbbs /opt/photonbbs
 COPY appdeploy /
 COPY startscript /
 
@@ -25,5 +26,5 @@ EXPOSE 23
 
 RUN bash /appdeploy
 
-ENTRYPOINT [ "/usr/sbin/init" ]
+ENTRYPOINT [ "/startscript" ]
 CMD []

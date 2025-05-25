@@ -3,6 +3,22 @@
 # User authentication module for PhotonBBS
 #
 
+sub generate_salt {
+  my @chars = ('A'..'Z', 'a'..'z', 0..9, '.', '/');
+  return join '', map { $chars[rand @chars] } 1..16;
+}
+
+sub hash_password {
+  my ($password) = @_;
+  my $salt = '$5$' . generate_salt() . '$'; # $5$ = SHA-256
+  return crypt($password, $salt);
+}
+
+sub check_password {
+  my ($password, $stored_hash) = @_;
+  return crypt($password, $stored_hash) eq $stored_hash;
+}
+
 sub authenticate {
   # Reduce the idle disconnect for sessions at the login prompt.
   $defaultidle=$config{'idledisconnect'};
@@ -48,11 +64,9 @@ sub authenticate {
       testpasswd: {
           writeline($theme{'passwordprompt'}." ");
           $result=getline(password,$config{'passlength'});
-          $tstpassword=crypt($result,$info{'handle'}.$result);
-          until ($tstpassword eq $info{'password'}) {
+          unless (check_password($result, $info{'password'})) {
             writeline($theme{'mismatch'});
             logger("WARN: ".$info{'handle'}." incorrect password on node ".$info{'tty'}." via ".$info{'connect'});
-            $tstpassword="";
             unless (defined($tries)) {
               $tries=1;
             } else {
@@ -118,27 +132,24 @@ sub finduser {
 }
 
 sub finduserid {
-  $fuser=$config{'home'}.$config{'data'}."/users.dat";
-  if ( -e "$fuser" ) {
+  my $handle = $_[0] // $info{'handle'};
+  $fuser = $config{'home'} . $config{'data'} . "/users.dat";
+  if (-e "$fuser") {
     lockfile("$fuser");
-    open (in,"<$fuser");
-    $idcount=0;
-    while (<in>) {
-      $line=$_;
-      chomp ($line);
-      ($chkid,$chkname)=split(/\|/,$line);
-      if ($chkname eq $info{'handle'}) {
-        close (in);
+    open(my $in, "<", $fuser);
+    while (<$in>) {
+      chomp;
+      my ($chkid, $chkname) = split(/\|/, $_);
+      if ($chkname eq $handle) {
+        close($in);
+        unlockfile("$fuser");
         return $chkid;
       }
-      ++$idcount;
     }
-    close (in);
+    close($in);
     unlockfile("$fuser");
-  } else {
-    $idcount=0;
   }
-  return $idcount;
+  return "0";
 }
 
 sub loaduser {
@@ -175,44 +186,58 @@ sub loaduser {
 }
 
 sub updateuser {
-  unless (defined($info{'id'})) {
-    $info{'id'}=finduserid();
-    $outto=$config{'home'}.$config{'data'}."/users.dat";
-    lockfile("$outto");
-    open (out,">>$outto");
-      print out $info{'id'}."|".$info{'handle'}."\n";
-    close (out);
-    unlockfile("$outto");
-  }
-  $outto=$config{'home'}.$config{'data'}."/users/".$info{'id'}.".dat";
-  lockfile("$outto");
-  open (out,">$outto");
-  foreach $key(keys %info) {
-    unless ($key =~/proto/) {
-      print out $key."=".$info{$key}."\n";
+  unless (defined($info{'id'}) && $info{'id'} ne "" && $info{'id'} ne "0") {
+    # Assign next available user ID
+    my $maxid = 0;
+    my $fuser = $config{'home'} . $config{'data'} . "/users.dat";
+    if (-e $fuser) {
+      lockfile($fuser);
+      open(my $in, "<", $fuser);
+      while (<$in>) {
+        chomp;
+        my ($chkid, $chkname) = split(/\|/, $_);
+        $maxid = $chkid if ($chkid =~ /^\d+$/ && $chkid > $maxid);
+      }
+      close($in);
+      unlockfile($fuser);
     }
-
+    $info{'id'} = $maxid + 1;
+    # Append to users.dat
+    my $outto = $fuser;
+    lockfile($outto);
+    open(my $out, ">>", $outto);
+    print $out $info{'id'} . "|" . $info{'handle'} . "\n";
+    close($out);
+    unlockfile($outto);
   }
-  logger("NOTICE: Saved ".$info{'handle'}." to record number ".$info{'id'});
-  close (out);
-  unlockfile("$outto");
+  my $outto = $config{'home'} . $config{'data'} . "/users/" . $info{'id'} . ".dat";
+  lockfile($outto);
+  open(my $out, ">", $outto);
+  foreach my $key (keys %info) {
+    unless ($key =~ /proto/) {
+      print $out $key . "=" . $info{$key} . "\n";
+    }
+  }
+  logger("NOTICE: Saved " . $info{'handle'} . " to record number " . $info{'id'});
+  close($out);
+  unlockfile($outto);
 }
 
 sub newuser {
-  if($config{'public'} eq "0") {
+  if ($config{'public'} eq "0") {
     writeline($theme{'nonewusers'});
     bye();
   }
   logger("NOTICE: New user on Node ".$info{'tty'});
-  iamat("New User","Creating an account");
-  $readit=0;
+  iamat("New User", "Creating an account");
+  $readit = 0;
   if (-e $info{'home'}."/".$info{'text'}."/welcome.txt") {
     readfile($info{'home'}."/".$info{'text'}."/welcome.txt");
-    $readit=1;
+    $readit = 1;
   }
   if (-e $info{'home'}."/".$info{'text'}."/welcome".$info{'ext'} && $readit ne 1) {
     readfile($info{'home'}."/".$info{'text'}."/welcome".$info{'ext'});
-    $readit=1;
+    $readit = 1;
   }
   if ($readit eq 1) {
     writeline($theme{'agreeprompt'});
@@ -304,13 +329,21 @@ sub newuser {
   setpassword: {
     writeline($theme{'setpassword'}.$theme{'setpasswordb'}." ");
     $passa=getline(password,$config{'passlength'},"",1);
+    if (!defined($passa) || $passa eq "") {
+      writeline($theme{'passblank'} // "Password cannot be blank. Please enter a password.");
+      goto setpassword;
+    }
     writeline($theme{'setpasswordc'}." ");
     $passb=getline(password,$config{'passlength'},"",1);
     if ($passa ne $passb) {
       writeline($theme{'passmatch'});
       goto setpassword;
     }
-    $info{'password'}=crypt($passa,$info{'handle'}.$passa);
+    if (!defined($passb) || $passb eq "") {
+      writeline($theme{'passblank'} // "Password cannot be blank. Please enter a password.");
+      goto setpassword;
+    }
+    $info{'password'}=hash_password($passa);
   }
   if ( $info{'id'} eq 0 ) {
     $info{'security'}=$config{'sec_sysop'};
@@ -322,20 +355,24 @@ sub newuser {
   writeline($theme{'remember'});
   $null=waitkey();
   updateuser();
+
+  # Register the new user as online
+  iamat($info{'handle'}, "Logging in");
+  writeline($theme{'goodbyemsg'} . $RST, 1);
   $firstlogon=1;
 }
 
 sub chansi {
-  writeline($theme{'ansiprompt'});
-  $noevents=1;
-  $result=waitkey("Y");
-  $noevents="";
-  if ($result =~/[Yy]/) {
-    $info{'ansi'}=1;
-    $info{'ext'}="ans";
+  writeline($theme{'ansiprompt'} . " ");
+  $noevents = 1;
+  $result = waitkey("Y");
+  $noevents = "";
+  if ($result =~ /[Yy]/) {
+    $info{'ansi'} = 1;
+    $info{'ext'} = "ans";
   } else {
-    $info{'ansi'}=0;
-    $info{'ext'}="asc";
+    $info{'ansi'} = 0;
+    $info{'ext'} = "asc";
   }
   updateuser();
   colorize();
@@ -343,14 +380,14 @@ sub chansi {
 }
 
 sub chbanned {
-  writeline($theme{'banprompt'});
-  $noevents=1;
-  $result=waitkey("N");
-  $noevents="";
-  if ($result =~/[Yy]/) {
-    $info{'banned'}="Y";
+  writeline($theme{'banprompt'} . " ");
+  $noevents = 1;
+  $result = waitkey("N");
+  $noevents = "";
+  if ($result =~ /[Yy]/) {
+    $info{'banned'} = "Y";
   } else {
-    $info{'banned'}="N";
+    $info{'banned'} = "N";
   }
   updateuser();
   colorize();
@@ -414,13 +451,21 @@ sub chpassword {
   setpassword: {
     writeline($theme{'setpassword'}.$theme{'setpasswordb'}." ");
     $passa=getline(password,$config{'passlength'},"",1);
+    if (!defined($passa) || $passa eq "") {
+      writeline($theme{'passblank'} // "Password cannot be blank. Please enter a password.");
+      goto setpassword;
+    }
     writeline($theme{'setpasswordc'}." ");
     $passb=getline(password,$config{'passlength'},"",1);
     if ($passa ne $passb) {
       writeline($theme{'passmatch'});
       goto setpassword;
     }
-    $info{'password'}=crypt($passa,$info{'handle'}.$passa);
+    if (!defined($passb) || $passb eq "") {
+      writeline($theme{'passblank'} // "Password cannot be blank. Please enter a password.");
+      goto setpassword;
+    }
+    $info{'password'}=hash_password($passa);
   }
   updateuser();
 }

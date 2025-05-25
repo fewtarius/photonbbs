@@ -1,5 +1,359 @@
 #!/usr/bin/perl
 
+# --- Add global hashes for mute/ignore/topic history ---
+my %muted_users;
+my %ignore_list;
+my %last_message;
+my %topic_history;
+my %chan_passwords;
+my %chan_desc;
+my %chan_entry_exit_toggle;
+
+
+sub menu_exit {
+    # Prompt for confirmation if at main menu, using theme prompt
+    my $main_menu = shift;
+    if ($main_menu) {
+        writeline($theme{'exita'}.$theme{'exitb'}." ", 0);
+        my $choice = waitkey("Y");
+        if ($choice =~ /[Yy]/) {
+            writeline($BWH."\nLogging off..", 1);
+            bye();
+            return 1;
+        } else {
+            writeline("", 1);
+            return 0;
+        }
+    } else {
+        bye();
+        return 1;
+    }
+}
+
+sub menu_teleconference {
+    teleconf();
+    return 0;
+}
+
+sub menu_help {
+    # If menuhelp.txt exists, display it and return
+    my $helpfile = $config{'home'}.$config{'text'}."/menuhelp.txt";
+    if (-e $helpfile) {
+        $inteleconf = 0;
+        readfile("menuhelp.txt");
+        return;
+    }
+
+    # Otherwise, show the default help output
+    my @help_lines = ($theme{'helpdivider'}, $theme{'helptitle'}, $theme{'helpdivider'});
+    for my $i (1..20) {
+        my $key = "helpitem$i";
+        push @help_lines, $theme{$key} if exists $theme{$key} && defined $theme{$key} && $theme{$key} ne '';
+    }
+    push @help_lines, $theme{'helpdivider'};
+    my $rows = $config{'rows'} || 24;
+    my $linecount = 0;
+    foreach my $line (@help_lines) {
+        writeline($line, 1);
+        $linecount++;
+        if ($linecount >= $rows - 1) {
+            my $resp = pause();
+            $linecount = 0;
+            last if uc($resp) eq 'Q';
+        }
+    }
+}
+
+
+sub run_menu_command {
+    my ($cmd, $arg, $concurrency) = @_;
+
+    # Internal commands (callable subs)
+    if ($cmd =~ /^internal/i) {
+        no strict 'refs';
+        if (defined &{$arg}) {
+            &{$arg}();
+        } else {
+            writeline($theme{'invalidsel'} // $config{'errorcolor'}."Invalid internal command.".$RST, 1);
+        }
+        use strict 'refs';
+        return;
+    }
+
+    # External commands (doors, etc)
+    if ($cmd =~ /^external/i) {
+        # --- Find the menu description for this command ---
+        my $desc = "";
+        my $main_mnu = $config{'home'}.$config{'data'}."/main.mnu";
+        if (-e $main_mnu) {
+            open(my $fh, "<", $main_mnu);
+            while (my $line = <$fh>) {
+                chomp $line;
+                next if $line =~ /^\s*#/;
+                my ($key, $desc_field, $script) = split(/\|/, $line);
+                if ($script && $arg && $script eq $arg) {
+                    $desc = $desc_field;
+                    last;
+                }
+            }
+            close($fh);
+        }
+        $desc ||= $arg; # fallback
+
+        # --- Signal iamat with the menu description ---
+        iamat($info{'handle'}, $desc);
+
+        # --- Look for the executable in bin first, then doorexec ---
+        my $bin_path  = $config{'home'} . "/bin/$arg";
+        my $doorexec_path = $config{'home'} . "/doorexec/$arg";
+        my $run;
+        if (-x $bin_path) {
+            $run = "$bin_path $config{'home'} $info{'node'} \"$info{'handle'}\"";
+        } elsif (-x $doorexec_path) {
+            $run = "$doorexec_path $config{'home'} $info{'node'} \"$info{'handle'}\"";
+        } else {
+            writeline($config{'errorcolor'}."Executable $arg not found in bin or doorexec.".$RST, 1);
+            pause();
+            return;
+        }
+
+        my $numuserslock = $config{'home'}.$config{'data'}."/".$arg;
+        if ($concurrency && $concurrency > 0) {
+            # Count current users
+            my $count = 0;
+            if (-e $numuserslock) {
+                open(my $fh, '<', $numuserslock);
+                $count++ while <$fh>;
+                close($fh);
+            }
+            if ($count >= $concurrency) {
+                writeline($theme{'inuse'} // "Sorry, that option is limited to only $concurrency user(s) at a time.\nPlease try again later.", 1);
+                pause();
+                return;
+            }
+        } elsif ($concurrency == 1 && -e $numuserslock) {
+            writeline($theme{'inuse'} // "Sorry, that option is limited to only one user at a time.\nPlease try again later.", 1);
+            pause();
+            return;
+        }
+        # Lock and record user
+        lockfile($numuserslock);
+        open (my $out, ">>$numuserslock");
+        print $out $info{'handle'}."\n";
+        close($out);
+        unlockfile($numuserslock);
+
+        $dndmode=$info{'dnd'};
+        $info{'dnd'}="1";
+        $noevents=1;
+        system($run);
+        $noevents="";
+        $info{'dnd'}=$dndmode;
+
+        # Remove user from lock file
+        if (-e $numuserslock) {
+            lockfile($numuserslock);
+            open(my $in, '<', $numuserslock);
+            my @lines = <$in>;
+            close($in);
+            open(my $out, '>', $numuserslock);
+            foreach my $line (@lines) {
+                print $out $line unless $line =~ /^\Q$info{'handle'}\E$/;
+            }
+            close($out);
+            unlockfile($numuserslock);
+        }
+
+        # --- Signal iamat with "Menuing System" after returning ---
+        iamat($info{'handle'}, "Menuing System");
+
+        doevents() if defined &doevents;
+        return;
+    }
+
+    # Submenu
+    if ($cmd =~ /^submenu$/i && $arg) {
+        show_menu($config{'home'}."/menu/$arg");
+        return;
+    }
+
+    # Fallback: unknown command
+    writeline($theme{'invalidsel'} // $config{'errorcolor'}."Invalid selection.".$RST, 1);
+}
+
+sub show_menu {
+    my ($menufile, $menustack) = @_;
+    $menustack ||= [];
+    my $main_menu = ($menufile =~ /main\.mnu$/i);
+
+    # Determine menu base name and directory
+    my ($basename) = $menufile =~ /([^\/\\]+)\.mnu$/i;
+    my $menudir = $menufile; $menudir =~ s/\/[^\/]+$//;
+
+    # Internal commands
+    my @internal_commands = (
+        ['&',  $theme{'cmd_teleconf'}      // "Teleconference",          sub { menu_teleconference() } ],
+        ['#',  $theme{'cmd_whosonline'}    // "Who's online",            sub { whosonline() } ],
+        ['%',  $theme{'cmd_oneliners'}     // "Write on the wall",       sub { oneliners() } ],
+        ['@',  $theme{'cmd_bulletins'}     // "Read System Bulletins",   sub { bulletins() } ],
+        ['!',  $theme{'cmd_exit'}          // "Log Off and Exit",        sub { menu_exit($main_menu) } ],
+    );
+
+    while (1) {
+        my $shown_static = 0;
+        my $hideprompt = 0;
+        foreach my $ext ('ans', 'asc', 'txt') {
+            my $staticfile = $config{'home'}.$config{'text'}."/$basename.$ext";
+            if (-e $staticfile) {
+                $inteleconf = 0;
+                my @lines;
+                open(my $sfh, "<", $staticfile);
+                @lines = <$sfh>;
+                close($sfh);
+                foreach my $line (@lines) {
+                    if ($line =~ /\@HIDEPROMPT/i) {
+                        $hideprompt = 1;
+                        next; # Don't print the @HIDEPROMPT line
+                    }
+                    writeline($line, 1);
+                }
+                $shown_static = 1;
+                last;
+            }
+        }
+
+        my @menuitems;
+        my $menu_exists = (-e $menufile && open(my $fh, "<", $menufile));
+        @menuitems = $menu_exists ? <$fh> : ();
+        close($fh) if $menu_exists;
+
+        my @choices;
+        unless ($shown_static) {
+            writeline($theme{'mainmenuhdr'} // $config{'themecolor'}."\nMain Menu".$RST, 1);
+
+            # Print menu items if present
+            if (@menuitems) {
+                foreach my $line (@menuitems) {
+                    chomp $line;
+                    next if $line =~ /^\s*$/ || $line =~ /^#/;
+                    my ($key, $desc, $script, $seclevel, $hidden, $type, $concurrency) = split(/\|/, $line);
+                    $seclevel   ||= 0;
+                    $hidden     ||= 0;
+                    $type       ||= 'external';
+                    $concurrency = defined $concurrency ? $concurrency : 0;
+                    next if $seclevel && $info{'security'} < $seclevel;
+                    next if $hidden && $info{'security'} < $config{'sec_sysop'};
+                    writeline("  ".$config{'datacolor'}.$key.$config{'themecolor'}." ... ".$config{'usercolor'}.$desc.$RST, 1);
+                    push @choices, [$key, $type, $script, $concurrency];
+                }
+            }
+
+            # Always print the commands section and internal commands
+            writeline($theme{'commandshdr'} // $config{'themecolor'}."\nCommands".$RST, 1);
+            foreach my $cmd (@internal_commands) {
+                my ($key, $desc, $handler) = @$cmd;
+                writeline("  ".$config{'datacolor'}.$key.$config{'themecolor'}." ... ".$config{'usercolor'}.$desc.$RST, 1);
+            }
+
+            if (!$main_menu && @$menustack) {
+                writeline("  ".$config{'datacolor'}."^".$config{'themecolor'}." ... ".$config{'usercolor'}."Previous Menu".$RST, 1);
+            }
+        } else {
+            # If static menu was shown, still need to build @choices for input handling
+            if (@menuitems) {
+                foreach my $line (@menuitems) {
+                    chomp $line;
+                    next if $line =~ /^\s*$/ || $line =~ /^#/;
+                    my ($key, $desc, $script, $seclevel, $hidden, $type, $concurrency) = split(/\|/, $line);
+                    $seclevel   ||= 0;
+                    $hidden     ||= 0;
+                    $type       ||= 'external';
+                    $concurrency = defined $concurrency ? $concurrency : 0;
+                    next if $seclevel && $info{'security'} < $seclevel;
+                    next if $hidden && $info{'security'} < $config{'sec_sysop'};
+                    push @choices, [$key, $type, $script, $concurrency];
+                }
+            }
+        }
+
+        # --- User-friendly Prompt ---
+        writeline("",1);
+
+        # Build a list of available keys for the prompt
+        my @prompt_keys;
+        foreach my $item (@choices) {
+            push @prompt_keys, $item->[0] if defined $item->[0] && $item->[0] ne '';
+        }
+        foreach my $cmd (@internal_commands) {
+            my ($key, $desc, $handler) = @$cmd;
+            push @prompt_keys, $key;
+        }
+        # Remove duplicates and join
+        my %seen; @prompt_keys = grep { !$seen{$_}++ } @prompt_keys;
+        my $prompt_keys_str = join(',', @prompt_keys);
+
+        # Compose the prompt string using theme
+        unless ($hideprompt) {
+            my $prompt = $theme{'menuprompt'} // "Make your selection (\@KEYS, ? for help, or ! to exit): ";
+            $prompt =~ s/\@KEYS/$prompt_keys_str/g;
+            writeline($prompt, 0);
+        }
+
+        my $choice = waitkey();
+        $choice =~ s/^\s+|\s+$//g;
+        $choice = uc($choice // '');
+        writeline("",1);
+
+        # --- Input Handling ---
+        # Help
+        if ($choice eq '?') {
+            menu_help();
+            next;
+        }
+
+        # Previous menu
+        if ($choice eq '^' && !$main_menu && @$menustack) {
+            my $prev = pop @$menustack;
+            $menufile = $prev;
+            $main_menu = ($menufile =~ /main\.mnu$/i);
+            next;
+        }
+
+        # Menu items: match by key only
+        my $found = 0;
+        foreach my $item (@choices) {
+            my ($key, $type, $script, $concurrency) = @$item;
+            $key =~ s/^\s+|\s+$//g;
+            if ($choice eq uc($key)) {
+                $found = 1;
+                if ($type =~ /^submenu$/i && $script) {
+                    push @$menustack, $menufile;
+                    $menufile = $config{'home'}."/menu/$script";
+                    $main_menu = 0;
+                    next;
+                } else {
+                    run_menu_command($type, $script, $concurrency);
+                }
+                last;
+            }
+        }
+        # Internal commands: match by key or description
+        unless ($found) {
+            foreach my $cmd (@internal_commands) {
+                my ($key, $desc, $handler) = @$cmd;
+                if ($choice eq uc($key) || $choice eq uc($desc)) {
+                    my $exit = $handler->();
+                    return if $key eq '!' && $exit;
+                    $found = 1;
+                    last;
+                }
+            }
+        }
+        unless ($found) {
+            writeline($theme{'invalidsel'} // $config{'errorcolor'}."Invalid selection.".$RST, 1);
+        }
+    }
+}
 sub pageall {
   $msg=$_[0];
   unless ( -e "$config{'home'}$config{'nodes'}" ) {
@@ -67,20 +421,34 @@ sub telechannel {
     }
 
     if ($chanexists eq 0) {
-      if ($info{'security'} ge $config{'sec_createchan'}) {
+      if ($channel eq $config{'defchannel'}) {
+        # Always create the main channel with owner 0 if missing
         chomp ($chanid=`uuidgen`);
         open (out,">>$config{'home'}$config{'messages'}/teleconf/channels");
-        print out "$chanid|$info{'handle'}|$channel\n";
+        print out "$chanid|0|$channel\n";
         close(out);
 
-        $chanown=$info{'handle'};
-
+        $chanown = "0";
         unless (-d "$config{'home'}$config{'messages'}/teleconf/$chanid") {
           mkdir ("$config{'home'}$config{'messages'}/teleconf/$chanid");
           mkdir ("$config{'home'}$config{'messages'}/teleconf/$chanid/users");
           mkdir ("$config{'home'}$config{'messages'}/teleconf/$chanid/messages");
         }
+        writeline($BWH."\nCreating channel ".$config{'usercolor'}.$channel.$BWH." ..",1);
+        writeline($BWH."Assigned ".$config{'usercolor'}."System Operator".$BWH." as owner ..",1);
+      } elsif ($info{'security'} ge $config{'sec_createchan'}) {
+        # Normal channel creation for users with permission
+        chomp ($chanid=`uuidgen`);
+        open (out,">>$config{'home'}$config{'messages'}/teleconf/channels");
+        print out "$chanid|$info{'handle'}|$channel\n";
+        close(out);
 
+        $chanown = $info{'handle'};
+        unless (-d "$config{'home'}$config{'messages'}/teleconf/$chanid") {
+          mkdir ("$config{'home'}$config{'messages'}/teleconf/$chanid");
+          mkdir ("$config{'home'}$config{'messages'}/teleconf/$chanid/users");
+          mkdir ("$config{'home'}$config{'messages'}/teleconf/$chanid/messages");
+        }
         writeline($BWH."\nCreating channel ".$config{'usercolor'}.$channel.$BWH." ..",1);
         writeline($BWH."Assigned ".$config{'usercolor'}.$info{'handle'}.$BWH." as owner ..",1);
       } else {
@@ -89,6 +457,7 @@ sub telechannel {
         $canjoin=0;
         writeline($BWH."Entering channel ".$config{'usercolor'}.$config{'defchannel'},1);
         telechannel($config{'defchannel'});
+        return;
       }
     }
 
@@ -205,6 +574,7 @@ sub telechannel {
       close (in);
       unlockfile("$teleuser");
       chomp ($line);
+      # Skip if the user is the same as the current user
       if ($line eq $info{'handle'}) {
         next;
       }
@@ -222,8 +592,10 @@ sub telechannel {
       $channelusers=$channeluserlist.", and ".$lastchanneluser;
       @channeluserlist=();
       $channelusers=$channelusers." are here with you.";
-    } else {
+    } elsif ($usercount eq 1) {
       $channelusers=$channelusers." is here with you.";
+    } else {
+      $channelusers="There is nobody else here with you.";
     }
   } else {
     $channelusers="There is nobody else here with you.";
@@ -357,6 +729,26 @@ sub teleconf {
     if ($chatline =~/^\/[Uu][Ss][Ee][Rr][Ss]$/ || $chatline =~/^#$/ || $chatline =~/^\/[Ww][Hh][Oo]$/) {
       if (length($chatline) le "6") {
         whosonline(nopause);
+        goto telemain;
+      }
+    }
+
+    if ($chatline =~ /^\/[Ss][Ee][Tt]\ / || $chatline =~ /^\/[Uu]\ /) {
+      ($junk, $setcommand) = split(/\s/, $chatline);
+      if ($setcommand =~ /DEFAULT/i) {
+        if ($info{'defchan'} =~ /$channel/) {
+          writeline($BWH . "Reset " . $config{'datacolor'} . $config{'defchannel'} . $BWH . " as your favorite.", 1);
+          $info{'defchan'} = $config{'defchannel'};
+        } else {
+          writeline($BWH . "Saved " . $config{'datacolor'} . $channel . $BWH . " as your favorite.", 1);
+          $info{'defchan'} = $channel;
+          updateuser();
+        }
+        goto telemain;
+      }
+      if ($setcommand =~ /NAME/i) {
+        chrealname();
+        writeline($RST, 1);
         goto telemain;
       }
     }
@@ -575,6 +967,11 @@ sub teleconf {
       if ($info{'handle'} eq $chanown || $info{'security'} ge $config{'sec_chanop'}) {
         lockfile("$config{'home'}$config{'messages'}/teleconf/$chanid/message");
         system("nano -R $config{'home'}$config{'messages'}/teleconf/$chanid/message");
+        # Log topic change
+        my $histfile = "$config{'home'}$config{'messages'}/teleconf/$chanid/topic_history";
+        open(my $hf, '>>', $histfile);
+        print $hf scalar(localtime).": ".`cat $config{'home'}$config{'messages'}/teleconf/$chanid/message`;
+        close($hf);
         unlockfile("$config{'home'}$config{'messages'}/teleconf/$chanid/message");
         writeline($BWH."Set Channel message ..",1);
         goto channel;
@@ -852,11 +1249,8 @@ sub teleconf {
       telesend($chatline);
       goto telemain;
     }
-    if ($chatline =~/^[Xx]$/ || $chatline =~/^\/[Qq][Uu][Ii][Tt]$/ || $chatline =~/^[Ee][Xx][Ii][Tt]$/) {
-      writeline($theme{'exita'}.$theme{'exitb'}." ");
-      $choice=waitkey("N");
-      if ($choice =~/[Yy]/) {
-        writeline ($BWH."\nLogging off..",1);
+    if ($chatline =~/^[!xX]$/ || $chatline =~/^\/[Qq][Uu][Ii][Tt]$/ || $chatline =~/^[Ee][Xx][Ii][Tt]$/) {
+        writeline ($BWH."\nLeaving teleconference..",1);
         $leaving="1";
         telesend("just left the channel!");
         $leaving="0";
@@ -864,92 +1258,10 @@ sub teleconf {
         $inteleconf="0";
         $info{'dnd'}=$dndmode;
         unlink ("$config{'home'}$config{'messages'}/teleconf/$chanid/users/$info{'node'}");
-        goto leave;
-      } else {
-        writeline ("",1);
-        $chatline="";
-        goto telemain;
-      }
+        return;
     }
 
     $runthis=0;
-
-    if (-e "$config{'home'}$config{'data'}/external.mnu") {
-      lockfile("$config{'home'}$config{'data'}/external.mnu");
-      open(in,"<$config{'home'}$config{'data'}/external.mnu");
-       @mnuitems=<in>;
-      close(in);
-      unlockfile("$config{'home'}$config{'data'}/external.mnu");
-      foreach $mnuitem(@mnuitems) {
-        if ($mnuitem =~/^#/) {
-          next;
-        }
-        ($mitem,$mname,$mdesc,$mexec,$mseclevel,$mhidden,$mspecial,$mnumusers)=split(/\|/,$mnuitem);
-        if ($chatline =~/^$mitem/i && $info{'security'} ge $mseclevel) {
-          $runthis=1;
-          last;
-        }
-      }
-      if ($runthis eq 1) {
-        $leaving="1";
-        telesend($mdesc);
-        $leaving="0";
-        writeline($BWH.$info{'handle'}." ".$mdesc,1);
-        $prevchan=$channel;
-        $rescan="1";
-        unlink ("$config{'home'}$config{'messages'}/teleconf/$prevchan/users/$info{'node'}");
-        telechannel($mname);
-        if ( $mhidden eq 1) {
-          lockfile("$config{'home'}$config{'messages'}/teleconf/$chanid/hidden");
-          open (out,">$config{'home'}$config{'messages'}/teleconf/$chanid/hidden");
-           print out "1";
-          close (out);
-          unlockfile("$config{'home'}$config{'messages'}/teleconf/$chanid/hidden");
-        }
-        $rescan="0";
-        if ($mhidden eq 0) {
-          iamat($info{'handle'},$mname);
-        }
-
-        logger("NOTICE: ".$info{'handle'}." executed ".$mexec);
-        if ($mspecial =~/internal/) {
-          &$mexec();
-        }
-        $idle=time;
-        if ($mspecial =~/external/) {
-          $dndmode=$info{'dnd'};
-          $info{'dnd'}="1";
-          if ($numusers gt 0) {
-            $numuserslock=$config{'home'}.$config{'data'}."/".$mexec;
-            if (-e $numuserslock) {
-              writeline($theme{'inuse'},1);
-              pause();
-              return;
-            } else {
-              lockfile($numuserslock);
-              open (out,">$numuserslock");
-               print out $info{'handle'};
-              close(out);
-              unlockfile($numuserslock);
-            }
-          }
-          $run=$config{'home'}.$config{'sbin'}."/".$mexec." ".$config{'home'}." ".$info{'node'}." \"".$info{'handle'}."\"";
-          system ($run);
-          if (-e $numuserslock) {
-           lockfile($numuserslock);
-           unlink($numuserslock);
-           unlockfile($numuserslock);
-           $numuserslock="";
-          }
-          doevents();
-       }
-      writeline($RST."\n",1);
-      unlink ("$config{'home'}$config{'messages'}/teleconf/$mname/users/$info{'node'}");
-      telechannel($prevchan);
-      loaduser($info{'id'});
-      goto channel;
-      }
-    }
     telesend();
   }
   goto telemain;
@@ -970,11 +1282,11 @@ sub telesend {
   } else {
     foreach $channode(@telesendto) {
       chomp ($channode);
-      if ($leaving eq "1") {
-        if ($channode eq $info{'node'}) {
-          next;
-        }
-      }
+      # Get username for this node
+      open(my $fh, '<', $channode); my $target = <$fh>; close($fh);
+      # Ignore/mute logic
+      next if $muted_users{$chanid}{$info{'handle'}}; # muted by op
+      next if $ignore_list{$target}{$info{'handle'}}; # target ignores sender
       $chatline =~s/\@SYSTEMCLR/$config{'systemcolor'}/g;
       $chatline =~s/\@USERCLR/$config{'usercolor'}/g;
       $chatline =~s/\@INPUTCLR/$config{'inputcolor'}/g;
@@ -1040,6 +1352,8 @@ sub telesend {
        }
       close (out);
       unlockfile("$config{'home'}$config{'messages'}/$channode.page");
+      # Track last message for edit/delete
+      $last_message{$info{'handle'}} = $chatline if defined $chatline;
     }
   }
 }
@@ -1074,6 +1388,19 @@ sub telewhisper {
      if ($pguser eq $user) {
         $found=1;
         $pmsg=join(' ',@parts);
+        # Check DND
+        my $targetid = finduserid($user);
+        my $dnd = 0;
+        if ($targetid ne "") {
+          my $ufile = "$config{'home'}$config{'data'}/users/$targetid.dat";
+          open(my $ufh, '<', $ufile);
+          while (<$ufh>) { $dnd=1 if /^dnd=1/; }
+          close($ufh);
+        }
+        if ($dnd) {
+          writeline($config{'datacolor'}."$user is in Do Not Disturb mode.",1);
+          last;
+        }
      }
 
      if ($found eq "1") {
@@ -1131,11 +1458,11 @@ sub chanscan {
   writeline("",1);
 
 format chanscan =
-@<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<  .....  @<<<<<<<<<<< @<<<<<
-$channelname,$chanstat,$chanusers
+@<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<  .....  @<<<<<<<<<<< @<<<<< @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+$channelname,$chanstat,$chanusers,$chandesc
 .
 
-  $channelname="Channel .....";$chanstat="Status";$chanusers="Users";
+  $channelname="Channel .....";$chanstat="Status";$chanusers="Users";$chandesc="Description";
   writeline($config{'themecolor'});
   $~="chanscan";
   write;
@@ -1160,11 +1487,11 @@ $channelname,$chanstat,$chanusers
    }
    @scanchanusr=<$config{'home'}$config{'messages'}/teleconf/$chanid/users/*>;
    $chanusers=scalar(@scanchanusr);
-
-  writeline($config{'datacolor'});
-  $~="chanscan";
-  write;
-  $~="stdout";
+   $chandesc = $chan_desc{$chanid} // "";
+   writeline($config{'datacolor'});
+   $~="chanscan";
+   write;
+   $~="stdout";
   }
   writeline($RST,1);
 }
@@ -1226,5 +1553,24 @@ $whonode,$whouser,$whowhere
   writeline($RST."\n");
 }
 
+if ($chatline =~/^\/DOORS\b/i || $chatline =~/^\/MENU\b/i) {
+  my @mnuitems;
+  if (-e "$config{'home'}$config{'data'}/external.mnu") {
+    lockfile("$config{'home'}$config{'data'}/external.mnu");
+    open(my $fh, "<", "$config{'home'}$config{'data'}/external.mnu");
+    @mnuitems = <$fh>;
+    close($fh);
+    unlockfile("$config{'home'}$config{'data'}/external.mnu");
+  }
+  writeline($config{'themecolor'}."Available Doors/Commands:",1,1,0);
+  foreach my $mnuitem (@mnuitems) {
+    next if $mnuitem =~ /^#/;
+    my ($cmd, $desc, $msg, $exec, $seclevel, $hidden, $type, $maxusers) = split(/\|/, $mnuitem);
+    next if $hidden && $info{'security'} < $config{'sec_sysop'};
+    next if $info{'security'} < $seclevel;
+    writeline($config{'datacolor'}."$cmd".(" " x (10-length($cmd))).$config{'usercolor'}."$desc",1,0,0);
+  }
+  goto telemain;
+}
 
 return 1;

@@ -14,7 +14,7 @@ fi
 ### Build the image
 ###
 
-docker buildx build --tag fewtarius/photonbbs .
+docker build -t fewtarius/photonbbs .
 
 ###
 ### Describe how to start the container.

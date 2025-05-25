@@ -2,71 +2,18 @@
 ### Install PhotonBBS
 ###
 
-cd /opt && git clone https://github.com/andrewwyatt/photonbbs.git
-
 ###
 ### Install the PhotonBBS Configuration files.
 ###
 
-cp -rf /etc/skel/.* /opt/photonbbs ||:
-cp -rf /opt/photonbbs/configs/etc/cron.d/* /etc/cron.d
+cp -rf /etc/skel/.[a-z]* /opt/photonbbs/ ||:
 cp -rf /opt/photonbbs/configs/etc/default/* /etc/default
-cp -rf /opt/photonbbs/configs/etc/xinetd.d/* /etc/xinetd.d
-
-###
-### Fail2ban
-###
-
-cp -rf /opt/photonbbs/configs/etc/fail2ban/filter.d/photonbbs.conf /etc/fail2ban/filter.d
-cat /opt/photonbbs/configs/etc/fail2ban/add_to_jail.conf >> /etc/fail2ban/jail.conf
-
-###
-### Some configuration changes (xinetd)
-###
-
-sed -i 's#cps.*$#cps\t\t= 0 0#g' /etc/xinetd.conf
-sed -i 's#per_source.*$#per_source\t= 1#g' /etc/xinetd.conf
 
 ###
 ### Deviate from what's in the git repository until it can be updated.
 ###
 
 chmod 0755 /opt
-/usr/sbin/useradd -d /opt/photonbbs -s /opt/photonbbs/bbs.pl bbs
-chown -R bbs:bbs /opt/photonbbs
-chmod -R 755 /opt/photonbbs
-sed -i "s#REUSE#REUSE NOLIBWRAP#g" /etc/xinetd.d/photonbbs
-sed -i "s#service.*photonbbs#service telnet#g" /etc/xinetd.d/photonbbs
-sed -i "s#photonbbs#telnet#g" /etc/fail2ban/filter.d/photonbbs.conf
-
-cat <<EOF >/etc/systemd/journald.conf
-[Journal]
-ForwardToSyslog=yes
-MaxLevelSyslog=debug
-EOF
-
-cat <<EOF >>/etc/rsyslog.conf
-module(load="imjournal")
-module(load="mmjsonparse")
-EOF
-
 chmod 755 /startscript
-
-cat <<EOF >/lib/systemd/system/start.service
-[Unit]
-Description=PhotonBBS Setup Service
-After=network-online.target
-[Service]
-Type=oneshot
-ExecStart=/startscript
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl enable crond
-systemctl enable rsyslog
-systemctl enable fail2ban
-systemctl enable xinetd
-systemctl enable start
 
 yum clean all

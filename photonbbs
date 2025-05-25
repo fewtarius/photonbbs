@@ -1,0 +1,900 @@
+#!/usr/bin/perl
+#    PhotonBBS -- Simple BBS / Chat server for *nix
+#    Copyright (C) 2002-present, Fewtarius
+
+$|=1;
+use strict;
+use warnings;
+use IO::Socket::INET;
+use POSIX ();
+use File::Basename;
+use Time::HiRes qw(time sleep);
+use POSIX qw(:sys_wait_h);
+use File::Path qw(remove_tree make_path);
+use Term::ANSIColor;
+use English qw( -no_match_vars );
+use threads;
+use Fcntl qw(:DEFAULT :flock);
+
+my $DAILY_RUN_HOUR = 0; # 0 = Midnight, 1 = 1 AM, etc.
+
+our %sysinfo;
+my %pid_to_node;    # pid => nodeid
+my %node_in_use;    # nodeid => pid
+
+sub require_module {
+    my ($mod) = @_;
+    my $sys_path = "/opt/photonbbs/modules/$mod";
+    my $local_path = "./modules/$mod";
+    if (-e $sys_path) {
+        require $sys_path;
+    } elsif (-e $local_path) {
+        require $local_path;
+    } else {
+        die "Cannot find required module $mod in /opt/photonbbs/modules or ./modules";
+    }
+}
+
+our %config;
+require_module("pb-defaults");
+
+if ($config{'home'} && -d $config{'home'}."/modules") {
+    unshift @INC, $config{'home'}."/modules";
+}
+
+my @required_commands = qw(groupadd useradd hostname chmod chown);
+
+# --- Config and globals ---
+my $VERSION = "v20250514";
+my $PORT = $config{'port'};
+my $MAINT_INTERVAL = $config{'maint_interval'} || 60;
+my $STATS_INTERVAL = $config{'stats_interval'} || 10;
+my $last_stats = time();
+my $last_maint = time();
+my $last_active_count = -1;
+my $last_active_hash = "";
+my $DEBUG = 0;
+my $DAEMON = 0;
+my $VERBOSE = 0;
+my $QUIET = 0;
+my $HELP = 0;
+my $LOCAL = 0;
+my %pid_to_ip;
+my $NUM_CHILDREN = 8;
+$|=1;
+
+foreach my $cmd (@required_commands) {
+    my $path = `which $cmd 2>/dev/null`;
+    chomp $path;
+    unless ($path && -x $path) {
+        die "[bbsd] [ERROR] Required command '$cmd' is not installed or not in PATH. Please install it and try again.\n";
+    }
+}
+
+my $photonbbs_dir = $config{'home'};
+my $datadir = $config{'home'} . $config{'data'};
+my $bbs_uid = getpwnam($config{'unixuser'});
+my $bbs_gid = getgrnam($config{'unixuser'});
+my $nodes_dir = $config{'home'} . $config{'nodes'};
+
+foreach my $arg (@ARGV) {
+    if ($arg eq '--debug')   { $DEBUG = 1; }
+    if ($arg eq '--daemon')  { $DAEMON = 1; }
+    if ($arg eq '--verbose') { $VERBOSE = 1; }
+    if ($arg eq '--quiet')   { $QUIET = 1; }
+    if ($arg eq '--help' || $arg eq '-h') { $HELP = 1; }
+    if ($arg eq '--local')   { $LOCAL = 1; }
+}
+
+if ($HELP) {
+    print <<"EOT";
+[bbsd] PhotonBBS Daemon
+Usage: $0 [options]
+
+Options:
+  --debug      Enable debug output
+  --daemon     Run as background daemon
+  --verbose    Verbose session/user reporting
+  --quiet      Suppress all output except errors
+  --local      Run bin/photonbbs-client directly for local use
+  --help, -h   Show this help message
+
+EOT
+    exit 0;
+}
+
+unless ($QUIET) {
+  print "PhotonBBS " . $VERSION . "\n";
+  print "Copyright (C) 2002-present, Fewtarius (https://github.com/fewtarius/photonbbs)\n\n";
+  print "[bbsd] [INFO] Home directory:   $config{'home'}\n";
+  print "[bbsd] [INFO] Data directory:   $config{'home'}$config{'data'}\n";
+  print "[bbsd] [INFO] Nodes directory:  $config{'home'}$config{'nodes'}\n";
+  print "[bbsd] [INFO] Doors directory:  $config{'doors'}\n";
+  print "[bbsd] [INFO] Port:             $PORT\n";
+  print "[bbsd] [INFO] UNIX user:        $config{'unixuser'}\n";
+  print "[bbsd] [INFO] Maintenance int.: $MAINT_INTERVAL sec\n";
+  print "[bbsd] [INFO] Stats interval:   $STATS_INTERVAL sec\n";
+  print "[bbsd] [INFO] Duplicate IPs:    " . ((($config{'nodupes'} // "0") eq "1") ? "NOT allowed" : "Allowed") . "\n";
+  print "[bbsd] [INFO] Max children:     $NUM_CHILDREN\n";
+  print "[bbsd] [INFO] Debug:            " . ($DEBUG ? "ON" : "OFF") . "\n";
+  print "[bbsd] [INFO] Verbose:          " . ($VERBOSE ? "ON" : "OFF") . "\n";
+  print "[bbsd] [INFO] Daemon:           " . ($DAEMON ? "ON" : "OFF") . "\n";
+  print "[bbsd] [INFO] Local mode:       " . ($LOCAL ? "ON" : "OFF") . "\n";
+  print "[bbsd] [INFO] Config file:      /opt/photonbbs/modules/pb-defaults\n";
+}
+
+if ($DAEMON) {
+    my $pid = fork();
+    if (!defined $pid) {
+        print "[bbsd] [ERROR] Could not fork for daemon mode: $!\n";
+        exit 1;
+    }
+    if ($pid) {
+        print "[bbsd] [INFO] Daemon started with PID $pid\n" unless $QUIET;
+        exit 0;
+    }
+    POSIX::setsid();
+    open(STDIN,  "</dev/null");
+    open(STDOUT, ">/dev/null");
+    open(STDERR, ">/dev/null");
+}
+
+if ($LOCAL) {
+    print "[bbsd] [INFO] Running bin/photonbbs-client in local mode...\n" unless $QUIET;
+    require $config{'home'} . "/modules/pb-framework";
+    session_maintenance();
+    report_active_sessions();
+    my ($bbs_uid, $bbs_gid);
+    $bbs_uid = getpwnam($config{'unixuser'});
+    $bbs_gid = getgrnam($config{'unixuser'});
+    if (defined $bbs_uid && defined $bbs_gid) {
+        $EGID = $GID = $bbs_gid;
+        $EUID = $UID = $bbs_uid;
+    } else {
+        die "[bbsd] [ERROR] Could not drop privileges to $config{'unixuser'}.\n";
+    }
+    my $bbs_script = "$config{'home'}/bin/photonbbs-client";
+    if (-x $bbs_script) {
+        exec { $bbs_script } $bbs_script;
+        die "[bbsd] [ERROR] Failed to execute $bbs_script: $!\n";
+    } else {
+        die "[bbsd] [ERROR] $bbs_script is not executable or does not exist.\n";
+    }
+}
+
+our $TELNETD_BIN;
+our @TELNETD_ARGS_TEMPLATE;
+
+my @telnetd_bins = (
+    "/usr/sbin/telnetd",
+    "/usr/sbin/in.telnetd",
+    "/sbin/in.telnetd",
+    "/bin/telnetd",
+    "/usr/bin/telnetd",
+);
+foreach my $bin (@telnetd_bins) {
+    if (-x $bin) {
+        $TELNETD_BIN = $bin;
+        last;
+    }
+}
+unless ($TELNETD_BIN) {
+    die "[bbsd] [ERROR] Could not find a suitable telnetd binary.\n";
+}
+my $version_output = `$TELNETD_BIN -v 2>&1 || $TELNETD_BIN -h 2>&1 || $TELNETD_BIN 2>&1`;
+
+# Ensure photonbbs directory and its contents are owned by root with 755 permissions
+if (-d $photonbbs_dir) {
+    system("chown -R root:root $photonbbs_dir");
+    system("chmod -R 755 $photonbbs_dir");
+} else {
+    die "[bbsd] [ERROR] PhotonBBS directory $photonbbs_dir does not exist.\n";
+}
+
+# Create user and group if they don't exist
+unless (defined $bbs_uid && defined $bbs_gid) {
+    system("groupadd $config{'unixuser'}") unless defined $bbs_gid;
+    system("useradd -r -g $config{'unixuser'} -d /nonexistent -s /usr/sbin/nologin $config{'unixuser'}") unless defined $bbs_uid;
+    $bbs_uid = getpwnam($config{'unixuser'});
+    $bbs_gid = getgrnam($config{'unixuser'});
+}
+
+# Ensure nodes directory exists
+unless (-d $nodes_dir) {
+    print "[bbsd] [SUPERVISOR] Nodes directory $nodes_dir does not exist. Creating it...\n" unless $QUIET;
+    mkdir $nodes_dir or die "[bbsd] [ERROR] Could not create nodes directory $nodes_dir: $!\n";
+}
+
+# Ensure node info directory exists
+my $nodeinfo_dir = $config{'doors'}. "/nodes";
+unless (-d $nodeinfo_dir) {
+    print "[bbsd] [SUPERVISOR] Node info directory $nodeinfo_dir does not exist. Creating it...\n" unless $QUIET;
+    make_path($nodeinfo_dir) or die "[bbsd] [ERROR] Could not create node info directory $nodeinfo_dir: $!\n";
+}
+
+# Ensure data directory exists
+unless (-d $datadir) {
+    print "[bbsd] [SUPERVISOR] Data directory $datadir does not exist. Creating it...\n" unless $QUIET;
+    mkdir $datadir or die "[bbsd] [ERROR] Could not create data directory $datadir: $!\n";
+}
+
+# Set permissions for the data directory recursively
+if (-d $datadir && defined $bbs_uid && defined $bbs_gid) {
+    system("chown -R $config{'unixuser'}:$config{'unixuser'} $datadir $nodes_dir $nodeinfo_dir");
+    system("chmod -R 0750 $datadir $nodes_dir $nodeinfo_dir");
+} else {
+    die "[bbsd] [ERROR] Data directory $datadir does not exist or $config{'unixuser'} user/group could not be created.\n";
+}
+
+
+# --- Maintenance and session routines ---
+sub run_bye_for_node {
+    my ($nodefile) = @_;
+    my $framework = $config{'home'} . "/modules/pb-framework";
+    return unless -f $nodefile;
+    open(my $fh, '<', $nodefile) or return;
+    my $line = <$fh>;
+    close($fh);
+    chomp $line;
+    my ($ip, $nodeid, $pid, $time, $user, $proto, $location) = split(/\|/, $line);
+    return if $pid && kill 0, $pid;
+    my $lockfile = "$config{'home'}$config{'data'}/nodes/$nodeid.lock";
+    unlink $lockfile if -e $lockfile;
+    my $cmd = <<"EOF";
+perl -Mlib=$config{'home'}/modules -e '
+    require "$framework";
+    our %info;
+    our %config;
+    \$config{home}="$config{'home'}";
+    \$info{node} = "$nodeid";
+    \$info{handle} = "$user";
+    \$info{connect} = "$ip";
+    bye();
+'
+EOF
+    system($cmd);
+}
+
+sub session_maintenance {
+    require $config{'home'} . "/modules/pb-framework";
+    my $nodes_dir = $config{'home'} . $config{'nodes'};
+    my $messages_dir = $config{'home'} . $config{'messages'};
+    my $telepub_dir = "$messages_dir/TELEPUB_";
+    my $teleconf_dir = "$messages_dir/teleconf";
+    my $ip = $sysinfo{'ip'} || `hostname -i`; chomp $ip;
+    my $now = time();
+    my $timeout = 1800; # 30 minutes
+    unless ($nodes_dir && -d $nodes_dir) { return; }
+    opendir(my $dh, $nodes_dir) or return;
+    my %active_nodes;
+    while (my $node = readdir($dh)) {
+        next if $node =~ /^\./;
+        my $file = "$nodes_dir/$node";
+        next unless -f $file;
+        $active_nodes{$node} = 1;
+        open(my $fh, '<', $file) or next;
+        my $line = <$fh>;
+        close($fh);
+        chomp $line;
+        my ($nip, $nodeid, $npid, $ntime, $user, $proto, $location) = split(/\|/, $line);
+        if (
+            !defined($npid) || $npid !~ /^\d+$/ ||
+            $user =~ /^CONNECT$/i ||
+            $location =~ /Logging on|Logging in|Heading to Chat|Creating an account/i
+        ) {
+            unlink $file;
+            unlink "$messages_dir/$nodeid.page";
+            unlink "$telepub_dir/$nodeid";
+            my @teleconf = glob("$teleconf_dir/*/$nodeid");
+            unlink @teleconf if @teleconf;
+            my @userfiles = glob("$teleconf_dir/*/users/$nodeid");
+            unlink @userfiles if @userfiles;
+            run_bye_for_node($file);
+            next;
+        }
+        if ($npid && !kill 0, $npid) {
+            unlink $file;
+            unlink "$messages_dir/$nodeid.page";
+            unlink "$telepub_dir/$nodeid";
+            my @teleconf = glob("$teleconf_dir/*/$nodeid");
+            unlink @teleconf if @teleconf;
+            my @userfiles = glob("$teleconf_dir/*/users/$nodeid");
+            unlink @userfiles if @userfiles;
+            run_bye_for_node($file);
+            next;
+        }
+        my $timechk = $now - $ntime;
+        if ($timechk > $timeout) {
+            kill 'HUP', $npid;
+            unlink $file;
+            unlink "$messages_dir/$nodeid.page";
+            unlink "$telepub_dir/$nodeid";
+            my @teleconf = glob("$teleconf_dir/*/$nodeid");
+            unlink @teleconf if @teleconf;
+            my @userfiles = glob("$teleconf_dir/*/users/$nodeid");
+            unlink @userfiles if @userfiles;
+            run_bye_for_node($file);
+        }
+    }
+    closedir($dh);
+    my @pagefiles = glob("$messages_dir/*.page");
+    foreach my $page (@pagefiles) {
+        if ($page =~ /\/(\d+)\.page$/) {
+            my $node = $1;
+            unless ($active_nodes{$node}) {
+                unlink $page;
+            }
+        }
+    }
+    my @teleconf_users_dirs = glob("$teleconf_dir/*/users");
+    foreach my $udir (@teleconf_users_dirs) {
+        opendir(my $udh, $udir) or next;
+        while (my $ufile = readdir($udh)) {
+            next if $ufile =~ /^\./;
+            unless ($active_nodes{$ufile}) {
+                my $full = "$udir/$ufile";
+                unlink $full;
+            }
+        }
+        closedir($udh);
+    }
+}
+
+sub report_active_sessions {
+    require $config{'home'} . "/modules/pb-framework";
+    my $nodes_dir = $config{'home'} . $config{'nodes'};
+    return 0 unless $nodes_dir && -d $nodes_dir;
+    opendir(my $dh, $nodes_dir) or return 0;
+    my @allfiles = readdir($dh);
+    closedir($dh);
+    my @nodefiles;
+    foreach my $f (@allfiles) {
+        next if $f =~ /^\.\.?$/;
+        my $full = "$nodes_dir/$f";
+        push @nodefiles, $f if -f $full;
+    }
+    my @sessions;
+    foreach my $node (@nodefiles) {
+        my $file = "$nodes_dir/$node";
+        open(my $fh, '<', $file) or next;
+        my $line = <$fh>;
+        close($fh);
+        chomp $line;
+        my ($ip, $nodeid, $pid, $time, $user, $proto, $location) = split(/\|/, $line);
+        next unless $user && $user ne "CONNECT" && $user ne "New User";
+        my $idle = int(time() - ($time || 0));
+        push @sessions, {
+            nodeid   => $nodeid,
+            user     => $user,
+            proto    => $proto,
+            ip       => $ip,
+            pid      => $pid,
+            idle     => $idle,
+            location => $location,
+        };
+    }
+    my $count = scalar(@sessions);
+    my $hash = join('|', map { join(',', $_->{nodeid}, $_->{user}, $_->{proto}, $_->{ip}, $_->{pid}, $_->{idle}, $_->{location}) } sort { $a->{nodeid} <=> $b->{nodeid} } @sessions);
+    {
+        no strict 'refs';
+        no warnings 'once';
+        our $last_reported_count;
+        our $last_session_hash;
+        if ($VERBOSE) {
+            foreach my $s (@sessions) {
+                printf "[bbsd] [SESSION] Node:%s User:%s Proto:%s IP:%s PID:%s Idle:%ss Location:%s\n",
+                    $s->{nodeid}, $s->{user}, $s->{proto}, $s->{ip}, $s->{pid}, $s->{idle}, $s->{location} unless $QUIET;
+            }
+        } else {
+            if (!defined $last_reported_count || $count > $last_reported_count) {
+                my $recent_user = "";
+                my $recent_ip = "";
+                my $recent_node = "";
+                foreach my $s (@sessions) {
+                    if ($s->{user} && $s->{idle} < 5) {
+                        $recent_user = $s->{user};
+                        $recent_ip = $s->{ip};
+                        $recent_node = $s->{nodeid};
+                        last;
+                    }
+                }
+                if ($recent_user) {
+                    print "[bbsd] [SERVER] User logged in: $recent_user (Node $recent_node, IP $recent_ip)\n" unless $QUIET;
+                }
+            }
+            $last_reported_count = $count;
+        }
+    }
+    if (!defined $last_active_count || $count != $last_active_count) {
+        print "[bbsd] [SERVER] Connected users: $count\n" unless $QUIET;
+    }
+    $last_active_count = $count;
+    $last_active_hash = $hash;
+    return 0;
+}
+
+sub handle_duplicate_ip {
+    my ($peerhost, $pid) = @_;
+    my $iplist_file = "$config{'home'}$config{'data'}/iplist";
+    my $nodupes = defined $config{'nodupes'} ? $config{'nodupes'} : 0;
+    if ($nodupes eq "0") {
+        print "[bbsd] [INFO] Duplicate IP check disabled (nodupes=0).\n" unless $QUIET;
+        return 0;
+    }
+
+    unless (-e $iplist_file) {
+        open(my $out, '>', $iplist_file);
+        print $out "127.0.0.1\n";
+        close($out);
+    }
+
+    my @new_iplist;
+    my $is_duplicate = 0;
+
+    if (-e $iplist_file) {
+        lockfile($iplist_file);
+        open(my $in, '<', $iplist_file);
+        while (my $line = <$in>) {
+            chomp $line;
+            my ($existing_pid, $existing_ip) = split(/:/, $line);
+            next unless defined $existing_ip && defined $existing_pid;
+            # Remove stale PIDs
+            if ($existing_pid =~ /^\d+$/ && !kill 0, $existing_pid) {
+                next;
+            }
+            if ($existing_ip eq $peerhost) {
+                print "[bbsd] [ERROR] Duplicate connection from IP $peerhost. Killing PID $existing_pid.\n" unless $QUIET;
+                kill 15, $existing_pid;
+                $is_duplicate = 1;
+                next;
+            }
+            push @new_iplist, "$existing_pid:$existing_ip";
+        }
+        close($in);
+
+        if (!$is_duplicate) {
+            push @new_iplist, "$pid:$peerhost";
+            print "[bbsd] [INFO] Added $peerhost (PID $pid) to IP list.\n" unless $QUIET;
+        }
+
+        open(my $out, '>', $iplist_file);
+        print $out "$_\n" for @new_iplist;
+        close($out);
+        unlockfile($iplist_file);
+
+        if ($is_duplicate) {
+            print "[bbsd] [ERROR] Connection from $peerhost rejected (duplicate IP).\n" unless $QUIET;
+            return 1;
+        }
+    } else {
+        print "[bbsd] [WARN] Could not open IP list file $iplist_file for duplicate check.\n" unless $QUIET;
+    }
+
+    return 0;
+}
+
+sub cleanup_iplist {
+    my ($pid) = @_;
+    my $iplist_file = "$config{'home'}$config{'data'}/iplist";
+    return unless -e $iplist_file;
+    lockfile($iplist_file);
+    open(my $in, '<', $iplist_file) or do {
+        unlockfile($iplist_file);
+        return;
+    };
+    my @lines = <$in>;
+    close($in);
+    open(my $out, '>', $iplist_file) or do {
+        unlockfile($iplist_file);
+        return;
+    };
+    foreach my $line (@lines) {
+        chomp $line;
+        my ($existing_pid, $existing_ip) = split(/:/, $line);
+        # Remove stale PIDs and this PID
+        next if $existing_pid == $pid;
+        next if ($existing_pid =~ /^\d+$/ && !kill 0, $existing_pid);
+        print $out "$line\n";
+    }
+    close($out);
+    unlockfile($iplist_file);
+}
+
+
+# --- services.d support: launch each executable in its own thread at startup ---
+sub run_startupd_programs {
+    my $startupd_dir = $config{'home'} . "/services.d";
+    unless (-d $startupd_dir) {
+        print "[bbsd] [INFO] Creating missing $startupd_dir\n" unless $QUIET;
+        make_path($startupd_dir) or do {
+            print "[bbsd] [WARN] Could not create $startupd_dir: $!\n" unless $QUIET;
+            return;
+        };
+    }
+    opendir(my $sdh, $startupd_dir) or do {
+        print "[bbsd] [WARN] Could not open $startupd_dir: $!\n" unless $QUIET;
+        return;
+    };
+    while (my $file = readdir($sdh)) {
+        next if $file =~ /^\./;
+        my $full = "$startupd_dir/$file";
+        next unless -f $full && -x $full;
+        my $thr = threads->create(sub {
+            print "[bbsd] [STARTUPD] Launching $full as nobody\n" unless $QUIET;
+            system("su -s /bin/sh nobody -c '$full'");
+            print "[bbsd] [STARTUPD] $full exited with code $?\n" unless $QUIET;
+        });
+        $thr->detach;
+    }
+    closedir($sdh);
+}
+
+# --- Hourly and Daily.d support ---
+
+sub run_hourly_programs {
+    my $hourly_dir = $config{'home'} . "/hourly.d";
+    unless (-d $hourly_dir) {
+        print "[bbsd] [INFO] Creating missing $hourly_dir\n" unless $QUIET;
+        make_path($hourly_dir) or do {
+            print "[bbsd] [WARN] Could not create $hourly_dir: $!\n" unless $QUIET;
+            return;
+        };
+    }
+    opendir(my $hdh, $hourly_dir) or do {
+        print "[bbsd] [WARN] Could not open $hourly_dir: $!\n" unless $QUIET;
+        return;
+    };
+    while (my $file = readdir($hdh)) {
+        next if $file =~ /^\./;
+        my $full = "$hourly_dir/$file";
+        next unless -f $full && -x $full;
+        my $thr = threads->create(sub {
+            print "[bbsd] [HOURLY] Launching $full as nobody\n" unless $QUIET;
+            system("su -s /bin/sh nobody -c '$full'");
+            print "[bbsd] [HOURLY] $full exited with code $?\n" unless $QUIET;
+        });
+        $thr->detach;
+    }
+    closedir($hdh);
+}
+
+sub run_daily_programs {
+    my $daily_dir = $config{'home'} . "/daily.d";
+    unless (-d $daily_dir) {
+        print "[bbsd] [INFO] Creating missing $daily_dir\n" unless $QUIET;
+        make_path($daily_dir) or do {
+            print "[bbsd] [WARN] Could not create $daily_dir: $!\n" unless $QUIET;
+            return;
+        };
+    }
+    opendir(my $ddh, $daily_dir) or do {
+        print "[bbsd] [WARN] Could not open $daily_dir: $!\n" unless $QUIET;
+        return;
+    };
+    while (my $file = readdir($ddh)) {
+        next if $file =~ /^\./;
+        my $full = "$daily_dir/$file";
+        next unless -f $full && -x $full;
+        my $thr = threads->create(sub {
+            print "[bbsd] [DAILY] Launching $full as nobody\n" unless $QUIET;
+            system("su -s /bin/sh nobody -c '$full'");
+            print "[bbsd] [DAILY] $full exited with code $?\n" unless $QUIET;
+        });
+        $thr->detach;
+    }
+    closedir($ddh);
+}
+
+# --- Scheduler thread for hourly and daily jobs ---
+threads->create(sub {
+    my $last_hour = -1;
+    my $last_day = -1;
+    while (1) {
+        my ($sec, $min, $hour, $mday, $mon, $year) = localtime();
+        # Run hourly.d at the top of the hour
+        if ($min == 0 && $hour != $last_hour) {
+            $last_hour = $hour;
+            run_hourly_programs();
+        }
+        # Run daily.d at DAILY_RUN_HOUR (default: midnight)
+        if ($hour == $DAILY_RUN_HOUR && $min == 0 && $mday != $last_day) {
+            $last_day = $mday;
+            run_daily_programs();
+        }
+        sleep 30; # Check every 30 seconds
+    }
+})->detach();
+
+# --- Listener socket ---
+print "[bbsd] [INFO] Starting PhotonBBS BBS Daemon on port $PORT...\n" unless $QUIET;
+my $server = IO::Socket::INET->new(
+    LocalPort => $PORT,
+    Proto     => 'tcp',
+    Listen    => 10,
+    Reuse     => 1,
+) or die "[bbsd] [ERROR] Cannot listen on port $PORT: $!";
+print "[bbsd] [INFO] Listening on port $PORT.\n" unless $QUIET;
+
+# --- services.d: launch programs before initial maintenance ---
+run_startupd_programs();
+
+# --- Initial maintenance ---
+print "[bbsd] [SUPERVISOR] Performing initial session maintenance...\n" unless $QUIET;
+session_maintenance();
+report_active_sessions();
+
+# Clean IP list if no users are logged in
+my $iplist_file = "$config{'home'}$config{'data'}/iplist";
+opendir(my $dh, $nodes_dir) or die "[bbsd] [ERROR] Could not open nodes directory: $!";
+my @active_nodes = grep { -f "$nodes_dir/$_" } readdir($dh);
+closedir($dh);
+if (scalar(@active_nodes) == 0 && -e $iplist_file) {
+    print "[bbsd] [SUPERVISOR] No active users. Cleaning IP list.\n" unless $QUIET;
+    unlink $iplist_file or warn "[bbsd] [ERROR] Could not remove IP list: $!";
+}
+
+# --- Track all child PIDs ---
+my %child_pids;
+
+sub kill_tree {
+    my ($root_pid, $signal) = @_;
+    my %children;
+    open(my $ps, "-|", "ps -eo pid,ppid") or return;
+    while (<$ps>) {
+        next if /^ *PID/;
+        my ($pid, $ppid) = split;
+        push @{ $children{$ppid} }, $pid;
+    }
+    close($ps);
+
+    my @to_kill = ($root_pid);
+    my %seen;
+    while (@to_kill) {
+        my $pid = shift @to_kill;
+        next if $seen{$pid}++;
+        if ($children{$pid}) {
+            push @to_kill, @{ $children{$pid} };
+        }
+        kill $signal, $pid if $pid != $$;
+    }
+}
+
+# --- Signal handler for clean shutdown ---
+sub shutdown_gracefully {
+    print "[bbsd] [SUPERVISOR] Shutdown signal received. Sending HUP to all children...\n" unless $QUIET;
+    foreach my $cpid (keys %child_pids) {
+        if (kill 0, $cpid) {
+            print "[bbsd] [SUPERVISOR] Sending SIGHUP to child $cpid\n" unless $QUIET;
+            kill_tree($cpid, 'HUP');
+        }
+    }
+    my $wait_time = 0;
+    while (keys %child_pids && $wait_time < 5) {
+        my $zpid = waitpid(-1, WNOHANG);
+        if ($zpid > 0) {
+            delete $child_pids{$zpid};
+        } else {
+            sleep 1;
+            $wait_time++;
+        }
+    }
+    foreach my $cpid (keys %child_pids) {
+        print "[bbsd] [SUPERVISOR] Forcibly killing child $cpid\n" unless $QUIET;
+        kill_tree($cpid, 'KILL');
+    }
+    while (keys %child_pids) {
+        my $zpid = wait();
+        delete $child_pids{$zpid} if $zpid > 0;
+    }
+    print "[bbsd] [SUPERVISOR] All children exited. Shutting down.\n" unless $QUIET;
+    exit 0;
+}
+
+# --- Install signal handlers ---
+$SIG{INT}  = \&shutdown_gracefully;
+$SIG{TERM} = \&shutdown_gracefully;
+$SIG{HUP}  = \&shutdown_gracefully;
+
+# --- Reserve the lowest available node number ---
+sub reserve_node_server {
+    my $max_nodes = $config{'totalnodes'};
+    for my $nodeid (1..$max_nodes) {
+        unless (exists $node_in_use{$nodeid}) {
+            $node_in_use{$nodeid} = 1;   # Mark node as in use
+            return $nodeid;
+        }
+    }
+    return undef;
+}
+
+# --- Main server loop ---
+while (1) {
+    # Reap any exited children, log, and run maintenance BEFORE waiting for new connections
+    my $did_reap = 0;
+    while ((my $zpid = waitpid(-1, WNOHANG)) > 0) {
+        my $ip = delete $pid_to_ip{$zpid} // 'UNKNOWN';
+        print "[bbsd] [SUPERVISOR] Reaped child $zpid\n" unless $QUIET;
+        print "[bbsd] [SESSION] Session ended (PID $zpid, IP $ip)\n" unless $QUIET;
+        cleanup_iplist($zpid);
+
+        # --- Always free the node number for this PID ---
+        if (exists $pid_to_node{$zpid}) {
+            my $freed_node = $pid_to_node{$zpid};
+            delete $pid_to_node{$zpid};
+            delete $node_in_use{$freed_node};
+            print "[bbsd] [SUPERVISOR] Node $freed_node freed from PID $zpid\n" unless $QUIET;
+        }
+
+        # (Optional: node file cleanup, as before)
+        require $config{'home'} . "/modules/pb-framework";
+        my $nodes_dir = $config{'home'} . $config{'nodes'};
+        opendir(my $dh, $nodes_dir);
+        while (my $node = readdir($dh)) {
+            next if $node =~ /^\./;
+            my $file = "$nodes_dir/$node";
+            next unless -f $file;
+            open(my $fh, '<', $file);
+            my $line = <$fh>;
+            close($fh);
+            my (undef, undef, $npid, undef, undef, undef, undef) = split(/\|/, $line);
+            if ($npid && $npid == $zpid) {
+                print "[bbsd] [SUPERVISOR] Cleaning up node file $file for PID $zpid\n" unless $QUIET;
+                unlink $file;
+            }
+        }
+        closedir($dh);
+
+        print "[bbsd] [SUPERVISOR] Session cleanup complete for PID $zpid\n" unless $QUIET;
+        $did_reap = 1;
+        delete $child_pids{$zpid};
+    }
+
+    print "[bbsd] [SERVER] Waiting for connection...\n" unless $QUIET;
+    my $now = time();
+
+    # Poll for new connections with a short timeout so we can check stats frequently
+    my $client;
+    my $poll_timeout = 1; # seconds
+    my $poll_start = time();
+    while (1) {
+        my $now_inner = time();
+        if ($now_inner - $last_stats >= $STATS_INTERVAL) {
+            report_active_sessions();
+            $last_stats = $now_inner;
+        }
+        if ($now_inner - $last_maint > $MAINT_INTERVAL) {
+            print "[bbsd] [SUPERVISOR] Periodic maintenance triggered.\n";
+            session_maintenance();
+            report_active_sessions();
+            $last_maint = $now_inner;
+        }
+        eval {
+            local $SIG{ALRM} = sub { die "timeout\n" };
+            alarm $poll_timeout;
+            $client = $server->accept;
+            alarm 0;
+        };
+        last if $client;
+    }
+    my $peerhost = eval { $client->peerhost } // 'UNKNOWN';
+    print "[bbsd] [SERVER] Accepted connection from $peerhost\n" unless $QUIET;
+
+    session_maintenance();
+    report_active_sessions();
+
+    # --- Reserve node number in parent and pass to child ---
+    my $nodeid = reserve_node_server();
+    unless (defined $nodeid) {
+        print "[bbsd] [ERROR] No available nodes!\n";
+        close($client);
+        next;
+    }
+
+    my $session_pid = fork();
+    if (!defined $session_pid) {
+        print "[bbsd] [ERROR] Fork failed!\n";
+        close($client);
+        delete $node_in_use{$nodeid};
+        next;
+    }
+    if ($session_pid == 0) {
+        # --- SESSION PROCESS (no intermediate child) ---
+        close($server);
+
+        $ENV{PHOTONBBS_NODEID} = $nodeid;
+
+        if (handle_duplicate_ip($peerhost, $$)) {
+            print "[bbsd] [ERROR] Duplicate IP detected. Terminating session.\n" unless $QUIET;
+            exit 1;
+        }
+
+        print "[bbsd] [SERVER] Assigned node $nodeid to connection from $peerhost (PID $$)\n" unless $QUIET;
+
+        # --- BBS client logic (unchanged) ---
+        my $banned_ip_file = "$config{'home'}$config{'data'}/banned_ip";
+        if (-e $banned_ip_file) {
+            open(my $fh, '<', $banned_ip_file);
+            while (my $line = <$fh>) {
+                chomp $line;
+                if ($peerhost =~ /$line/i) {
+                    print "[bbsd] [ERROR] [$$] Connection from banned IP $peerhost. Terminating.\n" unless $QUIET;
+                    close($fh);
+                    exit 1;
+                }
+            }
+            close($fh);
+        }
+        my $iplist_file = "$config{'home'}$config{'data'}/iplist";
+        if (($config{'nodupes'} // "0") eq "1") {
+            if (-e $iplist_file) {
+                lockfile($iplist_file);
+                open(my $in, '<', $iplist_file);
+                my @iplist = <$in>;
+                close($in);
+                unlockfile($iplist_file);
+                foreach my $line (@iplist) {
+                    chomp $line;
+                    my ($pid, $ip) = split(/:/, $line);
+                    if ($ip eq $peerhost) {
+                        print "[bbsd] [ERROR] [$$] Duplicate connection from IP $peerhost. Terminating.\n" unless $QUIET;
+                        exit 1;
+                    }
+                }
+            }
+            lockfile($iplist_file);
+            open(my $out, '>>', $iplist_file);
+            print $out "$$:$peerhost\n";
+            close($out);
+            unlockfile($iplist_file);
+        }
+        my ($bbs_uid, $bbs_gid);
+        $bbs_uid = getpwnam($config{'unixuser'});
+        $bbs_gid = getgrnam($config{'unixuser'});
+        if (defined $bbs_uid && defined $bbs_gid) {
+            open(my $null, '>', '/dev/null');
+            open(STDOUT, '>&', fileno($null));
+            open(STDERR, '>&', fileno($null));
+            $EGID = $GID = $bbs_gid;
+            $EUID = $UID = $bbs_uid;
+            close($null);
+        } else {
+            print "[bbsd] [ERROR] [$$] Could not drop privileges to $config{'unixuser'}\n" unless $QUIET;
+            exit 1;
+        }
+        open(STDIN,  "<&", fileno($client));
+        open(STDOUT, ">&", fileno($client));
+        open(STDERR, ">&", fileno($client));
+        close($client);
+        $ENV{TERM} = "ansi";
+        $ENV{HOME} = $config{'home'};
+        my $remote_ip = $peerhost;
+        my $protocol = "TELNET";
+        my $nodeid = $ENV{PHOTONBBS_NODEID}; # Use nodeid from parent
+        my $client_cmd = "$config{'home'}/bin/photonbbs-client $protocol $remote_ip $nodeid";
+        my @telnetd_args;
+        if ($version_output =~ /telnetd \[-debug/) {
+            # in.telnetd (Rocky/RHEL)
+            my @client_parts = split(/\s+/, $client_cmd);
+            @telnetd_args = ("-N", "-h", "-n", "-L", $client_parts[0], $protocol, $remote_ip, $nodeid);
+        } elsif ($version_output =~ /BusyBox/) {
+            @telnetd_args = ("-l", $client_cmd);
+        } else {
+            # BSD/Arch telnetd
+            @telnetd_args = ("-E", $client_cmd, "-h");
+        }
+
+        exec { $TELNETD_BIN } $TELNETD_BIN, @telnetd_args
+            or do {
+                print "[bbsd] [ERROR] [$$] Could not start the BBS client process: $!\n" unless $QUIET;
+                exit 1;
+            };
+        exit 1;
+    } else {
+        # --- PARENT ---
+        close($client);
+        print "[bbsd] [SERVER] Spawned session $session_pid (node $nodeid) for new connection.\n" unless $QUIET;
+        $pid_to_ip{$session_pid} = $peerhost;
+        $child_pids{$session_pid} = 1;
+        $pid_to_node{$session_pid} = $nodeid; # Track node assignment in parent
+    }
+}

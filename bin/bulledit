@@ -25,12 +25,12 @@ if (-e "/etc/default/photonbbs") {
 
 chomp ($sysinfo{'host'}=`hostname`);
 
-require ($config{'home'}."/modules/framework.pl");
-require ($config{'home'}."/modules/usertools.pl");
+require ($config{'home'}."/modules/pb-framework");
+require ($config{'home'}."/modules/pb-usertools");
 
 $|=1;
 
-$node=@ARGV[2];
+$node=@ARGV[1];
 if (-e "$config{'doors'}/nodes/$node/fusiondoor") {
   open (in,"<$config{'doors'}/nodes/$node/fusiondoor");
   while (<in>) {

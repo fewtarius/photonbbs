@@ -4,24 +4,36 @@
 @THEMECLR/ACTION <ACTIONS>         @BGNPerform <action>                    @USERCLR...  @THEMECLR/A
 @THEMECLR/WHISPER <WHO> <MESSAGE>  @BGNSend private message                @USERCLR...  @THEMECLR/W
 @THEMECLR/BROADCAST <MESSAGE>      @BGNSend a message to all (ChanOp Only) @USERCLR...  @THEMECLR/R
+@THEMECLR/PROFILE <USER>           @BGNView another user's profile         @USERCLR...  @THEMECLR/PROFILE
+@THEMECLR/IGNORE <USER>            @BGNIgnore messages from a user         @USERCLR...  @THEMECLR/IGNORE
+@THEMECLR/UNIGNORE <USER>          @BGNStop ignoring a user                @USERCLR...  @THEMECLR/UNIGNORE
 
 @USERCLRSystem Commands ..
-@THEMECLR/USERS                    @BGNWho is logged into the system       @USERCLR...  @THEMECLR #
+@THEMECLR/USERS                    @BGNWho is logged into the system (shows idle/status) @USERCLR...  @THEMECLR #
 @THEMECLR/SCAN                     @BGNLocate chat users                   @USERCLR...  @THEMECLR/S
-@THEMECLR/CHANNELS                 @BGNShow available channels             @USERCLR...  @THEMECLR/C
+@THEMECLR/CHANNELS                 @BGNShow available channels (with descriptions) @USERCLR...  @THEMECLR/C
 @THEMECLR/ONELINERS                @BGNWrite on the wall                   @USERCLR...  @THEMECLR %
 @THEMECLR/BULLETINS                @BGNRead System Bulletins               @USERCLR...  @THEMECLR @
+@THEMECLR/QUIT                     @BGNExit Teleconference                 @USERCLR...  @THEMECLR !
 
 @USERCLRRoom Commands ..
 @THEMECLR/JOIN <ROOM>              @BGNJoins room <room>                   @USERCLR...  @THEMECLR/J
 @THEMECLR/BAN <USER>               @BGN(UN)Bans <user> from room           @USERCLR...  @THEMECLR/B
+@THEMECLR/KICK <USER>              @BGNRemove user from room (ChanOp Only) @USERCLR...  @THEMECLR/KICK
+@THEMECLR/MUTE <USER>              @BGNMute user in room (ChanOp Only)     @USERCLR...  @THEMECLR/MUTE
+@THEMECLR/UNMUTE <USER>            @BGNUnmute user in room (ChanOp Only)   @USERCLR...  @THEMECLR/UNMUTE
 @THEMECLR/HIDE                     @BGN(UN)Hides room from channel scan    @USERCLR...  @THEMECLR/H
 @THEMECLR/OP <USER>                @BGN(UN)Assign a user as a ChanOp       @USERCLR...  @THEMECLR/O
 @THEMECLR/SSL                      @BGN(UN)Enforce SSH on room             @USERCLR...  @THEMECLR/E
 @THEMECLR/PRIVATE                  @BGN(UN)Sets a room PRIVATE             @USERCLR...  @THEMECLR/V
 @THEMECLR/ALLOW <USER>             @BGN(UN)Allow <user(s)> in Private room @USERCLR...  @THEMECLR/L
 @THEMECLR/TOPIC                    @BGN(UN)Set a channel topic             @USERCLR...  @THEMECLR/T
+@THEMECLR/TOPICHIST                @BGNShow channel topic history          @USERCLR...  @THEMECLR/TOPICHIST
 @THEMECLR/STATUS                   @BGNShow room status                    @USERCLR...  @THEMECLR/$
+@THEMECLR/CHANPW <PASSWORD>        @BGNSet a password for the channel      @USERCLR...  @THEMECLR/CHANPW
+@THEMECLR/CHANPWREMOVE             @BGNRemove channel password             @USERCLR...  @THEMECLR/CHANPWREMOVE
+@THEMECLR/CHANDESC <DESC>          @BGNSet channel description             @USERCLR...  @THEMECLR/CHANDESC
+@THEMECLR/CHANENTRYEXIT <on|off>   @BGNToggle entry/exit notifications     @USERCLR...  @THEMECLR/CHANENTRYEXIT
 
 @USERCLRUser Settings ..
 @THEMECLR/INFO                     @BGNDisplay your user settings
@@ -37,12 +49,16 @@
   @THEMECLRDEFAULT                 @BGNSets your default channel to the current channel
   @THEMECLRUNIXPWD                 @BGNChange your local unix password (LOCAL only)
 
+@USERCLRMessage Editing ..
+@THEMECLR/EDIT                     @BGNEdit your last message
+@THEMECLR/DELETE                   @BGNDelete your last message
+
 @USERCLRColor .. Add color to chatroom messages, topics, whispers, actions, etc!
 
 @THEMECLR~ATBLK @USERCLR... @THEMECLRBlack          @THEMECLR~ATBBK @USERCLR... @THEMECLRBright Black
 @THEMECLR~ATRED @USERCLR... @THEMECLRRed            @THEMECLR~ATBRD @USERCLR... @THEMECLRBright Red
 @THEMECLR~ATGRN @USERCLR... @THEMECLRGreen          @THEMECLR~ATBGN @USERCLR... @THEMECLRBright Green
-@THEMECLR~ATYLW @USERCLR... @THEMECLRYellow         @THEMECLR~ATBLW @USERCLR... @THEMECLRBright Yellow
+@THEMECLR~ATYLW @USERCLR... @THEMECLRYellow         @THEMECLR~ATBYL @USERCLR... @THEMECLRBright Yellow
 @THEMECLR~ATBLU @USERCLR... @THEMECLRBlue           @THEMECLR~ATBBL @USERCLR... @THEMECLRBright Blue
 @THEMECLR~ATMAG @USERCLR... @THEMECLRMagenta        @THEMECLR~ATBMG @USERCLR... @THEMECLRBright Magenta
 @THEMECLR~ATWHT @USERCLR... @THEMECLRWhite          @THEMECLR~ATBWH @USERCLR... @THEMECLRBright White
@@ -52,3 +68,6 @@
 @INPUTCLR/a sent you a ~ATGRN---~ATBGN{~ATGRN-~ATBGN{~ATRED@
 @THEMECLRbecomes
 @USERCLR@USER sent you a @GRN---@BGN{@GRN-@BGN{@RED@@BGN
+
+@USERCLR
+@THEMECLR/DOORS or /MENU will show you a list of available external commands and door games you can access, based on your security level.
