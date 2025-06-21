@@ -66,6 +66,10 @@ require ($config{'home'}."/modules/pb-oneliners");
 
 chomp ($mytty=`tty`);
 
+unless (-d $config{transient}) {
+    mkdir $config{transient}, 0777;
+}
+
 main: {
   $SIG{KILL}=sub {errorout ("SIGKILL..");};
   $SIG{HUP}=sub {errorout ("SIGHUP..");};

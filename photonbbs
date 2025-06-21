@@ -1,12 +1,12 @@
 #!/usr/bin/perl
-#    PhotonBBS -- Simple BBS / Chat server for *nix
-#    Copyright (C) 2002-present, Fewtarius
+# PhotonBBS -- Simple BBS / Chat server for *nix
+# Copyright (C) 2002-present, Fewtarius
 
 $|=1;
 use strict;
 use warnings;
 use IO::Socket::INET;
-use POSIX ();
+use POSIX qw(:sys_wait_h);
 use File::Basename;
 use Time::HiRes qw(time sleep);
 use POSIX qw(:sys_wait_h);
@@ -96,7 +96,7 @@ Options:
   --daemon     Run as background daemon
   --verbose    Verbose session/user reporting
   --quiet      Suppress all output except errors
-  --local      Run bin/photonbbs-client directly for local use
+  --local      Run sbin/photonbbs-client directly for local use
   --help, -h   Show this help message
 
 EOT
@@ -140,7 +140,7 @@ if ($DAEMON) {
 }
 
 if ($LOCAL) {
-    print "[bbsd] [INFO] Running bin/photonbbs-client in local mode...\n" unless $QUIET;
+    print "[bbsd] [INFO] Running sbin/photonbbs-client in local mode...\n" unless $QUIET;
     require $config{'home'} . "/modules/pb-framework";
     session_maintenance();
     report_active_sessions();
@@ -153,7 +153,7 @@ if ($LOCAL) {
     } else {
         die "[bbsd] [ERROR] Could not drop privileges to $config{'unixuser'}.\n";
     }
-    my $bbs_script = "$config{'home'}/bin/photonbbs-client";
+    my $bbs_script = "$config{'home'}/sbin/photonbbs-client";
     if (-x $bbs_script) {
         exec { $bbs_script } $bbs_script;
         die "[bbsd] [ERROR] Failed to execute $bbs_script: $!\n";
@@ -226,7 +226,6 @@ if (-d $datadir && defined $bbs_uid && defined $bbs_gid) {
     die "[bbsd] [ERROR] Data directory $datadir does not exist or $config{'unixuser'} user/group could not be created.\n";
 }
 
-
 # --- Maintenance and session routines ---
 sub run_bye_for_node {
     my ($nodefile) = @_;
@@ -271,7 +270,6 @@ sub session_maintenance {
         next if $node =~ /^\./;
         my $file = "$nodes_dir/$node";
         next unless -f $file;
-        $active_nodes{$node} = 1;
         open(my $fh, '<', $file) or next;
         my $line = <$fh>;
         close($fh);
@@ -282,59 +280,55 @@ sub session_maintenance {
             $user =~ /^CONNECT$/i ||
             $location =~ /Logging on|Logging in|Heading to Chat|Creating an account/i
         ) {
-            unlink $file;
-            unlink "$messages_dir/$nodeid.page";
-            unlink "$telepub_dir/$nodeid";
-            my @teleconf = glob("$teleconf_dir/*/$nodeid");
-            unlink @teleconf if @teleconf;
-            my @userfiles = glob("$teleconf_dir/*/users/$nodeid");
-            unlink @userfiles if @userfiles;
-            run_bye_for_node($file);
+            clean_up_node($file, $nodeid);
             next;
         }
         if ($npid && !kill 0, $npid) {
-            unlink $file;
-            unlink "$messages_dir/$nodeid.page";
-            unlink "$telepub_dir/$nodeid";
-            my @teleconf = glob("$teleconf_dir/*/$nodeid");
-            unlink @teleconf if @teleconf;
-            my @userfiles = glob("$teleconf_dir/*/users/$nodeid");
-            unlink @userfiles if @userfiles;
-            run_bye_for_node($file);
+            clean_up_node($file, $nodeid);
             next;
         }
         my $timechk = $now - $ntime;
         if ($timechk > $timeout) {
             kill 'HUP', $npid;
-            unlink $file;
-            unlink "$messages_dir/$nodeid.page";
-            unlink "$telepub_dir/$nodeid";
-            my @teleconf = glob("$teleconf_dir/*/$nodeid");
-            unlink @teleconf if @teleconf;
-            my @userfiles = glob("$teleconf_dir/*/users/$nodeid");
-            unlink @userfiles if @userfiles;
-            run_bye_for_node($file);
+            clean_up_node($file, $nodeid);
+        } else {
+            $active_nodes{$node} = 1;
         }
     }
     closedir($dh);
-    my @pagefiles = glob("$messages_dir/*.page");
-    foreach my $page (@pagefiles) {
+    clean_inactive_pagefiles(\%active_nodes, $messages_dir);
+    clean_inactive_teleconf_users_dirs(\%active_nodes, $teleconf_dir);
+}
+
+sub clean_up_node {
+    my ($file, $nodeid) = @_;
+    unlink $file;
+    unlink "$config{'home'}$config{'messages'}/$nodeid.page";
+    unlink "$config{'home'}$config{'messages'}/TELEPUB_/$nodeid";
+    my @teleconf = glob("$config{'home'}$config{'messages'}/teleconf/*/$nodeid");
+    unlink @teleconf if @teleconf;
+    my @userfiles = glob("$config{'home'}$config{'messages'}/teleconf/*/users/$nodeid");
+    unlink @userfiles if @userfiles;
+    run_bye_for_node($file);
+}
+
+sub clean_inactive_pagefiles {
+    my ($active_nodes, $messages_dir) = @_;
+    foreach my $page (glob("$messages_dir/*.page")) {
         if ($page =~ /\/(\d+)\.page$/) {
             my $node = $1;
-            unless ($active_nodes{$node}) {
-                unlink $page;
-            }
+            unlink $page unless exists $active_nodes->{$node};
         }
     }
-    my @teleconf_users_dirs = glob("$teleconf_dir/*/users");
-    foreach my $udir (@teleconf_users_dirs) {
+}
+
+sub clean_inactive_teleconf_users_dirs {
+    my ($active_nodes, $teleconf_dir) = @_;
+    foreach my $udir (glob("$teleconf_dir/*/users")) {
         opendir(my $udh, $udir) or next;
         while (my $ufile = readdir($udh)) {
             next if $ufile =~ /^\./;
-            unless ($active_nodes{$ufile}) {
-                my $full = "$udir/$ufile";
-                unlink $full;
-            }
+            unlink "$udir/$ufile" unless exists $active_nodes->{$ufile};
         }
         closedir($udh);
     }
@@ -345,14 +339,8 @@ sub report_active_sessions {
     my $nodes_dir = $config{'home'} . $config{'nodes'};
     return 0 unless $nodes_dir && -d $nodes_dir;
     opendir(my $dh, $nodes_dir) or return 0;
-    my @allfiles = readdir($dh);
+    my @nodefiles = grep { -f "$nodes_dir/$_" } readdir($dh);
     closedir($dh);
-    my @nodefiles;
-    foreach my $f (@allfiles) {
-        next if $f =~ /^\.\.?$/;
-        my $full = "$nodes_dir/$f";
-        push @nodefiles, $f if -f $full;
-    }
     my @sessions;
     foreach my $node (@nodefiles) {
         my $file = "$nodes_dir/$node";
@@ -499,7 +487,6 @@ sub cleanup_iplist {
     close($out);
     unlockfile($iplist_file);
 }
-
 
 # --- services.d support: launch each executable in its own thread at startup ---
 sub run_startupd_programs {
@@ -870,7 +857,7 @@ while (1) {
         my $remote_ip = $peerhost;
         my $protocol = "TELNET";
         my $nodeid = $ENV{PHOTONBBS_NODEID}; # Use nodeid from parent
-        my $client_cmd = "$config{'home'}/bin/photonbbs-client $protocol $remote_ip $nodeid";
+        my $client_cmd = "$config{'home'}/sbin/photonbbs-client $protocol $remote_ip $nodeid";
         my @telnetd_args;
         if ($version_output =~ /telnetd \[-debug/) {
             # in.telnetd (Rocky/RHEL)

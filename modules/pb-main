@@ -103,8 +103,8 @@ sub run_menu_command {
         # --- Signal iamat with the menu description ---
         iamat($info{'handle'}, $desc);
 
-        # --- Look for the executable in bin first, then doorexec ---
-        my $bin_path  = $config{'home'} . "/bin/$arg";
+        # --- Look for the executable in sbin first, then doorexec ---
+        my $bin_path  = $config{'home'} . "/sbin/$arg";
         my $doorexec_path = $config{'home'} . "/doorexec/$arg";
         my $run;
         if (-x $bin_path) {

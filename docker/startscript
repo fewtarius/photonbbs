@@ -39,9 +39,9 @@ fi
 ### Create the nodeinfo directory, this is needed for doors to work.
 ###
 
-if [ ! -d '/appdata/nodes' ]
+if [ ! -d '/dev/shm/photonbbs/doors/nodes' ]
 then
-  mkdir -p /appdata/nodes
+  mkdir -p /dev/shm/photonbbs/doors/nodes
 fi
 
 ###
@@ -49,9 +49,9 @@ fi
 ### to make it available to the doors.
 ###
 
-if [ ! -h '/appdata/doors/nodes' ]
+if [ ! -l '/appdata/doors/nodes' ]
 then
-  mkdir -p /appdata/doors/nodes
+  ln -sf /dev/shm/photonbbs/doors/nodes /appdata/doors/nodes
 fi
 
 ###
