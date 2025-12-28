@@ -1,0 +1,90 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR BEGUILE Command - Attempt to Confuse Target @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  BEGUILE <target>
+
+@DATACLR What it does:@THEMECLR
+  BEGUILE attempts to confuse or distract a monster or NPC, reducing
+  their effectiveness in combat or causing them to ignore you.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - BEGUILE is used on your turn in combat or outside combat.
+  - Roll: d20 + CHA mod; must exceed 16 to succeed.
+  - Some monsters/NPCs are immune to beguile.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - Beguile Roll: d20 + CHA mod
+
+@DATACLR Outcome:@THEMECLR
+  - Success: Target is confused or distracted, may skip a turn or flee.
+  - Failure: Target may become enraged or attack.
+
+@DATACLR Class Features:@THEMECLR
+  - Bards and high-CHA classes have better chance.
+  - All classes can attempt BEGUILE.
+
+@DATACLR Tips:@THEMECLR
+  - Use BEGUILE to escape or gain an advantage.
+  - Not all targets can be beguiled.
+
+@DATACLR Example:@THEMECLR
+  BEGUILE OGRE
+    Rolls d20 + CHA mod. If >16, ogre is confused.
+
+@DATACLR See also:@THEMECLR
+  CHARM, ATTACK, TALK
+
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR Detailed Help for BEGUILE Command @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Description:@THEMECLR
+  The BEGUILE command allows a player to attempt to confuse or
+  distract a target, which can be useful in various situations,
+  especially in combat.
+
+@DATACLR Targeting:@THEMECLR
+  - You can attempt to BEGUILE any creature or NPC that you can see
+  and that has a discernible mind.
+  - Some creatures, like undead or constructs, may be immune.
+
+@DATACLR Combat Usage:@THEMECLR
+  - Using BEGUILE counts as your action for the turn.
+  - If successful, the target may skip their next action or flee
+  from you.
+
+@DATACLR Non-Combat Usage:@THEMECLR
+  - BEGUILE can also be used outside of combat to escape from
+  dangerous situations or to avoid conflict.
+
+@DATACLR Limitations:@THEMECLR
+  - BEGUILE has no effect on targets that are already engaged in
+  combat with you.
+  - The effectiveness of BEGUILE may be reduced if the target is
+  already hostile.
+
+@DATACLR Strategy:@THEMECLR
+  - Use BEGUILE on stronger or more dangerous foes to turn the
+  tide of battle.
+  - Consider using BEGUILE to create openings for allies to
+  attack or to escape from a losing battle.
+
+@DATACLR Roleplaying:@THEMECLR
+  - When using BEGUILE, describe how you attempt to confuse or
+  distract the target.
+  - Creative descriptions may enhance the effectiveness or
+  provide advantages.
+
+@DATACLR Example Scenarios:@THEMECLR
+  - BEGUILE an ogre by mimicking its leader's voice, causing it
+  to hesitate.
+  - Use BEGUILE on a guard to make them forget their
+  instructions, creating a diversion.
+
+@DATACLR See also:@THEMECLR
+  CHARM, ATTACK, TALK, FLEE
+-------------------------------------------------------------------------------

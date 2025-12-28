@@ -1,0 +1,44 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR LOOK Command - Examine Your Surroundings @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  LOOK
+  LOOK <player>
+  LOOK <monster>
+  LOOK <direction>
+
+@DATACLR What it does:@THEMECLR
+  LOOK shows a detailed description of your current room, including exits,
+  objects, treasures, monsters, NPCs, and other players. You can also LOOK at
+  a specific player, monster, or direction for more information.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - LOOK with no arguments shows the room's long description and all visible
+    features.
+  - LOOK <player> shows that player's public stats.
+  - LOOK <monster> shows details about a monster in the room.
+  - LOOK <direction> shows what is visible in that direction (if any).
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None, unless searching for hidden objects (see SEARCH).
+
+@DATACLR Outcome:@THEMECLR
+  - You gain information about your environment and its inhabitants.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use LOOK the same way.
+  - Thieves and Rangers may spot hidden features more easily.
+
+@DATACLR Tips:@THEMECLR
+  - Use LOOK before taking actions in a new room.
+  - LOOK at monsters to assess their strength before attacking.
+
+@DATACLR Example:@THEMECLR
+  LOOK
+    [You see a detailed room description, exits, and a list of present entities.]
+
+@DATACLR See also:@THEMECLR
+  SEARCH, HERE, STATUS, MAP
+-------------------------------------------------------------------------------

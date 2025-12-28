@@ -1,0 +1,40 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR RUN Command - Attempt to Flee Combat @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  RUN
+
+@DATACLR What it does:@THEMECLR
+  RUN attempts to escape from combat. If successful, you move several
+  rooms away and combat ends. If you fail, your opponent gets a free
+  attack.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - RUN is used on your turn in combat instead of attacking.
+  - Success is based on your DEX and a random roll vs. opponent's level.
+  - Roll: d20 + DEX mod - opponent's level > 10 to succeed.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - Escape Roll: d20 + DEX mod - opponent's level
+
+@DATACLR Outcome:@THEMECLR
+  - Success: You escape and move to a random nearby room.
+  - Failure: Your opponent gets a free attack.
+
+@DATACLR Class Features:@THEMECLR
+  - Thieves and Rangers have higher chance due to high DEX.
+  - All classes can attempt to RUN.
+
+@DATACLR Tips:@THEMECLR
+  - Use RUN when low on HP or outmatched.
+  - Be aware of the risk of a free attack if you fail.
+
+@DATACLR Example:@THEMECLR
+  RUN
+    Rolls d20 + DEX mod - opponent's level. If >10, you escape.
+
+@DATACLR See also:@THEMECLR
+  DODGE, PARRY, GUARD
+-------------------------------------------------------------------------------

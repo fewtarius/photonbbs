@@ -1,0 +1,2557 @@
+our $rooms_debug_enabled = $ENV{PHOTON_ROOMS_DEBUG} // 0;
+
+sub rooms_debug {
+    my ($msg) = @_;
+    return unless $rooms_debug_enabled;
+    my $ts = scalar localtime;
+    print STDERR "[ROOMS DEBUG $ts] $msg\n";
+}
+
+# ============================================================================
+# ROOM CACHE - LRU cache for room data to avoid repeated disk reads
+# ============================================================================
+{
+    my %room_cache;           # Cache storage: roomnum => { data => $room, accessed => time }
+    my $cache_max_size = 500; # Maximum rooms to cache (adjustable)
+    my $cache_hits = 0;
+    my $cache_misses = 0;
+    my $rooms_dat_mtime = 0;  # Track file modification time for invalidation
+    
+    sub room_cache_get {
+        my ($roomnum) = @_;
+        return undef unless exists $room_cache{$roomnum};
+        
+        # Check if rooms.dat has been modified (invalidate cache if so)
+        my $file = "$config{'home'}/$config{'data'}/rooms.dat";
+        my $current_mtime = (stat($file))[9] // 0;
+        if ($current_mtime != $rooms_dat_mtime) {
+            room_cache_clear();
+            $rooms_dat_mtime = $current_mtime;
+            return undef;
+        }
+        
+        $room_cache{$roomnum}{accessed} = time();
+        $cache_hits++;
+        rooms_debug("Cache HIT for room $roomnum (hits=$cache_hits, misses=$cache_misses)");
+        
+        # Return a COPY to prevent cache corruption from modifications
+        return { %{$room_cache{$roomnum}{data}} };
+    }
+    
+    sub room_cache_set {
+        my ($roomnum, $room_data) = @_;
+        return unless defined $room_data && ref($room_data) eq 'HASH';
+        
+        # Evict oldest entries if cache is full
+        if (scalar(keys %room_cache) >= $cache_max_size) {
+            room_cache_evict_oldest(int($cache_max_size * 0.1));  # Evict 10%
+        }
+        
+        # Store a COPY to prevent external modifications affecting cache
+        $room_cache{$roomnum} = {
+            data => { %$room_data },
+            accessed => time(),
+        };
+        $cache_misses++;
+        rooms_debug("Cache SET for room $roomnum (size=" . scalar(keys %room_cache) . ")");
+    }
+    
+    sub room_cache_invalidate {
+        my ($roomnum) = @_;
+        delete $room_cache{$roomnum} if exists $room_cache{$roomnum};
+        rooms_debug("Cache INVALIDATED for room $roomnum");
+    }
+    
+    sub room_cache_clear {
+        %room_cache = ();
+        $cache_hits = 0;
+        $cache_misses = 0;
+        rooms_debug("Cache CLEARED");
+    }
+    
+    sub room_cache_evict_oldest {
+        my ($count) = @_;
+        $count //= 1;
+        my @sorted = sort { $room_cache{$a}{accessed} <=> $room_cache{$b}{accessed} } keys %room_cache;
+        for my $i (0 .. ($count - 1)) {
+            last unless defined $sorted[$i];
+            delete $room_cache{$sorted[$i]};
+        }
+        rooms_debug("Cache EVICTED $count oldest entries");
+    }
+    
+    sub room_cache_stats {
+        my $total = $cache_hits + $cache_misses;
+        my $ratio = $total > 0 ? sprintf("%.1f%%", ($cache_hits / $total) * 100) : "N/A";
+        return {
+            size => scalar(keys %room_cache),
+            max_size => $cache_max_size,
+            hits => $cache_hits,
+            misses => $cache_misses,
+            hit_ratio => $ratio,
+        };
+    }
+}
+# ============================================================================
+
+# Room player registry directory - initialized lazily
+my $room_players_dir;
+
+sub get_room_players_dir {
+    return $room_players_dir if defined $room_players_dir && -d $room_players_dir;
+    
+    $room_players_dir = "$config{transient}/room_players";
+    unless (-d $room_players_dir) {
+        mkdir $room_players_dir, 0777 or warn "Cannot create $room_players_dir: $!";
+    }
+    return $room_players_dir;
+}
+
+sub room_players_file {
+    my ($roomid) = @_;
+    return get_room_players_dir() . "/$roomid.players";
+}
+
+sub monster_currentroom_flag_path {
+    my ($mon) = @_;
+    return "$config{transient}/monster_currentroom_$mon->{id}.flag";
+}
+
+sub read_room_record {
+    my ($roomnum) = @_;
+    return { desc => "You see nothing special.", exits => {} } if !$roomnum || $roomnum < 1;
+    
+    # Check cache first
+    my $cached = room_cache_get($roomnum);
+    return $cached if defined $cached;
+    
+    # Cache miss - read from disk
+    my $file = "$config{'home'}/$config{'data'}/rooms.dat";
+    my $roomrec_len = 1108;  # Updated length for x,y,z coordinates
+
+    unless (-e $file) {
+        writeline($config{'errorcolor'}."There is no map data available for the game, please contact your administrator and ask them to generate game data.".$config{'themecolor'}, 1);
+        exit;
+    }
+
+    my %room;
+    open(my $fh, "<:raw", $file) or do {
+        return { desc => "You see nothing special.", exits => {} };
+    };
+    flock($fh, LOCK_SH);
+    my $seekpos = ($roomnum - 1) * $roomrec_len;
+    seek($fh, $seekpos, SEEK_SET);
+    read($fh, my $buf, $roomrec_len);
+    flock($fh, LOCK_UN);
+    close($fh);
+
+    # Parse existing fields
+    $room{action}      = unpack("s", substr($buf, 0, 2));
+    $room{direct}      = substr($buf, 2, 48);
+    $room{flags}       = substr($buf, 50, 40);
+    $room{longdesc}    = substr($buf, 90, 400);
+    $room{monsterclass}= unpack("s", substr($buf, 490, 2));
+    $room{object}      = substr($buf, 492, 40);
+    $room{hiddenobj}   = substr($buf, 532, 40);
+    $room{shortdesc}   = substr($buf, 572, 80);
+    $room{treasure}    = substr($buf, 652, 40);
+    $room{trecharges}  = substr($buf, 692, 40);
+    $room{container}   = substr($buf, 732, 246);
+    $room{container_permanent} = unpack("s", substr($buf, 978, 2));
+    $room{region}      = substr($buf, 980, 16);
+    $room{feature}     = substr($buf, 996, 16);
+    $room{town_name}   = substr($buf, 1012, 24);
+    $room{castle_name} = substr($buf, 1036, 24);
+    $room{river_name}  = substr($buf, 1060, 24);
+
+    # Add new fields for elevation and biome
+    $room{elevation}   = unpack("f<", substr($buf, 1084, 4));  # Little-endian float
+    $room{biome}       = substr($buf, 1088, 8);                # 8-byte biome string
+    
+    # Add explicit coordinate fields for caves/dungeons (new fields)
+    $room{coord_x}     = unpack("l<", substr($buf, 1096, 4));  # Signed 32-bit int
+    $room{coord_y}     = unpack("l<", substr($buf, 1100, 4));  # Signed 32-bit int
+    $room{coord_z}     = unpack("l<", substr($buf, 1104, 4));  # Signed 32-bit int
+
+    # Clean up string fields
+    for my $f (qw(region feature town_name castle_name river_name biome)) {
+        $room{$f} =~ s/[\0 ]+$// if defined $room{$f};
+    }
+
+    # Parse exits
+    my %exits;
+    for my $i (0..11) {
+        my $dir = $dirs[$i];
+        my $bytes = substr($room{direct}, $i*4, 4);
+        my $val = unpack("f<", $bytes);
+        my $ival = int($val + 0.0001);
+        if ($ival > 0) {
+            $exits{$dir} = $ival;
+        }
+    }
+    $room{exits} = \%exits;
+
+    # Clean up descriptions
+    $room{longdesc} =~ s/\s+$//mg;     
+    $room{longdesc} =~ s/^\s+//mg;     
+    $room{longdesc} =~ s/\0+$//;       
+    $room{longdesc} =~ s/[ \t]+$//mg;  
+
+    $room{shortdesc} =~ s/\0+$//;
+    $room{shortdesc} =~ s/^\s+//mg;
+    $room{shortdesc} =~ s/[ \t]+$//mg;
+
+    # Set room number for reference
+    $room{roomnum} = $roomnum;
+
+    rooms_debug("Room $roomnum: Elevation=$room{elevation}, Biome=$room{biome}") if $rooms_debug_enabled;
+
+    # Cache the room data before returning
+    room_cache_set($roomnum, \%room);
+    
+    return \%room;
+}
+
+sub get_max_room {
+    my $file = "$config{'home'}/$config{'data'}/rooms.dat";
+    my $roomrec_len = 1108;  # Must match read_room_record
+    return 1 unless -e $file;
+    my $size = -s $file;
+    my $count = int($size / $roomrec_len);
+    return $count > 0 ? $count : 1;
+}
+
+sub save_room_record {
+    my ($roomnum, $room) = @_;
+    return 0 unless $roomnum && $room;
+    
+    # Normalize roomnum if it's a reference
+    $roomnum = $room->{roomnum} if ref($roomnum);
+    
+    my $roomrec_len = 1096;  # Updated for elevation and biome
+    my $file = "$config{'home'}/$config{'data'}/rooms.dat";
+    
+    # Open with exclusive lock
+    open(my $fh, "+<:raw", $file) or return 0;
+    flock($fh, LOCK_EX);
+    
+    my $seekpos = ($roomnum - 1) * $roomrec_len;
+    seek($fh, $seekpos, SEEK_SET) or do {
+        flock($fh, LOCK_UN);
+        close($fh);
+        return 0;
+    };
+    
+    # Pack the room data
+    my $buf = '';
+    $buf .= pack("s", $room->{action} // 0);
+    $buf .= $room->{direct}      // ("\0" x 48);
+    $buf .= $room->{flags}       // ("\0" x 40);
+    $buf .= $room->{longdesc}    // ("\0" x 400);
+    $buf .= pack("s", $room->{monsterclass} // 0);
+    $buf .= $room->{object}      // ("\0" x 40);
+    $buf .= $room->{hiddenobj}   // ("\0" x 40);
+    $buf .= $room->{shortdesc}   // ("\0" x 80);
+    
+    # CRITICAL FIX: Proper handling of treasure and trecharges fields
+    # Parse existing binary data into arrays
+    my @treasures = (0) x 20;
+    my @charges = (0) x 20;
+    
+    if ($room->{treasure} && length($room->{treasure}) >= 40) {
+        for my $i (0..19) {
+            $treasures[$i] = unpack("s", substr($room->{treasure}, $i*2, 2));
+        }
+    }
+    
+    if ($room->{trecharges} && length($room->{trecharges}) >= 40) {
+        for my $i (0..19) {
+            $charges[$i] = unpack("s", substr($room->{trecharges}, $i*2, 2));
+        }
+    }
+    
+    # Pack treasures and charges as arrays of shorts (exactly like the generator)
+    $buf .= pack("s<20", @treasures);
+    $buf .= pack("s<20", @charges);
+    
+    $buf .= $room->{container}   // ("\0" x 246);
+    $buf .= pack("s", $room->{container_permanent} // 0);
+    
+    my $region = $room->{region} // '';
+    $region = substr($region,0,16); $region .= " "x(16-length($region));
+    $buf .= $region;
+    
+    my $feature = $room->{feature} // '';
+    $feature = substr($feature,0,16); $feature .= " "x(16-length($feature));
+    $buf .= $feature;
+    
+    my $town_name = $room->{town_name} // '';
+    $town_name = substr($town_name,0,24); $town_name .= " "x(24-length($town_name));
+    $buf .= $town_name;
+    
+    my $castle_name = $room->{castle_name} // '';
+    $castle_name = substr($castle_name,0,24); $castle_name .= " "x(24-length($castle_name));
+    $buf .= $castle_name;
+    
+    my $river_name = $room->{river_name} // '';
+    $river_name = substr($river_name,0,24); $river_name .= " "x(24-length($river_name));
+    $buf .= $river_name;
+    
+    # Add elevation and biome fields
+    $buf .= pack("f<", $room->{elevation} // 0.0);  # Little-endian float
+    
+    my $biome = $room->{biome} // '';
+    $biome = substr($biome,0,8); $biome .= " "x(8-length($biome));
+    $buf .= $biome;
+    
+    # Pad to correct length if needed
+    $buf .= "\0" x ($roomrec_len - length($buf)) if length($buf) < $roomrec_len;
+    
+    # Write the data and ensure it's flushed
+    my $written = print $fh $buf;
+    $fh->flush();
+    
+    flock($fh, LOCK_UN);
+    close($fh);
+    
+    # Invalidate cache for this room since it was modified
+    room_cache_invalidate($roomnum);
+    
+    return $written;
+}
+
+sub parse_room_objects {
+    my ($room) = @_;
+    my @objects;
+    for my $i (0..19) {
+        my $idx = unpack("s", substr($room->{object}, $i*2, 2));
+        my $hidden = unpack("s", substr($room->{hiddenobj}, $i*2, 2));
+        next if $idx <= 0;
+        push @objects, { idx => $idx, hidden => $hidden };
+    }
+    return \@objects;
+}
+
+sub parse_room_treasures {
+    my ($room) = @_;
+    my @treasures;
+    for my $i (0..19) {
+        my $idx = unpack("s", substr($room->{treasure}, $i*2, 2));
+        next unless $idx > 0;  # Skip empty slots
+        
+        my $charges = unpack("s", substr($room->{trecharges}, $i*2, 2)) || 1;
+        push @treasures, { idx => $idx, charges => $charges };
+    }
+    return \@treasures;
+}
+
+
+sub parse_room_flags {
+    my ($room) = @_;
+    my @flags;
+    for my $i (0..19) {
+        my $flag = unpack("s", substr($room->{flags}, $i*2, 2));
+        push @flags, $flag;
+    }
+    return \@flags;
+}
+
+sub debug_room_objects {
+    my ($room) = @_;
+    my $objs = parse_room_objects($room);
+    my $flags = parse_room_flags($room);
+    
+    writeline($config{'systemcolor'}."[Room Object Debug]".$config{'themecolor'}, 1);
+    
+    for my $i (0..$#$objs) {
+        my $o = $objs->[$i];
+        my $flag = $flags->[$i] // 0;
+        my $obj_name = "Unknown";
+        
+        if ($o->{idx} && $o->{idx} > 0) {
+            my $obj = read_object_record($o->{idx});
+            $obj_name = $obj->{name} || "No name";
+        }
+        
+        writeline(sprintf(
+            $config{'datacolor'}."Object %d: Index=%d, Flag=%d, Name=%s".$config{'themecolor'}, 
+            $i, $o->{idx}, $flag, $obj_name
+        ), 1);
+    }
+}
+
+sub show_room_objects {
+    my ($room) = @_;
+    return unless $room;
+    
+    # Get the room record directly to ensure consistency
+    my $rec = read_room_record($room);
+    return unless $rec;
+    
+    my @lines;
+    
+    # Process objects and flags together to ensure alignment
+    for my $i (0..19) {
+        my $obj_idx = $rec->{"objects"}[$i];
+        my $flag = $rec->{"hiddenobj"}[$i] // 0;
+        
+        # Skip if object index is 0 or invalid
+        next unless $obj_idx && $obj_idx > 0;
+        
+        # Skip hidden, special, or invalid objects
+        next if $flag == 1; # Hidden
+        next if $flag == 4; # Special
+        next if $flag == 5; # Special hidden
+        
+        my $obj = read_object_record($obj_idx);
+        next unless $obj && ref($obj) eq 'HASH';
+        next unless $obj->{name} && length($obj->{name}) > 0;
+        
+        push @lines, $obj->{name};
+    }
+    
+    # Only display if we actually have valid objects
+    if (@lines) {
+        writeline($config{'datacolor'}."You see here: ".join(", ", @lines).$config{'themecolor'}, 1);
+    }
+}
+
+sub show_room_view {
+    my ($player, $room) = @_;
+
+    # --- Handle darkness and blindness here ---
+    my $is_outdoor = ($room->{region} && $room->{region} =~ /Grass|Plains|Field|Desert|Beach|Forest|Jungle|Tundra|Steppe|Savanna|Marsh|Swamp|Hills|Mountain|Foothills|Valley|Open/i);
+    my $is_dark = 0;
+    if (defined $room->{action}) {
+        my $action = read_action_record($room->{action});
+        if ($action && $action->{attr1} == -1 && !$is_outdoor) {
+            unless (player_has_light($player)) {
+                $is_dark = 1;
+            }
+        }
+    }
+    $player->{blind} = $is_dark ? 1 : 0;
+    $player->{dark_message} = $is_dark ? "It's too dark to see anything here!" : "";
+
+    my $desc = $room->{shortdesc};
+    if ($room->{region} && $room->{region} =~ /Town/i && $room->{town_name} =~ /\S/) {
+        $desc = "You are in the town of $room->{town_name}.";
+    } elsif ($room->{region} && $room->{region} =~ /Castle/i && $room->{castle_name} =~ /\S/) {
+        $desc = "You are in the halls of $room->{castle_name} Castle.";
+    } elsif ($room->{region} && $room->{region} =~ /River/i && $room->{river_name} =~ /\S/) {
+        $desc = "You stand by the $room->{river_name}.";
+    } elsif ($room->{region} && $room->{region} =~ /Lake/i && $room->{river_name} =~ /\S/) {
+        $desc = "You are at the shores of $room->{river_name}.";
+    }
+    
+    # Add special handling for shops with shop_type
+    if ($room->{feature} && $room->{feature} eq 'Shop' && $room->{shop_type}) {
+        if ($room->{town_name}) {
+            $desc = "You are in the $room->{town_name} $room->{shop_type}.";
+        } else {
+            $desc = "You are in a $room->{shop_type}.";
+        }
+    }
+    
+    writeline($config{'systemcolor'}.$desc.$config{'themecolor'}, 1);
+
+
+    if ($player->{dark_message}) {
+        writeline($config{'errorcolor'}.$player->{dark_message}.$config{'themecolor'}, 1);
+        return;
+    }
+
+    unless ($player->{blind}) {
+        unless ($player->{brief}) {
+            writeline($config{'datacolor'}.$room->{longdesc}.$config{'themecolor'}, 1);
+        }
+        show_room_objects($room);
+        show_room_treasures($room);
+        show_exits($room);
+    } else {
+        writeline("", 1);
+    }
+
+    # Show NPCs
+    show_room_npcs($room);
+
+    # Show monsters
+    show_room_monsters($room);
+
+    # Show other players in the room (excluding self)
+    if ($player->{room}) {
+        my @others = map { $_->{name} }
+            grep {
+                defined $_->{name}
+                && $_->{name} ne ''
+                && lc($_->{name}) ne lc($player->{name})
+            }
+            list_players_in_room($player->{room}, $player->{name});
+        if (@others) {
+            my $others_str = @others == 1 ? $others[0] : join(", ", @others);
+            writeline($config{'usercolor'}."Also here: $others_str".$config{'themecolor'}, 1);
+        }
+    }
+}
+
+sub show_room_treasures {
+    my ($room) = @_;
+    return unless $room;
+    
+    # Always use the room number to get a fresh copy
+    my $room_num = ref($room) eq 'HASH' ? ($room->{roomnum} || $room) : $room;
+    
+    # Read directly from the file to get current state
+    my $file = "$config{'home'}/$config{'data'}/rooms.dat";
+    my $roomrec_len = 1096;
+    
+    open(my $fh, "<:raw", $file) or return;
+    flock($fh, LOCK_SH);
+    
+    my $seekpos = ($room_num - 1) * $roomrec_len;
+    seek($fh, $seekpos, SEEK_SET) or do {
+        flock($fh, LOCK_UN);
+        close($fh);
+        return;
+    };
+    
+    my $buf;
+    my $read_result = read($fh, $buf, $roomrec_len);
+    
+    flock($fh, LOCK_UN);
+    close($fh);
+    
+    unless (defined $read_result && $read_result == $roomrec_len) {
+        return;
+    }
+    
+    # Extract treasure data (offset 652)
+    my $treasure_offset = 652;
+    my $trecharges_offset = $treasure_offset + 40;
+    
+    # Parse treasures
+    my @lines;
+    
+    for my $i (0..19) {
+        my $idx_offset = $treasure_offset + ($i * 2);
+        my $idx = unpack("s", substr($buf, $idx_offset, 2));
+        
+        next unless $idx > 0;  # Skip empty slots
+        
+        my $charges_offset = $trecharges_offset + ($i * 2);
+        my $charges = unpack("s", substr($buf, $charges_offset, 2)) || 1;
+        
+        my $treas = read_treasure_record($idx);
+        next unless $treas && $treas->{name};
+        
+        my $desc = $treas->{name};
+        $desc .= " (x$charges)" if $charges > 1;
+        push @lines, $desc;
+    }
+    
+    if (@lines) {
+        writeline($config{'datacolor'}."Treasure here: ".join(", ", @lines).$config{'themecolor'}, 1);
+    }
+}
+
+sub debug_room_treasures {
+    my ($room) = @_;
+    return unless $room;
+    
+    my $room_num = ref($room) eq 'HASH' ? ($room->{roomnum} || $room) : $room;
+    
+    # Read the room record directly
+    my $file = "$config{'home'}/$config{'data'}/rooms.dat";
+    my $roomrec_len = 1096;
+    
+    open(my $fh, "<:raw", $file) or do {
+        writeline($config{'errorcolor'}."Can't open room file: $!".$config{'themecolor'}, 1);
+        return;
+    };
+    flock($fh, LOCK_SH);
+    
+    my $seekpos = ($room_num - 1) * $roomrec_len;
+    seek($fh, $seekpos, SEEK_SET) or do {
+        writeline($config{'errorcolor'}."Can't seek to room: $!".$config{'themecolor'}, 1);
+        flock($fh, LOCK_UN);
+        close($fh);
+        return;
+    };
+    
+    my $buf;
+    my $read_result = read($fh, $buf, $roomrec_len);
+    
+    flock($fh, LOCK_UN);
+    close($fh);
+    
+    unless (defined $read_result && $read_result == $roomrec_len) {
+        writeline($config{'errorcolor'}."Error reading room: $!".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    # Treasure data starts at offset 652
+    my $treasure_offset = 652;
+    my $trecharges_offset = $treasure_offset + 40;
+    
+    writeline($config{'systemcolor'}."[Room Treasure Debug]".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."Room #: $room_num".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."Treasure slots:".$config{'themecolor'}, 1);
+    
+    for my $i (0..19) {
+        my $idx_offset = $treasure_offset + ($i * 2);
+        my $idx = unpack("s", substr($buf, $idx_offset, 2));
+        my $charges_offset = $trecharges_offset + ($i * 2);
+        my $charges = unpack("s", substr($buf, $charges_offset, 2)) || 0;
+        
+        my $hex_idx = sprintf("0x%04X", unpack("S", substr($buf, $idx_offset, 2)));
+        my $hex_charges = sprintf("0x%04X", unpack("S", substr($buf, $charges_offset, 2)));
+        
+        my $desc = "Empty";
+        if ($idx > 0) {
+            my $treas = read_treasure_record($idx);
+            $desc = $treas && $treas->{name} ? $treas->{name} : "Unknown ($idx)";
+        }
+        
+        writeline($config{'datacolor'}."  Slot $i: Index=$idx ($hex_idx), Charges=$charges ($hex_charges), Item=$desc".$config{'themecolor'}, 1);
+    }
+    
+    # Display the raw treasure bytes for debugging
+    my $treasure_bytes = substr($buf, $treasure_offset, 40);
+    my $charges_bytes = substr($buf, $trecharges_offset, 40);
+    
+    writeline($config{'datacolor'}."Raw treasure bytes: " . unpack("H*", $treasure_bytes) . $config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."Raw charges bytes: " . unpack("H*", $charges_bytes) . $config{'themecolor'}, 1);
+}
+
+sub search_room {
+    my ($player, $room) = @_;
+    my $found = 0;
+    my $flags = parse_room_flags($room);
+    for my $i (0..$#$flags) {
+        if ($flags->[$i] == 1 || $flags->[$i] == 4 || $flags->[$i] == 5) {
+            $flags->[$i] = 0;
+            $found++;
+        }
+    }
+    for my $i (0..$#$flags) {
+        substr($room->{flags}, $i*2, 2, pack("s", $flags->[$i]));
+    }
+    save_room_record($player->{room}, $room);
+    if ($found) {
+        writeline($config{'systemcolor'}."You discover something hidden in the room!".$config{'themecolor'}, 1);
+        broadcast_room_message($player->{room}, $player->{name},
+            $config{'usercolor'}."$player->{name} discovers something hidden in the room!".$config{'themecolor'});
+        show_room_objects($room);
+        show_room_treasures($room);
+    } else {
+        writeline($config{'systemcolor'}."You search, but find nothing new.".$config{'themecolor'}, 1);
+    }
+}
+
+sub show_exits {
+    my $room = shift;
+    return if $player->{blind};
+    my @exits;
+    for my $dir (@dirs) {
+        my $dest = $room->{exits}{$dir};
+        push @exits, $dir if defined($dest) && $dest > 0;
+    }
+    if (@exits) {
+        writeline($config{'systemcolor'}."Obvious exits: ".$config{'datacolor'}.join(", ", @exits).$config{'themecolor'}, 1);
+    } else {
+        writeline($config{'systemcolor'}."There are no obvious exits.".$config{'themecolor'}, 1);
+    }
+}
+
+sub search_room {
+    my ($player, $room) = @_;
+    my @hidden_objects;
+    
+    foreach my $obj (@{$room->{objects}}) {
+        if ($obj->{hidden} && !$obj->{invisible}) {
+            my $chance = $player->{perception} * 5; 
+            if (rand(100) < $chance) {
+                push @hidden_objects, $obj;
+                $obj->{hidden} = 0;
+                save_object($obj);
+            }
+        }
+    }
+    
+    if (@hidden_objects) {
+        writeline($config{'systemcolor'}."Your search reveals:".$config{'themecolor'}, 1);
+        foreach my $obj (@hidden_objects) {
+            writeline("  $obj->{name}", 1);
+        }
+    } else {
+        writeline($config{'systemcolor'}."You find nothing of interest.".$config{'themecolor'}, 1);
+    }
+}
+
+sub trigger_room_trap {
+    my ($player, $room, $action) = @_;
+   
+    if ($action->{hitpoints}) {
+        $player->{hp} += $action->{hitpoints};
+        $player->{hp} = $player->{max_hp} if $player->{hp} > $player->{max_hp};
+        $player->{hp} = 0 if $player->{hp} < 0;
+        if ($action->{hitpoints} > 0) {
+            writeline($config{'systemcolor'}."You feel invigorated! (+$action->{hitpoints} HP)".$config{'themecolor'});
+        } else {
+            writeline($config{'errorcolor'}."You are hurt by a trap! ($action->{hitpoints} HP)".$config{'themecolor'});
+        }
+    }
+   
+    if ($action->{teleport}) {
+        my $dest = int($action->{teleport});
+        if ($dest > 0) {
+            writeline($config{'errorcolor'}."A magical force teleports you to another room!" . $config{'themecolor'});
+            $player->{room} = $dest;
+        }
+    }
+   
+    if ($action->{fumble} && rand() < 0.05) {
+        foreach my $slot (qw(weapon shield)) {
+            if ($player->{equipped}{$slot}) {
+                writeline($config{'errorcolor'}."You fumble and drop your $slot!" . $config{'themecolor'});
+                delete $player->{equipped}{$slot};
+            }
+        }
+    }
+   
+    if ($action->{poison}) {
+        $player->{poisoned} = 1;
+        writeline($config{'errorcolor'}."You are poisoned by a trap!" . $config{'themecolor'});
+    }
+}
+
+sub get_room_id_by_coords {
+    my ($coords, $coord_to_room) = @_;
+    return $coord_to_room->{$coords} // 0;
+}
+
+sub build_coord_to_room_map {
+    my ($origin_room, $max_depth) = @_;
+    $max_depth //= 1000;
+    
+    my %coord_to_room;
+    my @queue = ([0, 0, 0, $origin_room]);  # Player is always at origin (0,0,0)
+    $coord_to_room{"0,0,0"} = $origin_room;
+    my %visited = ($origin_room => 1);
+    
+    # Use actual exit directions to build the coordinate map
+    my %dir_delta = (
+        'N'  => [0, -1, 0], 'S'  => [0,  1, 0], 
+        'E'  => [1,  0, 0], 'W'  => [-1, 0, 0],
+        'NE' => [1, -1, 0], 'NW' => [-1, -1, 0], 
+        'SE' => [1,  1, 0], 'SW' => [-1,  1, 0],
+        'UP' => [0,  0, -1], 'DOWN' => [0, 0, 1]
+    );
+    
+    while (@queue && $max_depth-- > 0) {
+        my ($x, $y, $z, $room_id) = @{shift @queue};
+        my $room = read_room_record($room_id);
+        next unless $room && ref($room) eq 'HASH';
+        
+        # Follow actual room exits instead of calculating
+        foreach my $dir (keys %dir_delta) {
+            next unless $room->{exits} && $room->{exits}{$dir} && $room->{exits}{$dir} > 0;
+            my $next_id = $room->{exits}{$dir};
+            next if $visited{$next_id};
+            
+            my ($dx, $dy, $dz) = @{$dir_delta{$dir}};
+            my $nx = $x + $dx;
+            my $ny = $y + $dy;
+            my $nz = $z + $dz;
+            
+            $coord_to_room{"$nx,$ny,$nz"} = $next_id;
+            $visited{$next_id} = 1;
+            push @queue, [$nx, $ny, $nz, $next_id];
+        }
+    }
+    
+    return \%coord_to_room;
+}
+
+sub build_coord_to_room_map {
+    my ($origin_room, $max_depth) = @_;
+    $max_depth //= 1000;
+    
+    my %coord_to_room;
+    my @queue = ([0, 0, 0, $origin_room]);  # Player is always at origin (0,0,0)
+    $coord_to_room{"0,0,0"} = $origin_room;
+    my %visited = ($origin_room => 1);
+    
+    # Use actual exit directions to build the coordinate map
+    my %dir_delta = (
+        'N'  => [0, -1, 0], 'S'  => [0,  1, 0], 
+        'E'  => [1,  0, 0], 'W'  => [-1, 0, 0],
+        'NE' => [1, -1, 0], 'NW' => [-1, -1, 0], 
+        'SE' => [1,  1, 0], 'SW' => [-1,  1, 0],
+        'UP' => [0,  0, -1], 'DOWN' => [0, 0, 1]
+    );
+    
+    while (@queue && $max_depth-- > 0) {
+        my ($x, $y, $z, $room_id) = @{shift @queue};
+        my $room = read_room_record($room_id);
+        next unless $room && ref($room) eq 'HASH';
+        
+        # Follow actual room exits instead of calculating
+        foreach my $dir (keys %dir_delta) {
+            next unless $room->{exits} && $room->{exits}{$dir} && $room->{exits}{$dir} > 0;
+            my $next_id = $room->{exits}{$dir};
+            next if $visited{$next_id};
+            
+            my ($dx, $dy, $dz) = @{$dir_delta{$dir}};
+            my $nx = $x + $dx;
+            my $ny = $y + $dy;
+            my $nz = $z + $dz;
+            
+            $coord_to_room{"$nx,$ny,$nz"} = $next_id;
+            $visited{$next_id} = 1;
+            push @queue, [$nx, $ny, $nz, $next_id];
+        }
+    }
+    
+    return \%coord_to_room;
+}
+
+sub get_dynamic_exit_destination {
+    my ($current_room, $obj) = @_;
+    
+   
+    if ($obj->{destination} && $obj->{destination} > 0) {
+        my $dest_room = read_room_record($obj->{destination});
+        if ($dest_room && $dest_room->{shortdesc}) {
+            return $obj->{destination};
+        }
+    }
+    
+   
+    our %destination_map;
+    if ($destination_map{$current_room} && $destination_map{$current_room}{uc($obj->{shortname})}) {
+        return $destination_map{$current_room}{uc($obj->{shortname})};
+    }
+    
+   
+    my $curr_room = read_room_record($current_room);
+    my @possible_rooms;
+    foreach my $dir (@dirs) {
+        if ($curr_room->{exits}{$dir} && $curr_room->{exits}{$dir} > 0) {
+            push @possible_rooms, $curr_room->{exits}{$dir};
+        }
+    }
+    
+    if (@possible_rooms) {
+        return $possible_rooms[int(rand(@possible_rooms))];
+    }
+    
+   
+    my $max_room = get_max_room();
++   return 0 if !$max_room || $max_room < 1; 
+    for (1..50) { 
+        my $try = 1 + int(rand($max_room));
+        my $dest_room = read_room_record($try);
+        if ($dest_room && $dest_room->{shortdesc}) {
+            return $try;
+        }
+    }
+    
+   
+    return 0;
+}
+
+# Utility: Lock/unlock for room player files
+sub lock_room_players {
+    my ($roomid) = @_;
+    lockfile(room_players_file($roomid));
+}
+
+sub unlock_room_players {
+    my ($roomid) = @_;
+    unlockfile(room_players_file($roomid));
+}
+
+sub players_in_room {
+    my ($roomid) = @_;
+    return () unless defined $roomid && $roomid =~ /^\d+$/;
+    
+    my $file = room_players_file($roomid);
+    my @players;
+    
+    # Atomic read with proper locking
+    lock_room_players($roomid);
+    if (-e $file) {
+        open(my $fh, "<", $file) or do {
+            unlock_room_players($roomid);
+            return ();
+        };
+        
+        while (<$fh>) {
+            chomp;
+            my ($name, $node) = split(/\|/, $_, 2);
+            next unless defined $name && $name ne '';
+            $name =~ s/^\s+|\s+$//g;
+            next if $name eq '';
+            push @players, { name => $name, node => $node // '' };
+        }
+        close($fh);
+    }
+    unlock_room_players($roomid);
+    
+    return @players;
+}
+
+sub list_players_in_room {
+    my ($roomid, $exclude_name) = @_;
+    my @players = players_in_room($roomid);
+    
+    if (defined $exclude_name && $exclude_name ne '') {
+        @players = grep { lc($_->{name}) ne lc($exclude_name) } @players;
+    }
+    
+    return @players;
+}
+
+sub write_room_players {
+    my ($roomid, @players) = @_;
+    return unless defined $roomid && $roomid =~ /^\d+$/;
+    
+    my $file = room_players_file($roomid);
+    
+    # Don't hold lock across open - acquire it after open to prevent deadlocks
+    open(my $fh, ">", $file) or return;
+    flock($fh, LOCK_EX);
+    
+    for my $p (@players) {
+        next unless defined $p->{name} && $p->{name} ne '';
+        my $node = $p->{node} // '';
+        print $fh "$p->{name}|$node\n";
+    }
+    
+    flock($fh, LOCK_UN);
+    close($fh);
+}
+
+sub hook_enter_room {
+    my ($player, $room) = @_;
+    return if $player->{in_combat} || player_in_combat($player->{name});
+    
+    # Ensure the room has its ID set
+    $room->{roomnum} = $player->{room} unless $room->{roomnum};
+    
+    # Ensure all room monsters are properly initialized
+    ensure_room_monsters($room);
+}
+
+# Called when a player leaves a room
+sub photonmud_leave_room {
+    my ($player, $roomid, $direction) = @_;
+    return 0 unless $player && $player->{name} && $roomid;
+    
+    my $start_time = time();
+    rooms_debug("TIMING: leave_room start for $player->{name} from room $roomid");
+    
+    # Prepare direction message
+    my $dirmsg = "";
+    if (defined $direction && $direction ne '') {
+        my %dirmap = (
+            n  => 'north',  s  => 'south',  e  => 'east',   w  => 'west',
+            N  => 'north',  S  => 'south',  E  => 'east',   W  => 'west',
+            ne => 'northeast', nw => 'northwest', se => 'southeast', sw => 'southwest',
+            NE => 'northeast', NW => 'northwest', SE => 'southeast', SW => 'southwest',
+            u  => 'up',     d  => 'down',   i => 'in',     o => 'out',
+            U  => 'up',     D  => 'down',   I => 'in',     O => 'out',
+            up => 'up', down => 'down', in => 'in', out => 'out',
+            UP => 'up', DOWN => 'down', IN => 'in', OUT => 'out',
+            teleport => 'magically', quit => 'elsewhere'
+        );
+        my $dirword = $dirmap{$direction} // $direction;
+        $dirmsg = " heading $dirword";
+    }
+    
+    # Debug current room state before operation
+    my $file = room_players_file($roomid);
+    if (-e $file) {
+        my $players_before = "";
+        open(my $fh, "<", $file);
+        while(<$fh>) { $players_before .= $_; }
+        close($fh);
+        rooms_debug("TIMING: leave_room room $roomid players before: $players_before");
+    } else {
+        rooms_debug("TIMING: leave_room room $roomid has no player file");
+    }
+    
+    # Clean up any potential combat files
+    my $combat_time = time();
+    cleanup_stale_combat_for_player_and_room($player->{name}, $roomid);
+    rooms_debug(sprintf("TIMING: leave_room combat cleanup took %.3f seconds", time() - $combat_time));
+    
+    # Remove player ready flag
+    my $ready_file = player_ready_flag_path(safe_name($player->{name}));
+    unlink $ready_file if -e $ready_file;
+    
+    # Use simplified direct approach instead of multiple retries
+    my $registry_time = time();
+    my $success = 0;
+    
+    eval {
+        # Just write a new file without the player - simpler and faster
+        my $tmpfile = "$file.tmp.$$";
+        my @current;
+        
+        if (-e $file) {
+            open(my $fh, "<", $file) or die "Can't open $file: $!";
+            while (<$fh>) {
+                chomp;
+                my ($name, $node) = split(/\|/, $_, 2);
+                next unless defined $name && $name ne '';
+                $name =~ s/^\s+|\s+$//g;
+                next if $name eq '';
+                next if lc($name) eq lc($player->{name});
+                push @current, { name => $name, node => $node // '' };
+            }
+            close($fh);
+        }
+        
+        # Write directly to temp file then rename (atomic)
+        open(my $fh, ">", $tmpfile) or die "Can't write $tmpfile: $!";
+        for my $p (@current) {
+            next unless defined $p->{name} && $p->{name} ne '';
+            my $node = $p->{node} // '';
+            print $fh "$p->{name}|$node\n";
+        }
+        close($fh);
+        
+        rename($tmpfile, $file) or do {
+            unlink($tmpfile);
+            die "Failed to rename $tmpfile to $file: $!";
+        };
+        
+        $success = 1;
+    };
+    
+    if ($@) {
+        rooms_debug("TIMING: leave_room registry update failed: $@");
+    }
+    
+    rooms_debug(sprintf("TIMING: leave_room registry update took %.3f seconds (success=$success)", 
+        time() - $registry_time));
+    
+    # Use non-blocking broadcast
+    my $broadcast_time = time();
+    eval {
+        local $SIG{ALRM} = sub { die "broadcast timeout"; };
+        alarm(1);
+        broadcast_room_message($roomid, $player->{name},
+            "$player->{name} leaves the room$dirmsg.");
+        alarm(0);
+    };
+    
+    if ($@) {
+        rooms_debug("TIMING: leave_room broadcast failed: $@");
+    }
+    
+    rooms_debug(sprintf("TIMING: leave_room broadcast took %.3f seconds", 
+        time() - $broadcast_time));
+    
+    rooms_debug(sprintf("TIMING: leave_room complete in %.3f seconds", 
+        time() - $start_time));
+    
+    return 1;
+}
+
+# Remove player from all rooms (on disconnect/quit)
+sub remove_player_from_all_rooms {
+    my ($player) = @_;
+    return unless $player && $player->{name};
+    
+    opendir(my $dh, $room_players_dir) or return;
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^(\d+)\.players$/;
+        my $roomid = $1;
+        photonmud_leave_room($player, $roomid, "quit");
+    }
+    closedir($dh);
+    
+    # Remove player ready flag
+    my $ready_file = player_ready_flag_path(safe_name($player->{name}));
+    unlink $ready_file if -e $ready_file;
+}
+
+# --- Integration with Main Loop ---
+
+# On entering a new room
+sub photonmud_enter_room {
+    my ($player, $roomnum, $prev_roomnum, $options) = @_;
+    $options //= {};
+    return 0 unless $player && $player->{name} && $roomnum;
+    
+    my $start_time = time();
+    rooms_debug("TIMING: enter_room start for $player->{name} to room $roomnum (from $prev_roomnum)");
+    
+    # Verify room exists
+    my $room = $options->{room} // read_room_record($roomnum);
+    unless ($room) {
+        rooms_debug("[ERROR] Attempt to enter nonexistent room $roomnum by $player->{name}");
+        return 0;
+    }
+    
+    # Update player's room in memory
+    $player->{room} = $roomnum; 
+    $player->{prev_room} = $prev_roomnum if defined $prev_roomnum;
+    
+    # Determine movement type
+    my $is_teleport = $options->{is_teleport} || 
+                     (defined $prev_roomnum && $prev_roomnum ne $roomnum && 
+                      abs($roomnum - $prev_roomnum) > 10);
+    
+    # Add to room registry with timeout protection
+    eval {
+        local $SIG{ALRM} = sub { die "Timeout updating room registry"; };
+        alarm(3);
+        
+        my $file = room_players_file($roomnum);
+        my @current = ();
+        
+        # Read existing players
+        if (-e $file) {
+            open(my $fh, "<", $file) or die "Can't open $file: $!";
+            while (<$fh>) {
+                chomp;
+                my ($name, $node) = split(/\|/, $_, 2);
+                next unless defined $name && $name ne '';
+                $name =~ s/^\s+|\s+$//g;
+                next if $name eq '';
+                # Skip existing entries for this player
+                next if lc($name) eq lc($player->{name});
+                push @current, { name => $name, node => $node // '' };
+            }
+            close($fh);
+        }
+        
+        # Add player to room
+        push @current, { name => $player->{name}, node => $player->{nodeid} // '' };
+        
+        # Write updated list atomically
+        my $tmpfile = "$file.tmp.$$";
+        open(my $fh, ">", $tmpfile) or die "Can't write $tmpfile: $!";
+        for my $p (@current) {
+            next unless defined $p->{name} && $p->{name} ne '';
+            my $node = $p->{node} // '';
+            print $fh "$p->{name}|$node\n";
+        }
+        close($fh);
+        
+        rename($tmpfile, $file) or do {
+            unlink($tmpfile);
+            die "Failed to rename $tmpfile to $file: $!";
+        };
+        
+        alarm(0);
+    };
+    
+    if ($@) {
+        rooms_debug("TIMING: enter_room registry update failed: $@");
+    }
+    
+    # Save player state
+    eval {
+        local $SIG{ALRM} = sub { die "save_player timeout"; };
+        alarm(2);
+        save_player($player);
+        alarm(0);
+    };
+    
+    # Notify room of arrival
+    eval {
+        local $SIG{ALRM} = sub { die "broadcast timeout"; };
+        alarm(2);
+        
+        if ($is_teleport) {
+            broadcast_room_message($roomnum, $player->{name}, 
+                "$player->{name} appears in a flash of light.");
+        } else {
+            my $direction = $options->{direction} // "";
+            my $dirmsg = "";
+            if ($direction ne '') {
+                my %dirmap = (
+                    'N' => 'north', 'S' => 'south', 'E' => 'east', 'W' => 'west',
+                    'NE' => 'northeast', 'NW' => 'northwest', 'SE' => 'southeast', 'SW' => 'southwest',
+                    'UP' => 'up', 'DOWN' => 'down', 'IN' => 'in', 'OUT' => 'out'
+                );
+                my $dirword = $dirmap{$direction} // lc($direction);
+                $dirmsg = " from the $dirword";
+            }
+            broadcast_room_message($roomnum, $player->{name}, 
+                "$player->{name} enters the room$dirmsg.");
+        }
+        alarm(0);
+    };
+    
+    rooms_debug(sprintf("TIMING: enter_room complete in %.3f seconds", time() - $start_time));
+    return 1;
+}
+
+sub show_room_monsters {
+    my ($room) = @_;
+    return unless $room && $room->{roomnum};
+    
+    my @monsters = get_room_monsters($room);
+    my %seen;
+    my @names;
+    
+    for my $m (@monsters) {
+        next unless $m && $m->{name};
+        next if $m->{hp} <= 0;
+        my $name = $m->{name};
+        next if $seen{lc $name}++;
+        push @names, $name;
+    }
+
+    if (@names) {
+        writeline($config{'datacolor'}."Monsters here: ".join(", ", @names).$config{'themecolor'}, 1);
+    }
+}
+
+sub monster_currentroom_flag_path {
+    my ($mon) = @_;
+    return File::Spec->catfile($config{transient}, "monster_currentroom_" . $mon->{id} . ".flag");
+}
+
+sub get_dynamic_exit_destination {
+    my ($roomnum, $obj) = @_;
+    # Example: Use object property or room mapping
+    return $obj->{destination} if $obj->{destination};
+    # Fallback: check for a mapping in a dynamic exits table
+    my $dynfile = "$config{home}/$config{data}/dynamic_exits.dat";
+    if (-e $dynfile) {
+        open(my $fh, "<", $dynfile);
+        while (<$fh>) {
+            chomp;
+            my ($from, $objname, $to) = split(/\|/);
+            if ($from == $roomnum && lc($objname) eq lc($obj->{name})) {
+                close($fh);
+                return $to;
+            }
+        }
+        close($fh);
+    }
+    return 0;
+}
+
+sub validate_room_consistency {
+    my ($roomnum) = @_;
+    return unless $roomnum;
+    
+    # Check if any players in registry are actually connected
+    my @players = players_in_room($roomnum);
+    my @stale_players;
+    
+    foreach my $p (@players) {
+        unless (player_online($p->{name})) {
+            push @stale_players, $p->{name};
+        }
+    }
+    
+    if (@stale_players) {
+        rooms_debug("[ROOM REPAIR] Removing stale players from room $roomnum: " . 
+                 join(", ", @stale_players));
+        
+        lock_room_players($roomnum);
+        @players = grep { !grep { $_ eq $_->{name} } @stale_players } @players;
+        write_room_players($roomnum, @players);
+        unlock_room_players($roomnum);
+    }
+}
+
+# Clean up stale room registry files (rooms with no players)
+sub cleanup_empty_room_files {
+    opendir(my $dh, $room_players_dir) or return;
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^(\d+)\.players$/;
+        my $roomid = $1;
+        my $fullpath = "$room_players_dir/$file";
+        
+        # Check if file is empty
+        my $size = -s $fullpath;
+        next unless defined $size && $size == 0;
+        
+        # Remove empty player registry files
+        unlink $fullpath;
+    }
+    closedir($dh);
+}
+
+# Clean up combat state for player in specific room
+sub cleanup_stale_combat_for_player_and_room {
+    my ($player_name, $roomid) = @_;
+    return unless $player_name;
+    
+    # Basic player combat pointer cleanup
+    my $pointer = player_combat_pointer_path($player_name);
+    if (-e $pointer) {
+        my $data = read_combat_pointer($pointer);
+        my $meta_path = $data->{meta};
+        
+        # Check if meta file exists
+        if (!$meta_path || !-e $meta_path) {
+            unlink $pointer;
+        } else {
+            # Check if player is still in meta
+            my $meta = eval { lock_retrieve($meta_path) };
+            if (!$meta || !$meta->{players}{$player_name}) {
+                unlink $pointer;
+            }
+        }
+    }
+    
+    # Clean up any meta files for this room with no valid participants
+    return unless defined $roomid;
+    my $transient = $config{transient};
+    opendir(my $dh, $transient);
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^combat_.*\.storable$/;
+        my $meta_path = "$transient/$file";
+        my $meta = eval { lock_retrieve($meta_path) };
+        next unless $meta && $meta->{room} && $meta->{room} == $roomid;
+        
+        # If no valid players or monsters, remove meta and all pointers
+        my $active = 0;
+        for my $p (keys %{$meta->{players}}) {
+            $active++ if $meta->{players}{$p}{hp} && $meta->{players}{$p}{hp} > 0;
+        }
+        
+        if (!$active) {
+            rooms_debug("[CLEANUP] Removing stale combat meta $file for room $roomid");
+            unlink $meta_path;
+            
+            # Remove all pointer files for this meta
+            for my $p (keys %{$meta->{players}}) {
+                my $is_monster = $meta->{players}{$p}{is_monster};
+                my $ppath = $is_monster ? 
+                    monster_combat_pointer_path($p) : 
+                    player_combat_pointer_path($p);
+                unlink $ppath if -e $ppath;
+            }
+        }
+    }
+    closedir($dh);
+}
+
+# Get all parties (players and monsters) in given room
+sub get_potential_combatants {
+    my ($roomnum) = @_;
+    return () unless $roomnum;
+    
+    my @combatants;
+    
+    # Get all players in the room
+    my @players = players_in_room($roomnum);
+    foreach my $p (@players) {
+        my $player_obj = load_player($p->{name});
+        if ($player_obj && $player_obj->{hp} > 0) {
+            push @combatants, $player_obj;
+        }
+    }
+    
+    # Get all monsters in the room
+    my $room = read_room_record($roomnum);
+    my @monsters = get_room_monsters($room);
+    foreach my $mon (@monsters) {
+        if ($mon->{hp} > 0 && is_monster_in_room($mon, $roomnum)) {
+            push @combatants, $mon;
+        }
+    }
+    
+    return @combatants;
+}
+
+# Check if a room has a monster with the given name
+sub room_has_monster_name {
+    my ($room, $name) = @_;
+    
+    # Check ambient encounter system first
+    if (defined &get_ambient_encounters_for_room) {
+        my @monsters = get_ambient_encounters_for_room($room->{roomnum});
+        foreach my $mon (@monsters) {
+            next unless $mon->{name};
+            return 1 if lc($mon->{name}) eq lc($name);
+        }
+    }
+    
+    # Check for boss monsters
+    if (defined &check_for_boss && $config{enable_bosses}) {
+        my $boss = check_for_boss($room);
+        if ($boss && !$boss->{defeated} && lc($boss->{name}) eq lc($name)) {
+            return 1;
+        }
+    }
+    
+    return 0;
+}
+
+# Find a specific monster in a room by name
+sub find_monster_in_room {
+    my ($roomnum, $name) = @_;
+    return undef unless $roomnum && $name;
+    
+    # Check ambient encounter system first
+    if (defined &get_ambient_encounters_for_room) {
+        my @monsters = get_ambient_encounters_for_room($roomnum);
+        foreach my $mon (@monsters) {
+            next unless $mon->{name};
+            if (lc($mon->{name}) eq lc($name) || lc($mon->{name}) =~ /\Q$name\E/i) {
+                return $mon;
+            }
+        }
+    }
+    
+    # Check for boss monsters
+    if (defined &check_for_boss && $config{enable_bosses}) {
+        my $room = read_room_record($roomnum);
+        my $boss = check_for_boss($room);
+        if ($boss && !$boss->{defeated} && 
+            (lc($boss->{name}) eq lc($name) || lc($boss->{name}) =~ /\Q$name\E/i)) {
+            return $boss;
+        }
+    }
+    
+    return undef;
+}
+
+sub get_room_id_by_coords {
+    my ($coords, $coord_to_room) = @_;
+    return $coord_to_room->{$coords} // 0;
+}
+
+sub get_coords_for_room {
+    my ($roomnum) = @_;
+    return (0, 0, 0) unless $roomnum && $roomnum > 0;
+    
+    # First, try to read explicit coordinates from the room record
+    my $room = read_room_record($roomnum);
+    if ($room && defined $room->{coord_x} && defined $room->{coord_y} && defined $room->{coord_z}) {
+        # Check if coordinates are set (non-zero or explicitly stored)
+        # coord_z of -9999 indicates "use grid formula" for backward compatibility
+        if ($room->{coord_x} != 0 || $room->{coord_y} != 0 || 
+            ($room->{coord_z} != 0 && $room->{coord_z} != -9999)) {
+            return ($room->{coord_x}, $room->{coord_y}, $room->{coord_z});
+        }
+    }
+   
+    # Fall back to grid formula for surface rooms
+    my $WIDTH  = $config{'width'};
+    my $HEIGHT = $config{'height'};
+
+    if ($roomnum <= $WIDTH * $HEIGHT) {
+        my $n = $roomnum - 1;
+        my $y = int($n / $WIDTH);
+        my $x = $n % $WIDTH;
+        my $z = 0;
+        return ($x, $y, $z);
+    }
+
+   
+   
+    for my $z (1..10) {
+        my $base = $z * $WIDTH * $HEIGHT;
+        if ($roomnum > $base) {
+            my $n = $roomnum - $base - 1;
+            my $y = int($n / $WIDTH);
+            my $x = $n % $WIDTH;
+            return ($x, $y, $z);
+        }
+    }
+
+   
+    return (0, 0, 0);
+}
+
+# Cache for coordinate-to-room lookups (populated on demand)
+my %coord_to_room_cache;
+my $coord_cache_built = 0;
+
+sub build_coord_cache {
+    return if $coord_cache_built;
+    
+    my $max_room = get_max_room();
+    for my $roomnum (1..$max_room) {
+        my $room = read_room_record($roomnum);
+        next unless $room && defined $room->{coord_x};
+        
+        my $x = $room->{coord_x};
+        my $y = $room->{coord_y};
+        my $z = $room->{coord_z};
+        
+        # Only cache non-surface rooms (surface can use grid formula)
+        if ($z < 0 || ($z == 0 && ($x != 0 || $y != 0))) {
+            my $key = "$x,$y,$z";
+            $coord_to_room_cache{$key} = $roomnum;
+        }
+    }
+    $coord_cache_built = 1;
+}
+
+sub get_room_id_by_absolute_coords {
+    my ($x, $y, $z) = @_;
+    my $WIDTH  = $config{'width'};
+    my $HEIGHT = $config{'height'};
+
+    # For negative z (underground), use the coordinate cache
+    if ($z < 0) {
+        build_coord_cache();
+        my $key = "$x,$y,$z";
+        return $coord_to_room_cache{$key} // 0;
+    }
+
+    # Surface bounds check
+    return 0 if $x < 0 || $y < 0 || $x >= $WIDTH || $y >= $HEIGHT;
+
+    # Surface rooms use grid formula
+    if ($z == 0) {
+        return $y * $WIDTH + $x + 1;
+    } else {
+        # Positive z levels (shouldn't happen normally, but keep for compatibility)
+        return $z * $WIDTH * $HEIGHT + $y * $WIDTH + $x + 1;
+    }
+}
+
+sub build_coord_to_room_map {
+    my ($origin_room, $max_depth) = @_;
+    $max_depth //= 1000;
+    my %coord_to_room;
+    my @queue = ([0, 0, 0, $origin_room]);
+    $coord_to_room{"0,0,0"} = $origin_room;
+    my %visited = ($origin_room => 1);
+    my %dir_delta = (
+        'N' => [0, -1, 0], 'S' => [0, 1, 0], 'E' => [1, 0, 0], 'W' => [-1, 0, 0],
+        'NE' => [1, -1, 0], 'NW' => [-1, -1, 0], 'SE' => [1, 1, 0], 'SW' => [-1, 1, 0],
+        'UP' => [0, 0, -1], 'DOWN' => [0, 0, 1]
+    );
+    while (@queue && $max_depth-- > 0) {
+        my ($x, $y, $z, $room_id) = @{shift @queue};
+        my $room = read_room_record($room_id);
+        next unless $room && ref($room) eq 'HASH';
+        foreach my $dir (keys %dir_delta) {
+            next unless $room->{exits} && $room->{exits}{$dir} && $room->{exits}{$dir} > 0;
+            my $next_id = $room->{exits}{$dir};
+            next if $visited{$next_id};
+            my ($dx, $dy, $dz) = @{$dir_delta{$dir}};
+            my $nx = $x + $dx;
+            my $ny = $y + $dy;
+            my $nz = $z + $dz;
+            $coord_to_room{"$nx,$ny,$nz"} = $next_id;
+            $visited{$next_id} = 1;
+            push @queue, [$nx, $ny, $nz, $next_id];
+        }
+    }
+    return \%coord_to_room;
+}
+
+# ============================================================================
+# RESPONSIVE MAP RENDERING - Phase 2 of Responsive UI Implementation
+# ============================================================================
+
+sub show_map_view {
+    my ($player) = @_;
+    
+    # Get terminal width from session config (set by initialize_terminal_config)
+    my $width = $config{terminal_width} || 80;
+    my $mode = $config{ui_mode} || 'standard';
+    
+    # Dispatch to appropriate map renderer based on terminal width
+    if ($mode eq 'compact') {
+        show_compact_map($player);
+    } elsif ($mode eq 'enhanced') {
+        show_enhanced_map($player);
+    } else {
+        show_standard_map($player);  # 80-column traditional view
+    }
+}
+
+sub show_compact_map {
+    my ($player) = @_;
+    my $origin_room = $player->{room} || 1;
+    my $realm_name = eval { load_realm_name() } || "the realm";
+    
+    # Compact mode: smaller map for 40-column terminals (C64, VIC-20, etc.)
+    my $map_width  = 20;   # Reduced from 31
+    my $map_height = 10;   # Reduced from 15
+    my $half_w = int($map_width / 2);
+    my $half_h = int($map_height / 2);
+    my ($px, $py, $pz) = get_coords_for_room($origin_room);
+
+    # Simplified CP437 symbol map for compact mode
+    my %cp437 = (
+        '@'  => '@',
+        'M'  => 'M',
+        'T'  => 'T',
+        'K'  => 'K',
+        '^'  => '^',
+        'F'  => 'F',
+        '.'  => '.',
+        '#'  => chr(176),
+        '~'  => '~',
+        'O'  => 'O',
+        '='  => '=',
+        '$'  => '$',
+        'I'  => 'I',
+        '+'  => '+',
+        't'  => 't',
+        'B'  => 'B',
+        ' '  => ' ',
+    );
+
+    # Simplified color map
+    my %color_map = (
+        '@'  => $BWH,
+        '@o' => $BYL,
+        'M'  => $BRD,
+        'T'  => $BYL,
+        'K'  => $BWH,
+        '^'  => $BWH,
+        'F'  => $GRN,
+        '.'  => $BGN,
+        '#'  => $BBK,
+        '~'  => $BCN,
+        'O'  => $BCN,
+        '='  => $BWH,
+        '$'  => $BYL,
+        'I'  => $BWH,
+        '+'  => $BMG,
+        't'  => $BRD,
+        'B'  => $BYL,
+        ' '  => $config{'themecolor'},
+    );
+
+    # Gather players
+    my %players_by_room;
+    my $room_players_dir = "$config{transient}/room_players";
+    if (-d $room_players_dir) {
+        opendir(my $dh, $room_players_dir);
+        while (my $file = readdir($dh)) {
+            next unless $file =~ /^(\d+)\.players$/;
+            my $roomid = $1;
+            open(my $fh, "<", "$room_players_dir/$file");
+            while (<$fh>) {
+                chomp;
+                my ($name, $node) = split(/\|/, $_, 2);
+                next unless defined $name && $name ne '';
+                $name =~ s/^\s+|\s+$//g;
+                next if $name eq '' || lc($name) eq lc($player->{name});
+                push @{$players_by_room{$roomid}}, $name;
+            }
+            close($fh);
+        }
+        closedir($dh);
+    }
+
+    # Build compact map grid
+    my @map;
+    for my $row (0 .. $map_height-1) {
+        my $y = $py - $half_h + $row;
+        my @row;
+        for my $col (0 .. $map_width-1) {
+            my $x = $px - $half_w + $col;
+            my $z = $pz;
+            my $symbol = ' ';
+            my $rid = get_room_id_by_absolute_coords($x, $y, $z);
+            my $dx = $col - $half_w;
+            my $dy = $row - $half_h;
+
+            if ($dx == 0 && $dy == 0) {
+                $symbol = '@';
+            }
+            elsif ($rid && exists $players_by_room{$rid} && @{$players_by_room{$rid}}) {
+                $symbol = '@o';
+            }
+            elsif ($rid && $rid > 0) {
+                my $r = read_room_record($rid);
+                $r->{feature} =~ s/^\s+|\s+$//g if defined $r->{feature};
+                $r->{region}  =~ s/^\s+|\s+$//g if defined $r->{region};
+                
+                # Simplified feature mapping for compact mode
+                if ($r->{feature} && $r->{feature} ne '') {
+                    $symbol =
+                        $r->{feature} =~ /Shop/i            ? '$' :
+                        $r->{feature} =~ /Inn/i             ? 'I' :
+                        $r->{feature} =~ /Temple/i          ? '+' :
+                        $r->{feature} =~ /Tavern/i          ? 't' :
+                        $r->{feature} =~ /Bank/i            ? 'B' :
+                        $r->{feature} =~ /Dungeon/i         ? chr(176) :
+                        $r->{feature} =~ /Cave/i            ? chr(177) :
+                        undef;
+                }
+                if (!defined $symbol || $symbol eq ' ') {
+                    if ($r->{region} && $r->{region} ne '') {
+                        $symbol =
+                            $r->{region} eq 'Town'      ? 'T' :
+                            $r->{region} eq 'Castle'    ? 'K' :
+                            $r->{region} eq 'Mountain'  ? '^' :
+                            $r->{region} eq 'Forest'    ? 'F' :
+                            $r->{region} eq 'River'     ? '~' :
+                            $r->{region} eq 'Lake'      ? 'O' :
+                            $r->{region} eq 'Road'      ? '#' :
+                            '.';
+                    } else {
+                        $symbol = '.';
+                    }
+                }
+            }
+            
+            my $color = $color_map{$symbol} // $config{'themecolor'};
+            my $char = $cp437{$symbol} // $symbol;
+            $char = '@' if $symbol eq '@o';
+            push @row, $color . $char . $config{'themecolor'};
+        }
+        push @map, \@row;
+    }
+
+    # Compact legend (inline, below map)
+    my @legend_entries;
+    if ($pz < 0) {
+        @legend_entries = (
+            '@ You  ' . chr(176) . ' Corridor',
+            '# Chamber  ' . chr(177) . ' Tunnel',
+        );
+    } else {
+        @legend_entries = (
+            '@ You  T Town  K Castle',
+            '^ Mt  F Forest  ~ River',
+            '$ Shop  I Inn  + Temple',
+        );
+    }
+
+    # Simple border for compact mode
+    my $border = '=' x $map_width;
+    
+    writeline($config{'usercolor'}."Map: $realm_name".$config{'themecolor'}, 1);
+    writeline($config{'systemcolor'}.$border.$config{'themecolor'}, 1);
+
+    for my $i (0 .. $map_height-1) {
+        my $mapline = join('', @{$map[$i]});
+        writeline($mapline, 1);
+    }
+    
+    writeline($config{'systemcolor'}.$border.$config{'themecolor'}, 1);
+    
+    # Display legend below map
+    foreach my $legend_line (@legend_entries) {
+        writeline($config{'systemcolor'}.$legend_line.$config{'themecolor'}, 1);
+    }
+}
+
+sub show_enhanced_map {
+    my ($player) = @_;
+    # Enhanced mode: larger map for widescreen terminals (120+ columns)
+    # For now, delegate to standard map - can be enhanced later
+    show_standard_map($player);
+}
+
+sub show_standard_map {
+    my ($player) = @_;
+    my $origin_room = $player->{room} || 1;
+    my $realm_name = eval { load_realm_name() } || "the realm";
+    my $map_width  = 31;
+    my $map_height = 15;
+    my $half_w = int($map_width / 2);
+    my $half_h = int($map_height / 2);
+    my ($px, $py, $pz) = get_coords_for_room($origin_room);
+
+    # CP437 symbol map - using proper CP437 codes
+    my %cp437 = (
+        '@'  => '@',            # Player (use plain @ for compatibility)
+        'M'  => 'M',            # Monster
+        'T'  => 'T',            # Town (use plain T for compatibility)
+        'K'  => 'K',            # Castle/Keep
+        'c'  => 'c',            # Cave
+        'd'  => 'd',            # Dungeon
+        '^'  => '^',            # Mountain
+        'F'  => chr(5),         # Forest (♣)
+        '.'  => '.',            # Grass/Swamp (·)
+        '#'  => chr(176),       # Road (░)
+        '~'  => chr(247),       # River (≈)
+        'O'  => chr(248),       # Lake (°)
+        '0'  => chr(248),       # Moat/Lake (°)
+        '='  => chr(205),       # Bridge (═)
+        'D'  => chr(177),       # Drawbridge (▒)
+        '$'  => '$',            # Shop
+        'I'  => 'I',            # Inn
+        '+'  => '+',            # Temple
+        't'  => 't',            # Tavern
+        '*'  => '*',            # Tower
+        'P'  => 'P',            # Plaza
+        'V'  => 'V',            # Vault
+        'h'  => 'h',            # House
+        ','  => ',',            # Yard
+        'G'  => 'G',            # Gate Tower
+        'B'  => 'B',            # Bank
+        'n'  => chr(239),       # Hill (○) - Distinct from mountain
+        ' '  => ' ',            # Blank
+        'E'  => 'E',            # Exit
+    );
+
+    # Update color map to make hills distinct from mountains
+    my %color_map = (
+        '@'  => $BWH,
+        '@o' => $BYL,   # Other player (yellow)
+        'M'  => $BRD,   # Monster
+        'T'  => $BYL,
+        'K'  => $BWH,
+        'c'  => $BMG,
+        'd'  => $BRD,
+        '^'  => $BWH,   # Mountain (white) - More visible
+        'F'  => $GRN,
+        '.'  => $BGN,   # Grass (green) by default, swamp handled below
+        '#'  => $BBK,   # Road (dark gray)
+        '~'  => $BCN,
+        'O'  => $BCN,   # Lake (blue)
+        '0'  => $BBR,   # Moat (brown)
+        '='  => $BWH,   # Bridge (white)
+        'D'  => $BBR,   # Drawbridge (brown)
+        '$'  => $BYL,
+        'I'  => $BWH,
+        '+'  => $BMG,
+        't'  => $BRD,
+        '*'  => $BWH,
+        'P'  => $BYL,
+        'V'  => $BWH,
+        'h'  => $BBK,
+        ','  => $GRN,
+        'G'  => $BWH,
+        'B'  => $BYL,
+        'n'  => $BBR,   # Hill (brown)
+        'E'  => $BYL,
+        ' '  => $config{'themecolor'},
+    );
+
+    # Gather all players in all rooms (excluding self)
+    my %players_by_room;
+    my $room_players_dir = "$config{transient}/room_players";
+    if (-d $room_players_dir) {
+        opendir(my $dh, $room_players_dir);
+        while (my $file = readdir($dh)) {
+            next unless $file =~ /^(\d+)\.players$/;
+            my $roomid = $1;
+            open(my $fh, "<", "$room_players_dir/$file");
+            while (<$fh>) {
+                chomp;
+                my ($name, $node) = split(/\|/, $_, 2);
+                next unless defined $name && $name ne '';
+                $name =~ s/^\s+|\s+$//g;
+                next if $name eq '' || lc($name) eq lc($player->{name});
+                push @{$players_by_room{$roomid}}, $name;
+            }
+            close($fh);
+        }
+        closedir($dh);
+    }
+
+    # Build initial map grid
+    my @map;
+    my %room_at_coord;  # Track which room is at each (col, row) for connection drawing
+    
+    for my $row (0 .. $map_height-1) {
+        my $y = $py - $half_h + $row;
+        my @row;
+        for my $col (0 .. $map_width-1) {
+            my $x = $px - $half_w + $col;
+            my $z = $pz;
+            my $symbol = ' ';
+            my $rid = get_room_id_by_absolute_coords($x, $y, $z);
+            my $dx = $col - $half_w;
+            my $dy = $row - $half_h;
+
+            # Store room ID at this coordinate for connection drawing
+            $room_at_coord{"$col,$row"} = $rid if $rid && $rid > 0;
+
+            # Show self
+            if ($dx == 0 && $dy == 0) {
+                $symbol = '@';
+            }
+            # Show other players as yellow @
+            elsif ($rid && exists $players_by_room{$rid} && @{$players_by_room{$rid}}) {
+                $symbol = '@o';
+            }
+            # Otherwise, assign symbol by feature/region
+            elsif ($rid && $rid > 0) {
+                my $r = read_room_record($rid);
+                $r->{feature} =~ s/^\s+|\s+$//g if defined $r->{feature};
+                $r->{region}  =~ s/^\s+|\s+$//g if defined $r->{region};
+                
+                # Use "." for both grass and swamp, color green for grass, brown for swamp
+                if ($r->{region} && $r->{region} =~ /Swamp/i) {
+                    $symbol = '.';
+                } elsif ($r->{region} && $r->{region} =~ /Grass/i) {
+                    $symbol = '.';
+                } elsif ($r->{feature} && $r->{feature} ne '') {
+                    # Use more distinctive symbols for different dungeon/cave features
+                    $symbol =
+                        $r->{feature} eq 'Shop'            ? '$' :
+                        $r->{feature} eq 'Inn'             ? 'I' :
+                        $r->{feature} eq 'Temple'          ? '+' :
+                        $r->{feature} eq 'Tavern'          ? 't' :
+                        $r->{feature} eq 'Bridge'          ? '=' :
+                        $r->{feature} eq 'Drawbridge'      ? 'D' :
+                        $r->{feature} eq 'CaveMouth'       ? 'C' :
+                        $r->{feature} eq 'DungeonEntrance' ? 'E' :
+                        $r->{feature} eq 'DungeonStairs'   ? '<' :
+                        $r->{feature} eq 'DungeonLanding'  ? 'L' :
+                        $r->{feature} eq 'DungeonCorridor' ? chr(176) :  # Light shade
+                        $r->{feature} eq 'DungeonChamber'  ? '#' :
+                        $r->{feature} eq 'DungeonCell'     ? 'c' :
+                        $r->{feature} eq 'DungeonGuardroom'? 'G' :
+                        $r->{feature} eq 'DungeonPrison'   ? 'P' :
+                        $r->{feature} eq 'DungeonVault'    ? 'V' :
+                        $r->{feature} eq 'CaveTunnel'      ? chr(177) :  # Medium shade
+                        $r->{feature} eq 'CaveChamber'     ? 'o' :
+                        $r->{feature} eq 'CaveShaft'       ? 'v' :
+                        $r->{feature} eq 'CaveDeadend'     ? 'x' :
+                        $r->{feature} eq 'CaveLake'        ? '~' :
+                        $r->{feature} eq 'ThroneRoom'      ? 'T' :
+                        $r->{feature} eq 'Tower'           ? '*' :
+                        $r->{feature} eq 'Plaza'           ? 'p' :
+                        $r->{feature} eq 'Keep'            ? 'K' :
+                        $r->{feature} eq 'GateTower'       ? 'g' :
+                        $r->{feature} eq 'LockedHouse'     ? 'h' :
+                        $r->{feature} eq 'House'           ? 'h' :
+                        $r->{feature} eq 'Yard'            ? ',' :
+                        $r->{feature} eq 'Bank'            ? 'B' :
+                        undef;
+                }
+                if (!defined $symbol || $symbol eq ' ') {
+                    if ($r->{region} && $r->{region} ne '') {
+                        $symbol =
+                            $r->{region} eq 'Town'      ? 't'  :
+                            $r->{region} eq 'Castle'    ? 'K'  :
+                            $r->{region} eq 'Cave'      ? chr(177) :  # Medium shade for generic cave
+                            $r->{region} eq 'Dungeon'   ? chr(176) :  # Light shade for generic dungeon
+                            $r->{region} eq 'Mountain'  ? '^'  :
+                            $r->{region} eq 'Forest'    ? 'F'  :
+                            $r->{region} eq 'River'     ? '~'  :
+                            $r->{region} eq 'Lake'      ? 'O'  :
+                            $r->{region} eq 'Road'      ? '#'  :
+                            $r->{region} eq 'Swamp'     ? '.'  :
+                            $r->{region} eq 'Hill'      ? 'n'  :
+                            $r->{region} eq 'Grass'     ? '.'  :
+                            $r->{region} eq 'Moat'      ? '0'  : '.';
+                    } else {
+                        $symbol = '.';
+                    }
+                }
+            }
+            # Color: green for grass, brown for swamp, else default
+            my $color;
+            if ($rid && $rid > 0) {
+                my $r = read_room_record($rid);
+                # Only override color for '.' (grass/swamp), not for '@'
+                if ($symbol eq '.' && $r->{region} && $r->{region} =~ /Swamp/i) {
+                    $color = $BBR; # brown
+                } elsif ($symbol eq '.' && $r->{region} && $r->{region} =~ /Grass/i) {
+                    $color = $BGN; # green
+                } else {
+                    $color = $color_map{$symbol} // $config{'themecolor'};
+                }
+            } else {
+                $color = $color_map{$symbol} // $config{'themecolor'};
+            }
+            
+            # Use CP437 display character
+            my $char = $cp437{$symbol} // $symbol;
+            $char = '@' if $symbol eq '@o'; # always show @ for other player
+            push @row, $color . $char . $config{'themecolor'};
+        }
+        push @map, \@row;
+    }
+    
+    # For underground areas (z < 0), draw connection lines between adjacent rooms
+    if ($pz < 0) {
+        for my $row (0 .. $map_height-1) {
+            for my $col (0 .. $map_width-1) {
+                next unless $room_at_coord{"$col,$row"};
+                my $rid = $room_at_coord{"$col,$row"};
+                my $room = read_room_record($rid);
+                next unless $room && $room->{exits};
+                
+                # Check for E/W connections and draw horizontal lines
+                if ($col < $map_width - 1 && $room->{exits}{E}) {
+                    my $east_rid = $room_at_coord{($col+1).",$row"};
+                    if ($east_rid && $east_rid == $room->{exits}{E}) {
+                        # There's a room to the east with matching exit - but it's already drawn
+                        # Just ensure visibility by keeping current symbols
+                    }
+                }
+                
+                # Check for N/S connections (already visible vertically)
+            }
+        }
+    }
+
+    # Context-aware legend: different symbols for underground vs surface
+    my @legend_entries;
+    if ($pz < 0) {
+        # Underground legend - show dungeon/cave symbols
+        @legend_entries = (
+            [$config{'usercolor'} . '@' . $config{'themecolor'},  'You'],
+            [$BYL . '@' . $config{'themecolor'}, 'Other player'],
+            [$BBK . chr(176) . $config{'themecolor'},  'Dungeon Corridor'],
+            [$BBK . '#' . $config{'themecolor'},  'Dungeon Chamber'],
+            [$BBK . 'c' . $config{'themecolor'},  'Dungeon Cell'],
+            [$BBK . 'G' . $config{'themecolor'},  'Guardroom'],
+            [$BBK . 'P' . $config{'themecolor'},  'Prison'],
+            [$BYL . 'L' . $config{'themecolor'},  'Stair Landing'],
+            [$BYL . '<' . $config{'themecolor'},  'Stairs'],
+            [$BWH . 'V' . $config{'themecolor'},  'Vault'],
+            [$BBK . chr(177) . $config{'themecolor'},  'Cave Tunnel'],
+            [$BBK . 'o' . $config{'themecolor'},  'Cave Chamber'],
+            [$BBK . 'x' . $config{'themecolor'},  'Dead End'],
+            [$BCN . '~' . $config{'themecolor'},  'Underground Lake'],
+        );
+    } else {
+        # Surface legend - show outdoor/town symbols
+        @legend_entries = (
+            [$config{'usercolor'} . '@' . $config{'themecolor'},  'You'],
+            [$BYL . '@' . $config{'themecolor'}, 'Other player'],
+            [$BYL . 'T' . $config{'themecolor'},  'Town'],
+            [$BWH . 'K' . $config{'themecolor'},  'Castle/Keep'],
+            [$BMG . 'C' . $config{'themecolor'},  'Cave Entrance'],
+            [$BRD . 'E' . $config{'themecolor'},  'Dungeon Entrance'],
+            [$BWH . '^' . $config{'themecolor'},  'Mountain'],
+            [$GRN . 'F' . $config{'themecolor'},  'Forest'],
+            [$GRN . $cp437{'.'} . $config{'themecolor'},  'Grass'],
+            [$BBK . $cp437{'#'} . $config{'themecolor'},  'Road'],
+            [$BCN . $cp437{'~'} . $config{'themecolor'},  'River'],
+            [$BCN . $cp437{'O'} . $config{'themecolor'},  'Lake'],
+            [$BYL . '$' . $config{'themecolor'},  'Shop'],
+            [$BWH . 'I' . $config{'themecolor'},  'Inn'],
+            [$BMG . '+' . $config{'themecolor'},  'Temple'],
+            [$BRD . 't' . $config{'themecolor'},  'Tavern'],
+            [$BYL . 'B' . $config{'themecolor'},  'Bank'],
+        );
+    }
+
+    my $legend_rows = scalar @legend_entries;
+    my $legend_top = int(($map_height - $legend_rows) / 2);
+
+    # CP437 frame
+    my $border = chr(201) . (chr(205) x $map_width) . chr(187);
+    my $side = chr(186);
+
+    writeline($config{'usercolor'}.section_header("Map of $realm_name").$config{'themecolor'}, 1);
+    writeline($config{'systemcolor'}.$border.$config{'themecolor'}, 1);
+
+    for my $i (0 .. $map_height-1) {
+        my $mapline = join('', @{$map[$i]});
+        my $legendline = "";
+        if ($i >= $legend_top && $i < $legend_top + $legend_rows) {
+            my ($sym, $desc) = @{$legend_entries[$i - $legend_top]};
+            $legendline = sprintf("  %s = %s", $sym, $desc);
+        }
+        writeline($config{'systemcolor'}.$side.$mapline.$config{'systemcolor'}.$side.$legendline, 1);
+    }
+    
+    $border = chr(200) . (chr(205) x $map_width) . chr(188);
+    writeline($config{'systemcolor'}.$border.$config{'themecolor'}, 1);
+}
+
+sub show_sysop_map_view {
+    my ($player) = @_;
+    my $origin_room = $player->{room} || 1;
+
+    my $realm_name = eval { load_realm_name() } || "the realm";
+    my $map_width  = 31;
+    my $map_height = 15;
+    my $half_w = int($map_width / 2);
+    my $half_h = int($map_height / 2);
+
+    my ($px, $py, $pz) = get_coords_for_room($origin_room);
+
+    # CP437 symbol map - using proper CP437 codes
+    my %cp437 = (
+        '@'  => '@',            # Player (use plain @ for compatibility)
+        'M'  => 'M',            # Monster
+        'T'  => 'T',            # Town (use plain T for compatibility)
+        'K'  => 'K',            # Castle/Keep
+        'c'  => 'c',            # Cave
+        'd'  => 'd',            # Dungeon
+        '^'  => '^',            # Mountain
+        'F'  => chr(5),         # Forest (♣)
+        '.'  => '.',            # Grass/Swamp (·)
+        '#'  => chr(176),       # Road (░)
+        '~'  => chr(247),       # River (≈)
+        'O'  => chr(248),       # Lake (°)
+        '0'  => chr(248),       # Moat/Lake (°)
+        '='  => chr(205),       # Bridge (═)
+        'D'  => chr(177),       # Drawbridge (▒)
+        '$'  => '$',            # Shop
+        'I'  => 'I',            # Inn
+        '+'  => '+',            # Temple
+        't'  => 't',            # Tavern
+        '*'  => '*',            # Tower
+        'P'  => 'P',            # Plaza
+        'V'  => 'V',            # Vault
+        'h'  => 'h',            # House
+        ','  => ',',            # Yard
+        'G'  => 'G',            # Gate Tower
+        'B'  => 'B',            # Bank
+        'n'  => chr(239),       # Hill (○) - Distinct from mountain
+        ' '  => ' ',            # Blank
+        'E'  => 'E',            # Exit
+    );
+
+    # Update color map to make hills distinct from mountains
+    my %color_map = (
+        '@'  => $BWH,
+        '@o' => $BYL,   # Other player (yellow)
+        'M'  => $BRD,   # Monster
+        'T'  => $BYL,
+        'K'  => $BWH,
+        'c'  => $BMG,
+        'd'  => $BRD,
+        '^'  => $BWH,   # Mountain (white) - More visible
+        'F'  => $GRN,
+        '.'  => $BGN,   # Grass (green) by default, swamp handled below
+        '#'  => $BBK,   # Road (dark gray)
+        '~'  => $BCN,
+        'O'  => $BCN,   # Lake (blue)
+        '0'  => $BBR,   # Moat (brown)
+        '='  => $BWH,   # Bridge (white)
+        'D'  => $BBR,   # Drawbridge (brown)
+        '$'  => $BYL,
+        'I'  => $BWH,
+        '+'  => $BMG,
+        't'  => $BRD,
+        '*'  => $BWH,
+        'P'  => $BYL,
+        'V'  => $BWH,
+        'h'  => $BBK,
+        ','  => $GRN,
+        'G'  => $BWH,
+        'B'  => $BYL,
+        'n'  => $BBR,   # Hill (brown)
+        'E'  => $BYL,
+        ' '  => $config{'themecolor'},
+    );
+
+    # Gather all players in all rooms (excluding self)
+    my %players_by_room;
+    my $room_players_dir = "$config{transient}/room_players";
+    if (-d $room_players_dir) {
+        opendir(my $dh, $room_players_dir);
+        while (my $file = readdir($dh)) {
+            next unless $file =~ /^(\d+)\.players$/;
+            my $roomid = $1;
+            open(my $fh, "<", "$room_players_dir/$file");
+            while (<$fh>) {
+                chomp;
+                my ($name, $node) = split(/\|/, $_, 2);
+                next unless defined $name && $name ne '';
+                $name =~ s/^\s+|\s+$//g;
+                next if $name eq '' || lc($name) eq lc($player->{name});
+                push @{$players_by_room{$roomid}}, $name;
+            }
+            close($fh);
+        }
+        closedir($dh);
+    }
+
+    # --- Monster parsing: use get_room_monsters and always set roomnum ---
+    my %monsters_by_room;
+    for my $row (0 .. $map_height-1) {
+        my $y = $py - $half_h + $row;
+        for my $col (0 .. $map_width-1) {
+            my $x = $px - $half_w + $col;
+            my $z = $pz;
+            my $rid = get_room_id_by_absolute_coords($x, $y, $z);
+            next unless $rid && $rid > 0;
+            my $room = read_room_record($rid);
+            $room->{roomnum} = $rid if $room && !defined $room->{roomnum};
+            my @monsters = ();
+            if (defined &get_room_monsters) {
+                eval { @monsters = get_room_monsters($room); };
+                if ($@) {
+                    rooms_debug("Error getting monsters for room $rid: $@");
+                }
+                @monsters = grep { 
+                    $_ && $_->{name} && 
+                    (!defined($_->{hp}) || $_->{hp} > 0) &&
+                    (!defined($_->{room}) || $_->{room} == $rid)
+                } @monsters;
+            }
+            if (@monsters) {
+                $monsters_by_room{$rid} = \@monsters;
+                rooms_debug("Found " . scalar(@monsters) . " monsters in room $rid for map display");
+            }
+        }
+    }
+
+    my @map;
+    for my $row (0 .. $map_height-1) {
+        my $y = $py - $half_h + $row;
+        my @row;
+        for my $col (0 .. $map_width-1) {
+            my $x = $px - $half_w + $col;
+            my $z = $pz;
+            my $symbol = ' ';
+            my $rid = get_room_id_by_absolute_coords($x, $y, $z);
+
+            if ($col == $half_w && $row == $half_h) {
+                $symbol = '@';
+            }
+            elsif ($rid && exists $players_by_room{$rid} && @{$players_by_room{$rid}}) {
+                $symbol = '@o';
+            }
+            elsif ($rid && $monsters_by_room{$rid}) {
+                $symbol = 'M';
+            }
+            elsif ($rid && $rid > 0) {
+                my $r = read_room_record($rid);
+                $r->{feature} =~ s/^\s+|\s+$//g if defined $r->{feature};
+                $r->{region}  =~ s/^\s+|\s+$//g if defined $r->{region};
+                # Use "." for both grass and swamp, color green for grass, brown for swamp
+                if ($r->{region} && $r->{region} =~ /Swamp/i) {
+                    $symbol = '.';
+                } elsif ($r->{region} && $r->{region} =~ /Grass/i) {
+                    $symbol = '.';
+                } elsif ($r->{feature} && $r->{feature} ne '') {
+                    # Use more distinctive symbols for different dungeon/cave features (same as user map)
+                    $symbol =
+                        $r->{feature} eq 'Shop'            ? '$' :
+                        $r->{feature} eq 'Inn'             ? 'I' :
+                        $r->{feature} eq 'Temple'          ? '+' :
+                        $r->{feature} eq 'Tavern'          ? 't' :
+                        $r->{feature} eq 'Bridge'          ? '=' :
+                        $r->{feature} eq 'Drawbridge'      ? 'D' :
+                        $r->{feature} eq 'CaveMouth'       ? 'C' :
+                        $r->{feature} eq 'DungeonEntrance' ? 'E' :
+                        $r->{feature} eq 'DungeonStairs'   ? '<' :
+                        $r->{feature} eq 'DungeonLanding'  ? 'L' :
+                        $r->{feature} eq 'DungeonCorridor' ? chr(176) :  # Light shade
+                        $r->{feature} eq 'DungeonChamber'  ? '#' :
+                        $r->{feature} eq 'DungeonCell'     ? 'c' :
+                        $r->{feature} eq 'DungeonGuardroom'? 'G' :
+                        $r->{feature} eq 'DungeonPrison'   ? 'P' :
+                        $r->{feature} eq 'DungeonVault'    ? 'V' :
+                        $r->{feature} eq 'CaveTunnel'      ? chr(177) :  # Medium shade
+                        $r->{feature} eq 'CaveChamber'     ? 'o' :
+                        $r->{feature} eq 'CaveShaft'       ? 'v' :
+                        $r->{feature} eq 'CaveDeadend'     ? 'x' :
+                        $r->{feature} eq 'CaveLake'        ? '~' :
+                        $r->{feature} eq 'ThroneRoom'      ? 'T' :
+                        $r->{feature} eq 'Tower'           ? '*' :
+                        $r->{feature} eq 'Plaza'           ? 'p' :
+                        $r->{feature} eq 'Keep'            ? 'K' :
+                        $r->{feature} eq 'GateTower'       ? 'g' :
+                        $r->{feature} eq 'LockedHouse'     ? 'h' :
+                        $r->{feature} eq 'House'           ? 'h' :
+                        $r->{feature} eq 'Yard'            ? ',' :
+                        $r->{feature} eq 'Bank'            ? 'B' :
+                        undef;
+                }
+                if (!defined $symbol || $symbol eq ' ') {
+                    if ($r->{region} && $r->{region} ne '') {
+                        $symbol =
+                            $r->{region} eq 'Town'      ? 't'  :
+                            $r->{region} eq 'Castle'    ? 'K'  :
+                            $r->{region} eq 'Cave'      ? chr(177) :  # Medium shade for generic cave
+                            $r->{region} eq 'Dungeon'   ? chr(176) :  # Light shade for generic dungeon
+                            $r->{region} eq 'Mountain'  ? '^'  :
+                            $r->{region} eq 'Forest'    ? 'F'  :
+                            $r->{region} eq 'River'     ? '~'  :
+                            $r->{region} eq 'Lake'      ? 'O'  :
+                            $r->{region} eq 'Road'      ? '#'  :
+                            $r->{region} eq 'Swamp'     ? '.'  :
+                            $r->{region} eq 'Hill'      ? 'n'  :
+                            $r->{region} eq 'Grass'     ? '.'  :
+                            $r->{region} eq 'Moat'      ? '0'  : '.';
+                    } else {
+                        $symbol = '.';
+                    }
+                }
+            }
+            # Color: green for grass, brown for swamp, else default
+            my $color;
+            if ($rid && $rid > 0) {
+                my $r = read_room_record($rid);
+                # Only override color for '.' (grass/swamp), not for '@'
+                if ($symbol eq '.' && $r->{region} && $r->{region} =~ /Swamp/i) {
+                    $color = $BBR; # brown
+                } elsif ($symbol eq '.' && $r->{region} && $r->{region} =~ /Grass/i) {
+                    $color = $BGN; # green
+                } else {
+                    $color = $color_map{$symbol} // $config{'themecolor'};
+                }
+            } else {
+                $color = $color_map{$symbol} // $config{'themecolor'};
+            }
+            my $char = $cp437{$symbol} // $symbol;
+            $char = '@' if $symbol eq '@o';  # Always show @ for other players
+            push @row, $color . $char . $config{'themecolor'};
+        }
+        push @map, \@row;
+    }
+
+    # Context-aware legend: different symbols for underground vs surface (sysop map includes monsters)
+    my @legend_entries;
+    if ($pz < 0) {
+        # Underground legend - show dungeon/cave symbols
+        @legend_entries = (
+            [$config{'usercolor'} . '@' . $config{'themecolor'},  'You'],
+            [$BYL . '@' . $config{'themecolor'}, 'Other player'],
+            [$BRD . 'M' . $config{'themecolor'}, 'Monster'],
+            [$BBK . chr(176) . $config{'themecolor'},  'Dungeon Corridor'],
+            [$BBK . '#' . $config{'themecolor'},  'Dungeon Chamber'],
+            [$BBK . 'c' . $config{'themecolor'},  'Dungeon Cell'],
+            [$BBK . 'G' . $config{'themecolor'},  'Guardroom'],
+            [$BBK . 'P' . $config{'themecolor'},  'Prison'],
+            [$BYL . 'L' . $config{'themecolor'},  'Stair Landing'],
+            [$BYL . '<' . $config{'themecolor'},  'Stairs'],
+            [$BWH . 'V' . $config{'themecolor'},  'Vault'],
+            [$BBK . chr(177) . $config{'themecolor'},  'Cave Tunnel'],
+            [$BBK . 'o' . $config{'themecolor'},  'Cave Chamber'],
+            [$BBK . 'x' . $config{'themecolor'},  'Dead End'],
+            [$BCN . '~' . $config{'themecolor'},  'Underground Lake'],
+        );
+    } else {
+        # Surface legend - show outdoor/town symbols
+        @legend_entries = (
+            [$config{'usercolor'} . '@' . $config{'themecolor'},  'You'],
+            [$BYL . '@' . $config{'themecolor'}, 'Other player'],
+            [$BRD . 'M' . $config{'themecolor'}, 'Monster'],
+            [$BYL . 'T' . $config{'themecolor'},  'Town'],
+            [$BWH . 'K' . $config{'themecolor'},  'Castle/Keep'],
+            [$BMG . 'C' . $config{'themecolor'},  'Cave Entrance'],
+            [$BRD . 'E' . $config{'themecolor'},  'Dungeon Entrance'],
+            [$BWH . '^' . $config{'themecolor'},  'Mountain'],
+            [$GRN . 'F' . $config{'themecolor'},  'Forest'],
+            [$GRN . $cp437{'.'} . $config{'themecolor'},  'Grass'],
+            [$BBK . $cp437{'#'} . $config{'themecolor'},  'Road'],
+            [$BCN . $cp437{'~'} . $config{'themecolor'},  'River'],
+            [$BCN . $cp437{'O'} . $config{'themecolor'},  'Lake'],
+            [$BYL . '$' . $config{'themecolor'},  'Shop'],
+            [$BWH . 'I' . $config{'themecolor'},  'Inn'],
+            [$BMG . '+' . $config{'themecolor'},  'Temple'],
+            [$BRD . 't' . $config{'themecolor'},  'Tavern'],
+            [$BYL . 'B' . $config{'themecolor'},  'Bank'],
+        );
+    }
+
+    my $legend_rows = scalar @legend_entries;
+    my $legend_top = int(($map_height - $legend_rows) / 2);
+
+    # CP437 frame
+    my $border = chr(201) . (chr(205) x $map_width) . chr(187);
+    my $side = chr(186);
+
+    writeline($config{'usercolor'}.section_header("Sysop Map of $realm_name (Monsters Shown)").$config{'themecolor'}, 1);
+    writeline($config{'systemcolor'}.$border.$config{'themecolor'}, 1);
+
+    for my $i (0 .. $map_height-1) {
+        my $mapline = join('', @{$map[$i]});
+        my $legendline = "";
+        if ($i >= $legend_top && $i < $legend_top + $legend_rows) {
+            my ($sym, $desc) = @{$legend_entries[$i - $legend_top]};
+            $legendline = sprintf("  %s = %s", $sym, $desc);
+        }
+        writeline($config{'systemcolor'}.$side.$mapline.$config{'systemcolor'}.$side.$legendline, 1);
+    }
+    $border = chr(200) . (chr(205) x $map_width) . chr(188);
+    writeline($config{'systemcolor'}.$border.$config{'themecolor'}, 1);
+}
+
+sub is_monster_in_room {
+    my ($mon, $roomnum) = @_;
+    return 0 unless $mon && $roomnum;
+    
+    # Primary check: monster's room field
+    if (defined $mon->{room} && $mon->{room} == $roomnum) {
+        return 1;
+    }
+    
+    # Secondary check: current room flag (if it exists)
+    if ($mon->{id}) {
+        my $cur_flag = monster_currentroom_flag_path($mon);
+        if (-e $cur_flag) {
+            open(my $fh, '<', $cur_flag) or return 0;
+            my $cur_room = <$fh>;
+            close($fh);
+            
+            if (defined $cur_room) {
+                chomp($cur_room);
+                return 1 if ($cur_room eq $roomnum || $cur_room == $roomnum);
+            }
+        }
+    }
+    
+    return 0;
+}
+
+sub use_dynamic_exit {
+    my ($player, $room, $action, $objname, $prev_roomid) = @_;
+    
+    # Normalize the object name
+    my $norm_name = normalize_item_name($objname);
+    
+    # Try to find a matching object in room description
+    my $matched = 0;
+    my $destination = 0;
+    
+    # First, check for teleportation items in inventory
+    if ($action eq 'use') {
+        foreach my $item (@{$player->{inventory}}) {
+            my $record;
+            
+            if ($item->{type} eq 'treasure') {
+                $record = read_treasure_record($item->{idx});
+                
+                next unless $record && $record->{name};
+                
+                if (normalize_item_name($record->{name}) eq $norm_name) {
+                    # Handle teleportation rings
+                    if ($record->{ringtype} && $record->{ringspell}) {
+                        my $spell = read_spell_record($record->{ringspell});
+                        if ($spell && $spell->{teleport} && $spell->{teleport} > 0) {
+                            # This is a teleportation ring
+                            writeline($config{'systemcolor'}."You activate the $record->{name}...".$config{'themecolor'}, 1);
+                            
+                            # Random teleport
+                            my $max_room = get_max_room();
+                            my $dest = 1 + int(rand($max_room));
+                            
+                            # Try to find a suitable destination
+                            my $attempts = 0;
+                            my $valid_dest = 0;
+                            while ($attempts < 20 && !$valid_dest) {
+                                my $test_room = read_room_record($dest);
+                                if ($test_room && $test_room->{shortdesc} && 
+                                    (!$test_room->{region} || $test_room->{region} !~ /^(Mountain|Lake|Moat)$/i)) {
+                                    $valid_dest = 1;
+                                } else {
+                                    $dest = 1 + int(rand($max_room));
+                                }
+                                $attempts++;
+                            }
+                            
+                            if ($valid_dest) {
+                                # Teleport the player
+                                photonmud_leave_room($player, $player->{room}, "teleport");
+                                $player->{room} = $dest;
+                                record_node_session($player);
+                                
+                                my $dest_room = read_room_record($dest);
+                                photonmud_enter_room($player, $dest, $prev_roomid, {
+                                    is_teleport => 1,
+                                    room => $dest_room
+                                });
+                                
+                                show_room_view($player, $dest_room);
+                                return 1;
+                            } else {
+                                writeline($config{'errorcolor'}."The $record->{name} fizzles and fails to activate.".$config{'themecolor'}, 1);
+                                return 0;
+                            }
+                        }
+                    }
+                    
+                    # Handle other usable items
+                    if ($record->{usable} && $record->{usable} > 0) {
+                        writeline($config{'systemcolor'}."You use the $record->{name}.".$config{'themecolor'}, 1);
+                        return 1;
+                    }
+                    
+                    writeline($config{'errorcolor'}."You're not sure how to use the $record->{name}.".$config{'themecolor'}, 1);
+                    return 0;
+                }
+            }
+        }
+    }
+    
+    # Check long description for dynamic exit references
+    if ($room->{longdesc}) {
+        my $longdesc = $room->{longdesc};
+        
+        # Look for mentions of the object in the description
+        if ($longdesc =~ /\b$norm_name\b/i) {
+            $matched = 1;
+            
+            # Look for destination objects (doors, ladders, etc.)
+            foreach my $dest_type (keys %DEST_OBJECT_TYPES) {
+                if ($norm_name =~ /\b$dest_type\b/i || $objname =~ /\b$dest_type\b/i) {
+                    $matched = 2;
+                    last;
+                }
+            }
+        }
+    }
+    
+    # If there's a match, try to find a suitable exit
+    if ($matched) {
+        # Check for existing exits that might match
+        foreach my $dir (keys %{$room->{exits}}) {
+            my $dest = $room->{exits}{$dir};
+            if ($dest && $dest > 0) {
+                # Check if this exit matches our object
+                my $dest_room = read_room_record($dest);
+                if ($dest_room && ($dest_room->{shortdesc} || $dest_room->{longdesc})) {
+                    # Use this exit
+                    $destination = $dest;
+                    
+                    # If multiple exits could match, prefer ones that match the direction
+                    # For example, if "north door" is used, prefer N exit
+                    if ($objname =~ /\bnorth\b/i && $dir eq 'N') {
+                        $destination = $dest;
+                        last;
+                    } elsif ($objname =~ /\bsouth\b/i && $dir eq 'S') {
+                        $destination = $dest;
+                        last;
+                    } elsif ($objname =~ /\beast\b/i && $dir eq 'E') {
+                        $destination = $dest;
+                        last;
+                    } elsif ($objname =~ /\bwest\b/i && $dir eq 'W') {
+                        $destination = $dest;
+                        last;
+                    } elsif ($objname =~ /\bup\b/i && $dir eq 'UP') {
+                        $destination = $dest;
+                        last;
+                    } elsif ($objname =~ /\bdown\b/i && $dir eq 'DOWN') {
+                        $destination = $dest;
+                        last;
+                    }
+                }
+            }
+        }
+    }
+    
+    # If we found a destination, move the player
+    if ($destination > 0) {
+        my $prev_room = $player->{room};
+        
+        # Leave current room
+        photonmud_leave_room($player, $player->{room}, "use $objname");
+        
+        # Update player location
+        $player->{room} = $destination;
+        
+        # Enter new room
+        my $dest_room = read_room_record($destination);
+        photonmud_enter_room($player, $destination, $prev_room, {
+            room => $dest_room,
+            via_object => $objname
+        });
+        
+        # Show the new room
+        show_room_view($player, $dest_room);
+        return 1;
+    } elsif ($matched) {
+        # Found the object but no valid exit
+        writeline($config{'systemcolor'}."You $action the $objname, but nothing happens.".$config{'themecolor'}, 1);
+        return 0;
+    } else {
+        # Object not found
+        writeline($config{'errorcolor'}."You don't see $objname here.".$config{'themecolor'}, 1);
+        return 0;
+    }
+}
+
+return 1;

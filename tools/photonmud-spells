@@ -1,0 +1,116 @@
+#!/usr/bin/perl
+# Dumper for spells.dat
+
+use strict;
+use warnings;
+use Fcntl qw(:seek);
+use Getopt::Long;
+
+my $file = 'data/photonmud/spells.dat';
+my $csv_output = '';
+my $help = 0;
+
+GetOptions(
+    "file=s"     => \$file,
+    "csv=s"      => \$csv_output,
+    "help"       => \$help
+) or die("Error in command line arguments\n");
+
+if ($help) {
+    print "Usage: $0 [options]\n";
+    print "Options:\n";
+    print "  --file=FILE     Specify the spells data file (default: data/photonmud/spells.dat)\n";
+    print "  --csv=FILE      Export spells to CSV file compatible with photonmud-spell-import\n";
+    print "  --help          Show this help message\n";
+    exit(0);
+}
+
+my $reclen = 216; # SpellType record length from DNDDOOR.BAS
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+# Open CSV output file if requested
+my $csv_fh;
+if ($csv_output) {
+    open($csv_fh, ">:encoding(utf8)", $csv_output) or die "Failed to open CSV output file $csv_output: $!";
+    # Write CSV header matching import format
+    print $csv_fh "name|chant|level|type|teleport|psionic|psionicmode|classtype|desc|ingred|spellflag\n";
+}
+
+my $record_num = 1;
+my $offset = 0;
+
+while (1) {
+    seek($fh, $offset, SEEK_SET);
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    # If the record is all zeros, treat as empty/deleted
+    if ($buf =~ /^\0+$/) {
+        unless ($csv_output) {
+            print "Record $record_num: EMPTY/DELETED\n\n";
+        }
+        $record_num++;
+        $offset += $reclen;
+        next;
+    }
+
+    my %spell;
+    $spell{name}         = substr($buf, 0, 30);    $spell{name}      =~ s/[\0 ]+$//;
+    $spell{chant}        = substr($buf, 30, 80);   $spell{chant}     =~ s/[\0 ]+$//;
+    $spell{level}        = unpack("s", substr($buf, 110, 2));
+    $spell{type}         = unpack("s", substr($buf, 112, 2));
+    $spell{teleport}     = unpack("f<", substr($buf, 114, 4));
+    $spell{psionic}      = unpack("s", substr($buf, 118, 2));
+    $spell{psionicmode}  = unpack("s", substr($buf, 120, 2));
+    $spell{classtype}    = unpack("s", substr($buf, 122, 2));
+    $spell{desc}         = substr($buf, 124, 80);  $spell{desc}      =~ s/[\0 ]+$//;
+    $spell{ingred}       = substr($buf, 204, 10);  $spell{ingred}    =~ s/[\0 ]+$//;
+    $spell{spellflag}    = unpack("s", substr($buf, 214, 2));
+
+    # Handle CSV output mode
+    if ($csv_output) {
+        # Escape pipe characters in string fields
+        foreach my $field (qw(name chant desc ingred)) {
+            $spell{$field} =~ s/\|/\\|/g if defined $spell{$field};
+            # Also escape newlines
+            $spell{$field} =~ s/\n/\\n/g if defined $spell{$field};
+        }
+        
+        # Output CSV record
+        print $csv_fh join('|',
+            $spell{name} // '',
+            $spell{chant} // '',
+            $spell{level} // 0,
+            $spell{type} // 0,
+            $spell{teleport} // 0,
+            $spell{psionic} // 0,
+            $spell{psionicmode} // 0,
+            $spell{classtype} // 0,
+            $spell{desc} // '',
+            $spell{ingred} // '',
+            $spell{spellflag} // 0
+        ) . "\n";
+    } else {
+        # Standard console output
+        print "Record $record_num:\n";
+        print "Raw buffer hex: ", unpack("H*", substr($buf, 0, 64)), "\n";
+
+        # Print parsed fields
+        foreach my $k (qw(name chant level type teleport psionic psionicmode classtype desc ingred spellflag)) {
+            printf("  %-12s : %s\n", $k, defined($spell{$k}) ? $spell{$k} : '');
+        }
+        print "\n";
+    }
+
+    $record_num++;
+    $offset += $reclen;
+}
+
+close($fh);
+if ($csv_output) {
+    close($csv_fh);
+    print "Exported " . ($record_num - 1) . " spells to $csv_output\n";
+}
+

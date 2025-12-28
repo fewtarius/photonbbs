@@ -1,0 +1,38 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR LOCK Command - Secure Containers or Exits @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  LOCK <container> WITH <key>
+  LOCK <exit>
+
+@DATACLR What it does:@THEMECLR
+  LOCK secures a container or exit using a key (if required). Locked
+  containers or exits cannot be opened without the correct key or skill.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must have the correct key in your inventory.
+  - Some locks can be picked by Thieves.
+  - Locked containers protect contents from others.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None for locking. Picking locks may require a roll.
+
+@DATACLR Outcome:@THEMECLR
+  - The container or exit is now locked.
+
+@DATACLR Class Features:@THEMECLR
+  - Thieves can pick locks.
+
+@DATACLR Tips:@THEMECLR
+  - Lock valuables to prevent theft.
+  - Remember which key fits which lock.
+
+@DATACLR Example:@THEMECLR
+  LOCK CHEST WITH 101
+    The chest is now locked.
+
+@DATACLR See also:@THEMECLR
+  UNLOCK, OPEN, CLOSE, PICKLOCK
+-------------------------------------------------------------------------------

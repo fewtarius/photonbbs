@@ -1,0 +1,38 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR COUNTER Command - Reflect Damage @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  COUNTER
+
+@DATACLR What it does:@THEMECLR
+  COUNTER is a defensive action you can take during combat. When you
+  COUNTER, you reflect half of the damage from the next attack back to
+  your attacker.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - COUNTER is used on your turn in combat instead of attacking.
+  - When attacked, you take full damage, but your attacker takes half
+    the damage they dealt (rounded down).
+
+@DATACLR Dice Rolls:@THEMECLR
+  - No dice roll required; always reflects half damage.
+
+@DATACLR Outcome:@THEMECLR
+  - You take full damage, but your attacker is hurt as well.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes can use COUNTER.
+
+@DATACLR Tips:@THEMECLR
+  - Use COUNTER against strong enemies to turn their power against them.
+  - Combine with healing or buffs for survival.
+
+@DATACLR Example:@THEMECLR
+  COUNTER
+    On the next attack, you take full damage, but attacker takes half.
+
+@DATACLR See also:@THEMECLR
+  DODGE, PARRY, GUARD, SHIELD
+-------------------------------------------------------------------------------

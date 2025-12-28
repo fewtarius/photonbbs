@@ -1,0 +1,28 @@
+#!/usr/bin/perl
+# filepath: /Users/andrew/repositories/fewtarius/photonbbs/tools/photonmud-montalk-import
+use strict;
+use warnings;
+use Encode qw(encode);
+
+# CSV FORMAT:
+# Each line is a single monster talk phrase (no delimiter needed).
+# Each record is exactly 80 bytes.
+
+my $csvfile = shift || 'montalk.csv';
+my $outfile = shift || 'montalk.dat';
+
+open(my $infh, "<:encoding(utf8)", $csvfile) or die "Cannot open $csvfile: $!";
+open(my $outfh, ">:raw", $outfile) or die "Cannot open $outfile: $!";
+
+while (my $line = <$infh>) {
+    chomp $line;
+    next if $line =~ /^\s*$/ || $line =~ /^\/\//;
+    my $msg = encode('utf8', $line);
+    $msg = substr($msg, 0, 80);
+    $msg .= ("\0" x (80 - length($msg)));
+    die "Record is not 80 bytes, got " . length($msg) . " for [$line]" unless length($msg) == 80;
+    print $outfh $msg;
+}
+close $infh;
+close $outfh;
+print "Import complete: $outfile\n";

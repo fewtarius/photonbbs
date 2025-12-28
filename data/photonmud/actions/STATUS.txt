@@ -1,0 +1,45 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR STATUS/STAT Command - View Your Character's Stats @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  STATUS
+  STAT
+  STATUS <player>
+  STAT <player>
+
+@DATACLR What it does:@THEMECLR
+  STATUS (or STAT) displays your character's current stats, including level,
+  class, HP, equipment, gold, experience, and D&D-style attributes (STR, DEX,
+  CON, INT, WIS, CHA). You can also view another player's stats by specifying
+  their name.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Shows all relevant character information.
+  - Equipment bonuses and effects are included.
+  - If you specify another player's name, you see their public stats.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You see a detailed summary of your (or another's) character.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use STATUS/STAT the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Check STATUS after leveling up or equipping new items.
+  - Use STATUS <player> to size up allies or rivals.
+
+@DATACLR Example:@THEMECLR
+  STATUS
+    Name: Alice   Class: Fighter   Level: 5
+    HP: 32/40     Gold: 120        XP: 3500
+    STR: 16  DEX: 13  CON: 15  INT: 10  WIS: 9  CHA: 12
+    Equipped: Sword, Shield, Chainmail
+
+@DATACLR See also:@THEMECLR
+  INVENTORY, EQUIP, WEAR, LOOK
+-------------------------------------------------------------------------------

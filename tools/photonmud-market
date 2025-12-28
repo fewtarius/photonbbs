@@ -1,0 +1,55 @@
+#!/usr/bin/perl
+# PhotonBBS DND market.dat record dumper (dump all records)
+use strict;
+use warnings;
+
+my $file = shift || 'data/photonmud/market.dat';
+my $reclen = 128;
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+my $record_num = 1;
+my $offset = 0;
+
+while (1) {
+    seek($fh, $offset, 0);
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    # If the record is all zeros, treat as empty/deleted
+    if ($buf =~ /^\0+$/) {
+        $offset += $reclen;
+        $record_num++;
+        next;
+    }
+
+    print "Record $record_num:\n";
+    print "Raw buffer hex: ", unpack("H*", substr($buf, 0, 64)), "\n";
+
+    my %rec;
+    $rec{name}      = substr($buf, 0, 30);   $rec{name}      =~ s/[\0 ]+$//;
+    $rec{item}      = substr($buf, 30, 16);  $rec{item}      =~ s/[\0 ]+$//;
+    $rec{seller}    = substr($buf, 46, 16);  $rec{seller}    =~ s/[\0 ]+$//;
+    $rec{price}     = unpack("l", substr($buf, 62, 4));
+    $rec{idx}       = unpack("l", substr($buf, 66, 4));
+    $rec{type}      = unpack("s", substr($buf, 70, 2));
+    $rec{charges}   = unpack("s", substr($buf, 72, 2));
+    $rec{date}      = substr($buf, 74, 16);  $rec{date}      =~ s/[\0 ]+$//;
+    # reserved: 38 bytes
+
+    print "  Name      : $rec{name}\n";
+    print "  Item      : $rec{item}\n";
+    print "  Seller    : $rec{seller}\n";
+    print "  Price     : $rec{price}\n";
+    print "  Index     : $rec{idx}\n";
+    print "  Type      : ", ($rec{type} == 1 ? "Object" : "Treasure"), "\n";
+    print "  Charges   : $rec{charges}\n";
+    print "  Date      : $rec{date}\n";
+    print "\n";
+
+    $offset += $reclen;
+    $record_num++;
+}
+
+close($fh);

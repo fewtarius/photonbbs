@@ -1,0 +1,42 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR LUNGE Command - Risky Power Attack @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  LUNGE <target>
+
+@DATACLR What it does:@THEMECLR
+  LUNGE is a powerful, aggressive attack that sacrifices accuracy for
+  increased damage. Any class can use LUNGE, but it is most effective
+  for Fighters and other melee classes.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - LUNGE can be used in place of a standard attack on your turn.
+  - Attack Roll: d20 + STR/DEX mod + proficiency + magic - 2 penalty
+  - If you hit, you deal 2d6 + bonuses (or your weapon's dice if higher).
+  - If you miss, you may be left open to counterattack.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - Attack: d20 + STR/DEX mod + proficiency + magic - 2
+  - Damage: 2d6 + STR/DEX mod + proficiency + magic (minimum 1)
+
+@DATACLR Outcome:@THEMECLR
+  - High risk, high reward: more damage, but easier to miss.
+  - Useful for finishing off weakened foes or breaking through tough defenses.
+
+@DATACLR Class Features:@THEMECLR
+  - Fighters, Paladins, and Rangers benefit most from LUNGE.
+  - Proficiency with your weapon increases your chance to hit and damage.
+
+@DATACLR Tips:@THEMECLR
+  - Use LUNGE when you need extra damage, but beware of the accuracy penalty.
+  - Combine with buffs or spells for maximum effect.
+
+@DATACLR Example:@THEMECLR
+  LUNGE TROLL
+    Rolls d20 + bonuses - 2 vs. troll's AC. If hit, rolls 2d6 + bonuses.
+
+@DATACLR See also:@THEMECLR
+  ATTACK, THRUST, CHARGE, DODGE, PARRY
+-------------------------------------------------------------------------------

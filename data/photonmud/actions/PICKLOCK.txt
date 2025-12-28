@@ -1,0 +1,39 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR PICKLOCK Command - Thief Skill to Open Locks @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  PICKLOCK <container>
+  PICKLOCK <exit>
+
+@DATACLR What it does:@THEMECLR
+  PICKLOCK allows Thieves to attempt to open locked containers or exits
+  without a key. Success depends on your DEX and level.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only Thieves can use PICKLOCK.
+  - Roll: d20 + DEX mod + proficiency + level vs. lock difficulty.
+  - Failure may trigger traps or alarms.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - d20 + DEX mod + proficiency + level vs. lock DC.
+
+@DATACLR Outcome:@THEMECLR
+  - Success: The lock is opened.
+  - Failure: The lock remains, and a trap may trigger.
+
+@DATACLR Class Features:@THEMECLR
+  - Only Thieves can pick locks.
+
+@DATACLR Tips:@THEMECLR
+  - Use PICKLOCK on valuable containers or doors.
+  - Beware of traps on failed attempts.
+
+@DATACLR Example:@THEMECLR
+  PICKLOCK CHEST
+    You pick the lock and open the chest.
+
+@DATACLR See also:@THEMECLR
+  LOCK, UNLOCK, OPEN, CLOSE
+-------------------------------------------------------------------------------

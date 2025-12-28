@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@SPELLBOOK@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays your known spells and available spell slots.
+Syntax: SPELLBOOK
+Aliases: SB
+
+- Shows spells by level and slots used/available.
+- Only spellcasting classes have spellbooks.
+- Use LEARN to add spells, FORGET to remove.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

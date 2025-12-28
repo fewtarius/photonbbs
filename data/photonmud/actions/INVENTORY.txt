@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@INVENTORY@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays all items you are carrying.
+Syntax: INVENTORY
+Aliases: INV, I
+
+- Shows objects, treasures, and equipped items.
+- Use SORT to organize your inventory.
+- Use EQUIP or WEAR to use items.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

@@ -1,0 +1,185 @@
+#!/usr/bin/perl
+# PhotonBBS DND treasure.dat record parser (dump all records)
+use strict;
+use warnings;
+use Fcntl qw(:seek);
+use Getopt::Long;
+
+my $csv_output = 0;
+my $file;
+
+GetOptions(
+    'csv' => \$csv_output,
+    'file=s' => \$file,
+) or die "Usage: $0 [--csv] [--file treasure.dat]\n";
+
+$file ||= 'data/photonmud/treasure.dat';
+my $reclen = 140;
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+my $record_num = 1;
+my $offset = 0;
+
+# Print CSV header if in CSV mode
+if ($csv_output) {
+    print "name|shortname|weight|gold|spell|plus|coin|keyed|scroll|charges|potion|armor|shield|weapon|container|type|locked|closed|loadable|ammunition|ammoloads|invisible|permanent|proficiency|ringtype|ringspell|edible|rustable|rustpercent|stealable|stealpercent|launchable|launchloads|launchammo|movable|vehicle|vehiclehits|vehicletype|lighttype|lightcharges|fueltype|fuelcharges\n";
+}
+
+while (1) {
+    seek($fh, $offset, SEEK_SET);
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    # If the record is all zeros, treat as empty/deleted
+    if ($buf =~ /^\0+$/) {
+        unless ($csv_output) {
+            print "Record $record_num: EMPTY/DELETED\n\n";
+        }
+        $record_num++;
+        $offset += $reclen;
+        next;
+    }
+
+    # Heuristic: If first 2 bytes are zero and the 3rd is printable, skip 2 bytes
+    my $rec_offset = 0;
+    if (substr($buf, 0, 2) eq "\0\0" && substr($buf, 2, 1) =~ /[ -~]/) {
+        $rec_offset = 2;
+        unless ($csv_output) {
+            print "Record $record_num: Detected 2-byte header, skipping 2 bytes\n";
+        }
+    } else {
+        unless ($csv_output) {
+            print "Record $record_num: Using offset 0 for name field\n";
+        }
+    }
+    
+    unless ($csv_output) {
+        print "Raw buffer hex: ", unpack("H*", substr($buf, 0, 64)), "\n";
+    }
+
+    my %treas;
+    $treas{name}        = substr($buf,   $rec_offset + 0, 30);  $treas{name}      =~ s/[\0 ]+$//;
+    $treas{shortname}   = substr($buf,  $rec_offset + 30, 30);  $treas{shortname} =~ s/[\0 ]+$//;
+    $treas{weight}      = unpack("s", substr($buf, $rec_offset + 60, 2));
+    $treas{gold}        = unpack("s", substr($buf, $rec_offset + 62, 2));
+    $treas{spell}       = unpack("s", substr($buf, $rec_offset + 64, 2));
+    $treas{plus}        = unpack("s", substr($buf, $rec_offset + 66, 2));
+    $treas{coin}        = unpack("s", substr($buf, $rec_offset + 68, 2));
+    $treas{keyed}       = unpack("s", substr($buf, $rec_offset + 70, 2));
+    $treas{scroll}      = unpack("s", substr($buf, $rec_offset + 72, 2));
+    $treas{charges}     = unpack("s", substr($buf, $rec_offset + 74, 2));
+    $treas{potion}      = unpack("s", substr($buf, $rec_offset + 76, 2));
+    $treas{armor}       = unpack("s", substr($buf, $rec_offset + 78, 2));
+    $treas{shield}      = unpack("s", substr($buf, $rec_offset + 80, 2));
+    $treas{weapon}      = unpack("s", substr($buf, $rec_offset + 82, 2));
+    $treas{container}   = unpack("s", substr($buf, $rec_offset + 84, 2));
+    $treas{type}        = unpack("s", substr($buf, $rec_offset + 86, 2));
+    $treas{locked}      = unpack("s", substr($buf, $rec_offset + 88, 2));
+    $treas{closed}      = unpack("s", substr($buf, $rec_offset + 90, 2));
+    $treas{loadable}    = unpack("s", substr($buf, $rec_offset + 92, 2));
+    $treas{ammunition}  = unpack("s", substr($buf, $rec_offset + 94, 2));
+    $treas{ammoloads}   = unpack("s", substr($buf, $rec_offset + 96, 2));
+    $treas{invisible}   = unpack("s", substr($buf, $rec_offset + 98, 2));
+    $treas{permanent}   = unpack("s", substr($buf, $rec_offset +100, 2));
+    $treas{proficiency} = unpack("s", substr($buf, $rec_offset +102, 2));
+    $treas{ringtype}    = unpack("s", substr($buf, $rec_offset +104, 2));
+    $treas{ringspell}   = unpack("s", substr($buf, $rec_offset +106, 2));
+    $treas{edible}      = unpack("s", substr($buf, $rec_offset +108, 2));
+    $treas{rustable}    = unpack("s", substr($buf, $rec_offset +110, 2));
+    $treas{rustpercent} = unpack("s", substr($buf, $rec_offset +112, 2));
+    $treas{stealable}   = unpack("s", substr($buf, $rec_offset +114, 2));
+    $treas{stealpercent}= unpack("s", substr($buf, $rec_offset +116, 2));
+    $treas{launchable}  = unpack("s", substr($buf, $rec_offset +118, 2));
+    $treas{launchloads} = unpack("s", substr($buf, $rec_offset +120, 2));
+    $treas{launchammo}  = unpack("s", substr($buf, $rec_offset +122, 2));
+    $treas{movable}     = unpack("s", substr($buf, $rec_offset +124, 2));
+    $treas{vehicle}     = unpack("s", substr($buf, $rec_offset +126, 2));
+    $treas{vehiclehits} = unpack("s", substr($buf, $rec_offset +128, 2));
+    $treas{vehicletype} = unpack("s", substr($buf, $rec_offset +130, 2));
+    $treas{lighttype}   = unpack("s", substr($buf, $rec_offset +132, 2));
+    $treas{lightcharges}= unpack("s", substr($buf, $rec_offset +134, 2));
+    $treas{fueltype}    = unpack("s", substr($buf, $rec_offset +136, 2));
+    $treas{fuelcharges} = unpack("s", substr($buf, $rec_offset +138, 2));
+
+    if ($csv_output) {
+        # Clean field data for CSV output
+        my $name = csv_escape($treas{name});
+        my $shortname = csv_escape($treas{shortname});
+        
+        # Output CSV format matching the import tool's expected format
+        print join('|', 
+            $name,
+            $shortname,
+            $treas{weight},
+            $treas{gold},
+            $treas{spell},
+            $treas{plus},
+            $treas{coin},
+            $treas{keyed},
+            $treas{scroll},
+            $treas{charges},
+            $treas{potion},
+            $treas{armor},
+            $treas{shield},
+            $treas{weapon},
+            $treas{container},
+            $treas{type},
+            $treas{locked},
+            $treas{closed},
+            $treas{loadable},
+            $treas{ammunition},
+            $treas{ammoloads},
+            $treas{invisible},
+            $treas{permanent},
+            $treas{proficiency},
+            $treas{ringtype},
+            $treas{ringspell},
+            $treas{edible},
+            $treas{rustable},
+            $treas{rustpercent},
+            $treas{stealable},
+            $treas{stealpercent},
+            $treas{launchable},
+            $treas{launchloads},
+            $treas{launchammo},
+            $treas{movable},
+            $treas{vehicle},
+            $treas{vehiclehits},
+            $treas{vehicletype},
+            $treas{lighttype},
+            $treas{lightcharges},
+            $treas{fueltype},
+            $treas{fuelcharges}
+        ) . "\n";
+    } else {
+        # Original detailed output format
+        print "Parsed fields for record $record_num:\n";
+        foreach my $k (qw(name shortname weight gold spell plus coin keyed scroll charges potion armor shield weapon container type locked closed loadable ammunition ammoloads invisible permanent proficiency ringtype ringspell edible rustable rustpercent stealable stealpercent launchable launchloads launchammo movable vehicle vehiclehits vehicletype lighttype lightcharges fueltype fuelcharges)) {
+            printf("  %-14s : %s\n", $k, defined($treas{$k}) ? $treas{$k} : '');
+        }
+        print "\n";
+    }
+
+    $record_num++;
+    $offset += $reclen;
+}
+close($fh);
+
+unless ($csv_output) {
+    print "Total records processed: " . ($record_num - 1) . "\n";
+}
+
+sub csv_escape {
+    my ($field) = @_;
+    return '' unless defined $field;
+    
+    # If field contains pipe character or quotes, wrap in quotes and escape internal quotes
+    if ($field =~ /[|"]/) {
+        $field =~ s/"/\\"/g;  # Escape quotes
+        return '"' . $field . '"';
+    }
+    
+    return $field;
+}

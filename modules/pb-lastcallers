@@ -3,8 +3,8 @@
 
 sub lastcallers{
   if ($config{'lastcallenable'} ne "0") {
-    chomp ($ctime=`date +\%H:\%M`);
-    chomp ($cdate=`date +\%Y-\%h-\%d`);
+    $ctime = get_current_time();
+    $cdate = get_current_date();
     if (-e "$config{'home'}$config{'text'}/lastcallers") {
       if (-e "$config{'home'}$config{'text'}/lastcalltop.$info{'ext'}") {
 	writeline("\n");
@@ -26,9 +26,9 @@ sub lastcallers{
     } else {
       writeline($theme{'lastcallemp'},1);
     }
-      open (in,"<$config{'home'}$config{'text'}/lastcallers");
-        @lastcalls=<in>;
-      close(in);
+      open (my $in_fh, '<', "$config{'home'}$config{'text'}/lastcallers");
+        @lastcalls=<$in_fh>;
+      close($in_fh);
       $lastkeep=$config{'lastcallers'};
       --$lastkeep;
       unless (scalar(@lastcalls) <= $lastkeep) {
@@ -37,14 +37,14 @@ sub lastcallers{
         }
       }
       $didcall=0;
-      open (lastcallers,">$config{'home'}$config{'text'}/lastcallers");
+      open (my $lc_fh, '>', "$config{'home'}$config{'text'}/lastcallers");
       foreach $caller(@lastcalls) {
         if ($caller=~/$info{'handle'}/i) {
           next;
         }
-        print lastcallers $caller;
+        print $lc_fh $caller;
       }
-      close (lastcallers);
+      close ($lc_fh);
 
       $ctime=$ctime;
       unless ($didcall eq 1) {
@@ -53,13 +53,13 @@ format lastcallers =
 $ctime,$whouser,$whowhere
 .
         writeline($config{'systemcolor'},1);
-        open (lastcallers,">>$config{'home'}$config{'text'}/lastcallers");
+        open (lastcallers, '>>', "$config{'home'}$config{'text'}/lastcallers");
          $~="lastcallers";
          $whouser=$info{'handle'};
          $whowhere=$info{'location'};
          write lastcallers;
          $~="stdout";
-        close (out);
+        close (lastcallers);
       }
     }
   }

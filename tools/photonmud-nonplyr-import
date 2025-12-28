@@ -1,0 +1,93 @@
+#!/usr/bin/perl
+# filepath: /Users/andrew/repositories/fewtarius/photonbbs/tools/photonmud-nonplyr-import
+use strict;
+use warnings;
+use Encode qw(encode);
+
+# CSV FORMAT:
+# name|plural|treasure|exp|gold|number|level|hits|poison|leveldrain|spell|block|prevent|follow|magic|jail|teleport|follow_percent|block_percent|prevent_percent|spell_percent|poison_percent|drain_percent|rate|rate_percent|permanent|talk|psionic|psionic_spell
+# Each record is exactly 144 bytes.
+
+my $csvfile = shift || 'nonplyrs.csv';
+my $outfile = shift || 'nonplyrs.dat';
+
+open(my $infh, "<:encoding(utf8)", $csvfile) or die "Cannot open $csvfile: $!";
+open(my $outfh, ">:raw", $outfile) or die "Cannot open $outfile: $!";
+
+my $header = <$infh>;
+chomp $header;
+
+while (my $line = <$infh>) {
+    chomp $line;
+    next if $line =~ /^\s*$/ || $line =~ /^\/\//;
+    my @row = parse_csv_line($line);
+
+    $row[$_] //= 0 for (0..28);
+
+    my $name        = pack_str($row[0], 30);
+    my $plural      = pack_str($row[1], 30);
+    my $treasure    = pack_str($row[2], 10);
+    my $exp         = pack("d", $row[3]);
+    my $gold        = pack("d", $row[4]);
+    my $number      = pack("s", $row[5]);
+    my $level       = pack("s", $row[6]);
+    my $hits        = pack("s", $row[7]);
+    my $poison      = pack("s", $row[8]);
+    my $leveldrain  = pack("s", $row[9]);
+    my $spell       = pack("s", $row[10]);
+    my $block       = pack("s", $row[11]);
+    my $prevent     = pack("s", $row[12]);
+    my $follow      = pack("s", $row[13]);
+    my $magic       = pack("s", $row[14]);
+    my $jail        = pack("s", $row[15]);
+    my $teleport    = pack("f<", $row[16]);
+    my $follow_percent  = pack("s", $row[17]);
+    my $block_percent   = pack("s", $row[18]);
+    my $prevent_percent = pack("s", $row[19]);
+    my $spell_percent   = pack("s", $row[20]);
+    my $poison_percent  = pack("s", $row[21]);
+    my $drain_percent   = pack("s", $row[22]);
+    my $rate        = pack("s", $row[23]);
+    my $rate_percent= pack("s", $row[24]);
+    my $permanent   = pack("s", $row[25]);
+    my $talk        = pack_str($row[26], 10);
+    my $psionic     = pack("s", $row[27]);
+    my $psionic_spell=pack("s", $row[28]);
+
+    my $record = $name . $plural . $treasure . $exp . $gold . $number . $level . $hits . $poison . $leveldrain . $spell . $block . $prevent . $follow . $magic . $jail . $teleport . $follow_percent . $block_percent . $prevent_percent . $spell_percent . $poison_percent . $drain_percent . $rate . $rate_percent . $permanent . $talk . $psionic . $psionic_spell;
+
+    die "Record is not 144 bytes, got " . length($record) . " for $row[0]" unless length($record) == 144;
+    print $outfh $record;
+}
+close $infh;
+close $outfh;
+print "Import complete: $outfile\n";
+
+sub pack_str {
+    my ($str, $len) = @_;
+    $str //= '';
+    $str = encode('utf8', $str);
+    $str = substr($str, 0, $len);
+    return $str . ("\0" x ($len - length($str)));
+}
+
+sub parse_csv_line {
+    my ($line) = @_;
+    my @fields;
+    my $field = '';
+    my $in_quotes = 0;
+    my @chars = split //, $line;
+    while (@chars) {
+        my $c = shift @chars;
+        if ($c eq '"') {
+            $in_quotes = !$in_quotes;
+        } elsif ($c eq '|' && !$in_quotes) {
+            push @fields, $field;
+            $field = '';
+        } else {
+            $field .= $c;
+        }
+    }
+    push @fields, $field;
+    return @fields;
+}

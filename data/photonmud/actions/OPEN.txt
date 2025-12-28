@@ -1,0 +1,39 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR OPEN Command - Open Containers or Exits @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  OPEN <container>
+  OPEN <exit>
+
+@DATACLR What it does:@THEMECLR
+  OPEN unlocks and opens a container (chest, bag, etc.) or an exit
+  (door, gate) if it is not locked. Once open, you can access contents
+  or move through the exit.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Locked containers or exits must be unlocked first.
+  - Some containers or exits may be trapped.
+  - OPEN is required before GET, PUT, or moving through exits.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None, unless a trap is triggered.
+
+@DATACLR Outcome:@THEMECLR
+  - The container or exit is now open.
+
+@DATACLR Class Features:@THEMECLR
+  - Thieves can pick locks if needed.
+
+@DATACLR Tips:@THEMECLR
+  - Always check for traps before opening suspicious containers.
+  - Use OPEN before GET or PUT.
+
+@DATACLR Example:@THEMECLR
+  OPEN DOOR
+    The door swings open.
+
+@DATACLR See also:@THEMECLR
+  CLOSE, LOCK, UNLOCK, GET, PUT
+-------------------------------------------------------------------------------

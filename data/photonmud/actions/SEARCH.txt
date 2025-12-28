@@ -1,0 +1,42 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR SEARCH Command - Look for Hidden Items or Exits @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  SEARCH
+
+@DATACLR What it does:@THEMECLR
+  SEARCH allows you to look for hidden items, secret doors, traps, or
+  concealed monsters in your current room. Some rooms or containers may
+  hide valuable treasures or dangers.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - SEARCH rolls d20 + INT or WIS modifier to spot hidden things.
+  - Thieves and Rangers get bonuses to SEARCH.
+  - Some secrets require multiple searches or special items to reveal.
+  - If you find something, it is revealed in the room or container.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - d20 + INT or WIS mod (+class bonus) vs. difficulty (set by room).
+
+@DATACLR Outcome:@THEMECLR
+  - Success: You find a hidden item, exit, or trap.
+  - Failure: Nothing is found, but you may try again.
+
+@DATACLR Class Features:@THEMECLR
+  - Thieves: +2 bonus to SEARCH for traps or hidden items.
+  - Rangers: +1 bonus in outdoor areas.
+
+@DATACLR Tips:@THEMECLR
+  - Use SEARCH in suspicious or unusual rooms.
+  - Try SEARCH after defeating monsters for hidden loot.
+  - Some secrets require special tools or spells.
+
+@DATACLR Example:@THEMECLR
+  SEARCH
+    You discover a hidden lever behind the tapestry!
+
+@DATACLR See also:@THEMECLR
+  LOOK, GET, EXITS, STATUS
+-------------------------------------------------------------------------------

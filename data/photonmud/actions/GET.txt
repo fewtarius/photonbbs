@@ -1,0 +1,43 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR GET Command - Pick Up Items @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  GET <item>
+  GET <item> FROM <container>
+  TAKE <item>
+  TAKE <item> FROM <container>
+
+@DATACLR What it does:@THEMECLR
+  GET allows you to pick up an item from the room or from a container
+  (such as a chest or bag). Items are added to your inventory.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must specify the exact name of the item.
+  - If multiple items match, the closest match is chosen.
+  - GET <item> FROM <container> retrieves from a specific container.
+  - Some items may be too heavy or require special actions to get.
+  - Locked containers must be unlocked first.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None, unless the item is trapped (then a save may be required).
+
+@DATACLR Outcome:@THEMECLR
+  - The item is now in your inventory.
+
+@DATACLR Class Features:@THEMECLR
+  - Thieves can disarm traps on containers.
+  - All classes can GET items.
+
+@DATACLR Tips:@THEMECLR
+  - Use LOOKIN <container> to see contents before GET.
+  - GET all to pick up everything (if allowed).
+
+@DATACLR Example:@THEMECLR
+  GET SWORD
+    Sword is now in your inventory.
+
+@DATACLR See also:@THEMECLR
+  DROP, PUT, INVENTORY, LOOKIN
+-------------------------------------------------------------------------------

@@ -1,0 +1,11 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@DATE@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays the current server date and time.
+Syntax: DATE
+
+- Shows the real-world date and time.
+- Useful for tracking in-game or real events.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

@@ -1,0 +1,14 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@ENTER <object>@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Use ENTER to move through special exits such as doors, gates, or portals.
+Syntax: ENTER <object>
+Example: ENTER DOOR
+
+- Only works if the object is a valid exit in the room.
+- Some exits may be locked or closed; you may need to unlock or open them first.
+- If the exit leads somewhere, you will move to the connected room.
+- Some exits may require a key or special action.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

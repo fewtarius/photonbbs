@@ -1,0 +1,12 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@MONMAP@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays a map of monster locations for sysops.
+Syntax: MONMAP
+
+- Sysop/admin only.
+- Shows a grid or list of rooms with active monsters.
+- Useful for monitoring monster distribution and debugging.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

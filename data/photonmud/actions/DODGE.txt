@@ -1,0 +1,41 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR DODGE Command - Evade the Next Attack @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  DODGE
+
+@DATACLR What it does:@THEMECLR
+  DODGE is a defensive action you can take during combat. When you
+  DODGE, you have a 50% chance to avoid all damage from the next attack
+  against you.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - DODGE is used on your turn in combat instead of attacking.
+  - When attacked, a coin flip (50/50) determines if you evade.
+  - If successful, you take no damage from the next attack.
+  - If unsuccessful, you take full damage as normal.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - No dice roll required; success is a flat 50% chance.
+
+@DATACLR Outcome:@THEMECLR
+  - If you succeed, you avoid all damage from the next attack.
+  - If you fail, you take damage as normal.
+
+@DATACLR Class Features:@THEMECLR
+  - Thieves and Rangers may benefit more due to high DEX.
+  - All classes can use DODGE.
+
+@DATACLR Tips:@THEMECLR
+  - Use DODGE when low on HP or facing a powerful attack.
+  - Combine with healing or buffs for survival.
+
+@DATACLR Example:@THEMECLR
+  DODGE
+    On the next attack, a 50% chance to take no damage.
+
+@DATACLR See also:@THEMECLR
+  PARRY, GUARD, SHIELD, COUNTER
+-------------------------------------------------------------------------------

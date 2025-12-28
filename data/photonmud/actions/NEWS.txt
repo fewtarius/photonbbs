@@ -1,0 +1,38 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR NEWS Command - View Realm Events and Announcements @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  NEWS
+
+@DATACLR What it does:@THEMECLR
+  NEWS displays recent events in the realm, including major battles, boss
+  defeats, player achievements, and system announcements. Use NEWS to stay
+  informed about what's happening in the world.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - NEWS is informational and does not affect gameplay.
+  - The list includes both player and system-generated events.
+  - Some events may be time-limited and disappear after a while.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You see a list of recent events and announcements.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use NEWS the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Check NEWS after logging in to catch up on recent happenings.
+  - Look for clues about boss locations or special events.
+
+@DATACLR Example:@THEMECLR
+  NEWS
+    [You see a list of recent boss defeats, player promotions, and system news.]
+
+@DATACLR See also:@THEMECLR
+  ABOUT, HINT, STATUS
+-------------------------------------------------------------------------------

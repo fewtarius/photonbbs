@@ -1,0 +1,96 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR SHOP SELL Command - Sell Items to the Shopkeeper @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  SHOP SELL
+  SELL TO SHOP
+
+@DATACLR What it does:@THEMECLR
+  SHOP SELL lets you sell items from your inventory directly to the
+  shopkeeper for gold. The shopkeeper offers a price based on the item's
+  value and your Charisma.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must be in a shop to use SHOP SELL.
+  - The shopkeeper offers less than market value.
+  - Some rare or cursed items may not be accepted.
+  - You can choose which items to sell.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None, but high CHA may improve offers.
+
+@DATACLR Outcome:@THEMECLR
+  - Sold items are removed from your inventory and you receive gold.
+
+@DATACLR Class Features:@THEMECLR
+  - High-CHA classes may get better prices.
+
+@DATACLR Tips:@THEMECLR
+  - Use SHOP SELL to quickly convert loot to gold.
+  - Check item value before selling rare gear.
+
+@DATACLR Example:@THEMECLR
+  SHOP SELL
+    Shopkeeper offers 10 gold for Potion. Accept? (Y/N)
+
+@DATACLR See also:@THEMECLR
+  MARKET, SELL, BUY, INVENTORY
+
+@THEMECLR
+-------------------------------------------------------------------------------
+Detailed Help for SHOP SELL Command
+-------------------------------------------------------------------------------
+
+@DATACLR Description:@THEMECLR
+  The SHOP SELL command allows players to sell unwanted or excess items
+  from their inventory to a shopkeeper in exchange for gold. This command
+  is useful for clearing out inventory space and obtaining gold for
+  purchasing other items or services.
+
+@DATACLR How to Use:@THEMECLR
+  To use the SHOP SELL command, simply type SHOP SELL followed by the
+  item you wish to sell. For example, SHOP SELL Potion. If you have
+  multiple items to sell, you can list them all in one command, separated
+  by commas. For example, SHOP SELL Potion, Sword, Shield.
+
+@DATACLR Shopkeeper Interaction:@THEMECLR
+  Once you issue the SHOP SELL command, the shopkeeper will respond with
+  an offer for your item(s). You can then choose to accept or decline the
+  offer. If you accept, the item(s) will be removed from your inventory
+  and you will receive the offered amount of gold. If you decline, the
+  item(s) will remain in your inventory and no gold will be exchanged.
+
+@DATACLR Pricing:@THEMECLR
+  The price offered by the shopkeeper is typically less than the item's
+  market value. The exact amount depends on the item's type, condition,
+  and your character's Charisma. High-Charisma characters may receive
+  better offers.
+
+@DATACLR Limitations:@THEMECLR
+  Not all items can be sold to the shopkeeper. Some rare, unique, or cursed
+  items may be refused. Additionally, the shopkeeper may have limited
+  gold available, restricting the amount of items you can sell at once.
+
+@DATACLR Tips for Maximizing Profit:@THEMECLR
+  - Build up your Charisma to get better prices from the shopkeeper.
+  - Consider waiting to sell rare items until you find a buyer who will
+  pay closer to the item's true value.
+  - Use the MARKET command to check the general value of items before
+  selling them to the shopkeeper.
+  - Keep an eye out for shopkeepers who specialize in certain types of
+  items, as they may offer better prices for those items.
+
+@DATACLR Common Questions:@THEMECLR
+  - Q: Can I sell equipped items?
+    A: No, you must unequip items before you can sell them.
+  - Q: What happens if I sell an item by mistake?
+    A: You can try to buy it back from the shopkeeper, but they may not
+    have it anymore.
+  - Q: Are there any items that I should never sell?
+    A: Generally, you should avoid selling quest items, unique items, or
+    items with sentimental value. These items may be important for
+    completing quests or may have special significance to your character.
+
+-------------------------------------------------------------------------------

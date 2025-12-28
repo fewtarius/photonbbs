@@ -72,7 +72,10 @@ sub setupdoors {
         "servername=$system\n" .
         "node=$node\n" .
         "security=$security\n" .
-        "ansi=$ansi\n";
+        "ansi=$ansi\n" .
+        "terminal_width=" . ($config{'terminal_width'} // 80) . "\n" .
+        "terminal_height=" . ($config{'terminal_height'} // 24) . "\n" .
+        "ui_mode=" . ($config{'ui_mode'} // 'standard') . "\n";
     close($out);
     unlockfile($fusiondoor);
 

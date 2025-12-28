@@ -1,0 +1,37 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR MONSTERINFO Command - Examine Monster Details @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  MONSTERINFO <monster>
+
+@DATACLR What it does:@THEMECLR
+  MONSTERINFO gives you detailed information about a monster in your
+  current room. You can see its stats, abilities, and possible loot.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must specify the monster's name.
+  - Reveals HP, level, AC, attack dice, and special traits.
+  - Some monsters may hide certain details.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You gain insight into the monster's strengths and weaknesses.
+
+@DATACLR Class Features:@THEMECLR
+  - Rangers and Druids may see extra details.
+
+@DATACLR Tips:@THEMECLR
+  - Use MONSTERINFO before attacking tough monsters.
+  - Plan your tactics based on what you learn.
+
+@DATACLR Example:@THEMECLR
+  MONSTERINFO TROLL
+    Troll: HP 30, AC 14, Attacks: 2d8+3, Regenerates HP.
+
+@DATACLR See also:@THEMECLR
+  LOOK, ATTACK, TALK
+-------------------------------------------------------------------------------

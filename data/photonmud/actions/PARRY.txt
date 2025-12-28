@@ -1,0 +1,38 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR PARRY Command - Reduce Incoming Damage @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  PARRY
+
+@DATACLR What it does:@THEMECLR
+  PARRY is a defensive action you can take during combat. When you
+  PARRY, you halve the damage from the next attack against you.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - PARRY is used on your turn in combat instead of attacking.
+  - When attacked, you take half damage (rounded down).
+  - Works against both melee and ranged attacks.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - No dice roll required; always halves damage.
+
+@DATACLR Outcome:@THEMECLR
+  - You take half damage from the next attack.
+
+@DATACLR Class Features:@THEMECLR
+  - Fighters and Paladins may benefit more due to high HP.
+  - All classes can use PARRY.
+
+@DATACLR Tips:@THEMECLR
+  - Use PARRY when expecting a strong attack.
+  - Combine with healing or buffs for survival.
+
+@DATACLR Example:@THEMECLR
+  PARRY
+    On the next attack, you take half damage.
+
+@DATACLR See also:@THEMECLR
+  DODGE, GUARD, SHIELD, COUNTER
+-------------------------------------------------------------------------------

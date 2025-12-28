@@ -1,0 +1,40 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR BRIEF Command - Toggle Room Description Verbosity @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  BRIEF
+  BR
+
+@DATACLR What it does:@THEMECLR
+  BRIEF toggles between full and short room descriptions. When BRIEF is
+  enabled, you see only the short description of each room as you move,
+  making navigation faster for experienced players.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - BRIEF is a toggle: use it again to switch back to full descriptions.
+  - Full descriptions show detailed room text, exits, features, and more.
+  - Brief mode shows only the room's short description and exits.
+  - Does not affect other players or gameplay mechanics.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You see shorter room descriptions, speeding up exploration.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use BRIEF the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Use BRIEF after you are familiar with the world to move quickly.
+  - Switch back to full descriptions if you want more detail.
+
+@DATACLR Example:@THEMECLR
+  BRIEF
+    Room descriptions are now brief.
+
+@DATACLR See also:@THEMECLR
+  LOOK, MAP, HELP
+-------------------------------------------------------------------------------

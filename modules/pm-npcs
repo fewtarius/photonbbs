@@ -1,0 +1,113 @@
+sub read_npc_record {
+    my ($npcnum) = @_;
+    my $file = "$config{'home'}/$config{'data'}/nonplyrs.dat";
+    my $reclen = 144;
+    my %npc;
+    lockfile($file);
+    open(my $fh, "<:raw", $file) or do { unlockfile($file); return {}; };
+    seek($fh, ($npcnum - 1) * $reclen, SEEK_SET);
+    read($fh, my $buf, $reclen);
+    close($fh);
+    unlockfile($file);
+
+    $npc{name}        = substr($buf, 0, 30);  $npc{name}        =~ s/[\0 ]+$//;
+    $npc{plural}      = substr($buf, 30, 30); $npc{plural}      =~ s/[\0 ]+$//;
+    $npc{treasure}    = substr($buf, 60, 10); $npc{treasure}    =~ s/[\0 ]+$//;
+    $npc{exp}         = unpack("d", substr($buf, 70, 8));
+    $npc{gold}        = unpack("d", substr($buf, 78, 8));
+    $npc{number}      = unpack("s", substr($buf, 86, 2));
+    $npc{level}       = unpack("s", substr($buf, 88, 2));
+    $npc{hits}        = unpack("s", substr($buf, 90, 2));
+    $npc{poison}      = unpack("s", substr($buf, 92, 2));
+    $npc{leveldrain}  = unpack("s", substr($buf, 94, 2));
+    $npc{spell}       = unpack("s", substr($buf, 96, 2));
+    $npc{block}       = unpack("s", substr($buf, 98, 2));
+    $npc{prevent}     = unpack("s", substr($buf,100, 2));
+    $npc{follow}      = unpack("s", substr($buf,102, 2));
+    $npc{magic}       = unpack("s", substr($buf,104, 2));
+    $npc{jail}        = unpack("s", substr($buf,106, 2));
+    $npc{teleport}    = unpack("f<", substr($buf,108, 4));
+    $npc{follow_percent}  = unpack("s", substr($buf,112, 2));
+    $npc{block_percent}   = unpack("s", substr($buf,114, 2));
+    $npc{prevent_percent} = unpack("s", substr($buf,116, 2));
+    $npc{spell_percent}   = unpack("s", substr($buf,118, 2));
+    $npc{poison_percent}  = unpack("s", substr($buf,120, 2));
+    $npc{drain_percent}   = unpack("s", substr($buf,122, 2));
+    $npc{rate}        = unpack("s", substr($buf,124, 2));
+    $npc{rate_percent}= unpack("s", substr($buf,126, 2));
+    $npc{permanent}   = unpack("s", substr($buf,128, 2));
+    $npc{talk}        = substr($buf,130, 10); $npc{talk}        =~ s/[\0 ]+$//;
+    $npc{psionic}     = unpack("s", substr($buf,140, 2));
+    $npc{psionic_spell}=unpack("s", substr($buf,142, 2));
+    return \%npc;
+}
+
+sub find_npc_index_by_name {
+    my ($name) = @_;
+    my $file = "$config{'home'}/$config{'data'}/nonplyrs.dat";
+    my $reclen = 144;
+    open(my $fh, "<:raw", $file) or return 0;
+    my $idx = 1;
+    while (read($fh, my $buf, $reclen)) {
+        my $sname = substr($buf, 0, 30); $sname =~ s/[\0 ]+$//;
+        if (lc($sname) eq lc($name)) {
+            close($fh);
+            return $idx;
+        }
+        $idx++;
+    }
+    close($fh);
+    return 0;
+}
+
+sub list_npcs {
+    my $file = "$config{'home'}/$config{'data'}/nonplyrs.dat";
+    my $reclen = 144;
+    open(my $fh, "<:raw", $file) or do {
+        writeline($config{'errorcolor'}."No nonplyrs.dat found.".$config{'themecolor'}, 1);
+        return;
+    };
+    my $idx = 1;
+    writeline($config{'usercolor'}.section_header("NPC List").$config{'themecolor'}, 1);
+    while (read($fh, my $buf, $reclen)) {
+        my $sname = substr($buf, 0, 30); $sname =~ s/[\0 ]+$//;
+        next unless $sname;
+        writeline(sprintf("%3d. %s", $idx, $sname), 1);
+        $idx++;
+    }
+    close($fh);
+}
+
+sub show_room_npcs {
+    my ($room) = @_;
+   
+    my $npcclass = $room->{npcclass};
+    return unless $npcclass && $npcclass > 0;
+    my $npc = read_npc_record($npcclass);
+    return unless $npc && $npc->{name};
+    writeline($config{'datacolor'}."You see $npc->{name} here.".$config{'themecolor'}, 1);
+}
+
+sub talk_to_npc {
+    my ($player, $npcname) = @_;
+    my $npcidx = find_npc_index_by_name($npcname);
+    unless ($npcidx) {
+        writeline($config{'errorcolor'}."No such NPC here.".$config{'themecolor'});
+        return;
+    }
+    my $npc = read_npc_record($npcidx);
+    unless ($npc && $npc->{name}) {
+        writeline($config{'errorcolor'}."No such NPC here.".$config{'themecolor'});
+        return;
+    }
+    writeline($config{'systemcolor'}.section_header("Talking to $npc->{name}").$config{'themecolor'}, 1);
+   
+    for my $slot (0..4) {
+        my $tid = unpack("s", substr($npc->{talk}, $slot*2, 2));
+        next unless $tid > 0;
+        my $msg = read_monstertalk_record($tid);
+        writeline($config{'datacolor'}."$npc->{name} says: $msg->{message}" . $config{'themecolor'}, 1) if $msg->{message};
+    }
+}
+
+return 1;

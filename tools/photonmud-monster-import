@@ -1,0 +1,182 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Encode qw(encode);
+
+# ---------------------------------------------------------------------------
+# photonmud-monster-import
+#
+# Import tool for PhotonMUD monsters.
+#
+# Reads a monsters.csv file (pipe-delimited, one monster per line) and writes
+# a binary monsters.dat file with fixed-length records for each monster.
+#
+# CSV FORMAT:
+#   name|plural|treasure|exp|gold|number|level|hits|poison|leveldrain|spell|block|prevent|follow|magic|jail|teleport|follow_percent|block_percent|prevent_percent|spell_percent|poison_percent|drain_percent|rate|rate_percent|permanent|talk|psionic|psionic_spell|region|behaviors
+
+# Each record is exactly 170 bytes (added behaviors as 10 bytes).
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# TREASURE ASSIGNMENT BY MONSTER TYPE/CLASS
+#
+# The "treasure" field in monsters.csv encodes up to 5 treasures per monster,
+# each as a 2-byte (4 hex digit) little-endian index into treasures.txt.
+#
+# The following conventions are used for treasure assignment by monster type:
+#
+# 1. Humanoids (goblins, orcs, kobolds, hobgoblins, gnolls, bugbears, ogres, trolls, giants):
+#    - Typically carry coins, gems, or low-level items.
+#    - Treasure indices correspond to "coins", "gems", or "basic weapons" in treasures.txt.
+#    - Example: Goblin may have "small coins" (index 29, hex 1d00).
+#
+# 2. Undead (skeletons, zombies, ghouls, wights, wraiths, mummies, vampires, liches, ghosts, shadows):
+#    - Lower undead (skeleton, zombie, ghoul): usually no treasure.
+#    - Higher undead (wight, wraith, mummy, vampire, lich): may have gems, scrolls, or rare items.
+#    - Example: Vampire may have "gems" (index 26, hex 1a00) and "scroll" (index 27, hex 1b00).
+#
+# 3. Animals/Beasts (giant rat, bat, spider, centipede, snake, wolf, bear, lizard, rust monster, gelatinous cube, mimic):
+#    - Usually no treasure, but some (mimic, rust monster) may have coins or odd items.
+#    - Example: Mimic may have "coins" (index 30, hex 1e00).
+#
+# 4. Elementals (fire, earth, air, water):
+#    - May have gems or rare scrolls.
+#    - Example: Fire elemental may have "gems" (index 26, hex 1a00).
+#
+# 5. Demons, Devils, Slaads, Titans, Princes, Dragons, Bosses:
+#    - Multiple treasures: gems, magic items, high-value coins, rare artifacts.
+#    - Example: Red dragon may have "gems" (1a00), "scroll" (1b00), "magic item" (2000).
+#
+# 6. Special/Unique Monsters (beholder, mind flayer, star lord, kirin, etc.):
+#    - Assigned treasures based on lore or challenge: gems, scrolls, or unique items.
+#
+# 7. NPCs, Elves, Dwarves, etc.:
+#    - May have coins, gems, or equipment, depending on role.
+#
+# 8. If a monster has no treasure, the field is all zeros: 00000000000000000000
+#
+# 9. To assign a treasure:
+#    - Find the treasure's index in treasures.txt (1-based).
+#    - Convert to 2-byte little-endian hex (e.g., index 32 = 2000).
+#    - Concatenate up to 5 such values (total 20 hex digits).
+#    - Pad with zeros if fewer than 5 treasures.
+#
+# Example assignments:
+#   - Goblin:         1d000000000000000000   (treasure 29: small coins)
+#   - Vampire:        1a001b00000000000000   (treasures 26: gems, 27: scroll)
+#   - Red dragon:     20001a001b0000000000   (treasures 32: magic item, 26: gems, 27: scroll)
+#   - Skeleton:       00000000000000000000   (no treasure)
+#
+# See the monsters.csv and treasures.txt for actual assignments and indices.
+# ---------------------------------------------------------------------------
+
+my $csvfile = shift || 'monsters.csv';
+my $outfile = shift || 'monsters.dat';
+
+open(my $infh, "<:encoding(utf8)", $csvfile) or die "Cannot open $csvfile: $!";
+open(my $outfh, ">:raw", $outfile) or die "Cannot open $outfile: $!";
+
+my $header = <$infh>;
+chomp $header;
+
+while (my $line = <$infh>) {
+    chomp $line;
+    next if $line =~ /^\s*$/ || $line =~ /^\/\//; # skip blank or comment lines
+    my @row = parse_csv_line($line);
+
+    # Debug: print line number and field count if not 31
+    if (@row != 31) {
+        warn "Line $.: Expected 31 fields, got " . scalar(@row) . " [$line]\n";
+    }
+
+    # Defensive: pad missing fields with zeroes
+    $row[$_] //= 0 for (0..30);
+
+    # --- String fields ---
+    my $name    = pack_str($row[0], 30);
+    my $plural  = pack_str($row[1], 30);
+    my $treasure= pack_hexstr($row[2], 10);
+    # --- Numeric fields ---
+    my $exp     = pack("d", $row[3]);
+    my $gold    = pack("d", $row[4]);
+    my $number  = pack("s", $row[5]);
+    my $level   = pack("s", $row[6]);
+    my $hits    = pack("s", $row[7]);
+    my $poison  = pack("s", $row[8]);
+    my $leveldrain = pack("s", $row[9]);
+    my $spell   = pack("s", $row[10]);
+    my $block   = pack("s", $row[11]);
+    my $prevent = pack("s", $row[12]);
+    my $follow  = pack("s", $row[13]);
+    my $magic   = pack("s", $row[14]);
+    my $jail    = pack("s", $row[15]);
+    my $teleport= pack("f<", $row[16]);
+    my $follow_percent  = pack("s", $row[17]);
+    my $block_percent   = pack("s", $row[18]);
+    my $prevent_percent = pack("s", $row[19]);
+    my $spell_percent   = pack("s", $row[20]);
+    my $poison_percent  = pack("s", $row[21]);
+    my $drain_percent   = pack("s", $row[22]);
+    my $rate    = pack("s", $row[23]);
+    my $rate_percent = pack("s", $row[24]);
+    my $permanent = pack("s", $row[25]);
+    my $talk    = pack_hexstr($row[26], 10);
+    my $psionic = pack("s", $row[27]);
+    my $psionic_spell = pack("s", $row[28]);
+    my $region  = pack_str($row[29], 16);
+    my $behaviors = pack_str($row[30], 20);
+
+    # --- Compose record ---
+    my $record = $name . $plural . $treasure
+        . $exp . $gold . $number . $level . $hits . $poison . $leveldrain
+        . $spell . $block . $prevent . $follow . $magic . $jail
+        . $teleport . $follow_percent . $block_percent . $prevent_percent
+        . $spell_percent . $poison_percent . $drain_percent . $rate . $rate_percent
+        . $permanent . $talk . $psionic . $psionic_spell . $region . $behaviors;
+
+    die "Record is not 180 bytes, got " . length($record) . " for $row[0]" unless length($record) == 180;
+    print $outfh $record;
+}
+close $infh;
+close $outfh;
+print "Import complete: $outfile\n";
+
+# --- Helper subs ---
+
+sub pack_str {
+    my ($str, $len) = @_;
+    $str //= '';
+    $str = encode('utf8', $str);
+    $str = substr($str, 0, $len);
+    return $str . ("\0" x ($len - length($str)));
+}
+
+sub pack_hexstr {
+    my ($hex, $len) = @_;
+    $hex //= '';
+    $hex =~ s/[^0-9a-fA-F]//g;
+    $hex .= ('0' x ($len*2 - length($hex))) if length($hex) < $len*2;
+    my $bin = pack("H*", substr($hex, 0, $len*2));
+    return $bin . ("\0" x ($len - length($bin)));
+}
+
+sub parse_csv_line {
+    my ($line) = @_;
+    my @fields;
+    my $field = '';
+    my $in_quotes = 0;
+    my @chars = split //, $line;
+    while (@chars) {
+        my $c = shift @chars;
+        if ($c eq '"') {
+            $in_quotes = !$in_quotes;
+        } elsif ($c eq '|' && !$in_quotes) {
+            push @fields, $field;
+            $field = '';
+        } else {
+            $field .= $c;
+        }
+    }
+    push @fields, $field;
+    return @fields;
+}

@@ -1,0 +1,45 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR BACKSTAB Command - Thief's Sneak Attack @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  BACKSTAB <target>
+
+@DATACLR What it does:@THEMECLR
+  BACKSTAB is a special attack available only to Thief-class characters.
+  It allows you to deal massive damage to an unsuspecting target.
+  You must not be in direct combat with the target (i.e., not already fighting).
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only Thieves can use BACKSTAB.
+  - You must be wielding a melee weapon (preferably a dagger or short blade).
+  - You must not be the current focus of the target's attention.
+  - Initiative is rolled as normal if combat starts.
+  - Attack Roll: d20 + DEX mod + proficiency + magic + bonuses
+  - If you hit, you deal 3d8 + bonuses (or your weapon's dice if higher).
+
+@DATACLR Dice Rolls:@THEMECLR
+  - Attack: d20 + DEX mod + proficiency + magic
+  - Damage: 3d8 + DEX mod + proficiency + magic (minimum 1)
+
+@DATACLR Outcome:@THEMECLR
+  - If successful, you deal heavy damage and may instantly defeat weaker foes.
+  - If you miss, you lose the element of surprise and enter normal combat.
+
+@DATACLR Class Features:@THEMECLR
+  - Only Thieves can use BACKSTAB.
+  - Proficiency with daggers/short swords increases your chance to hit.
+
+@DATACLR Tips:@THEMECLR
+  - Use LOOK to scout your target before attempting BACKSTAB.
+  - Use stealth or distraction to avoid being noticed.
+  - BACKSTAB is best used as an opening move.
+
+@DATACLR Example:@THEMECLR
+  BACKSTAB ORC
+    Rolls d20 + bonuses vs. orc's AC. If hit, rolls 3d8 + bonuses.
+
+@DATACLR See also:@THEMECLR
+  ATTACK, LUNGE, THRUST, DODGE, PARRY
+-------------------------------------------------------------------------------

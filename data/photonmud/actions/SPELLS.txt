@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@SPELLS@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Lists all spells you currently know.
+Syntax: SPELLS
+Aliases: SP
+
+- Shows spell names and brief descriptions.
+- Use CAST <spell> [AT <target>] to cast a spell.
+- Only available to spellcasting classes.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

@@ -1,0 +1,67 @@
+#!/usr/bin/perl
+# Dump nonplyrs.dat records for PhotonBBS DND (same structure as MonsterType)
+use strict;
+use warnings;
+
+my $file = shift || 'data/photonmud/nonplyrs.dat';
+my $reclen = 144; # MonsterType/NonplayerType record size
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+my $record_num = 1;
+
+while (1) {
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    print "Record $record_num: Read 144 bytes\n";
+    print "Raw buffer hex: ", unpack("H*", substr($buf, 0, 64)), "\n";
+
+    # If the record is all zeros, treat as empty/deleted
+    if ($buf =~ /^\0+$/) {
+        print "Record $record_num: EMPTY/DELETED\n\n";
+        $record_num++;
+        next;
+    }
+
+    my %npc;
+    $npc{name}        = substr($buf, 0, 30);   $npc{name}        =~ s/[\0 ]+$//;
+    $npc{plural}      = substr($buf, 30, 30);  $npc{plural}      =~ s/[\0 ]+$//;
+    $npc{treasure}    = substr($buf, 60, 10);  $npc{treasure}    =~ s/[\0 ]+$//;
+    $npc{exp}         = unpack("d", substr($buf, 70, 8));
+    $npc{gold}        = unpack("d", substr($buf, 78, 8));
+    $npc{number}      = unpack("s", substr($buf, 86, 2));
+    $npc{level}       = unpack("s", substr($buf, 88, 2));
+    $npc{hits}        = unpack("s", substr($buf, 90, 2));
+    $npc{poison}      = unpack("s", substr($buf, 92, 2));
+    $npc{leveldrain}  = unpack("s", substr($buf, 94, 2));
+    $npc{spell}       = unpack("s", substr($buf, 96, 2));
+    $npc{block}       = unpack("s", substr($buf, 98, 2));
+    $npc{prevent}     = unpack("s", substr($buf,100, 2));
+    $npc{follow}      = unpack("s", substr($buf,102, 2));
+    $npc{magic}       = unpack("s", substr($buf,104, 2));
+    $npc{jail}        = unpack("s", substr($buf,106, 2));
+    $npc{teleport}    = unpack("f<", substr($buf,108, 4));
+    $npc{follow_percent}  = unpack("s", substr($buf,112, 2));
+    $npc{block_percent}   = unpack("s", substr($buf,114, 2));
+    $npc{prevent_percent} = unpack("s", substr($buf,116, 2));
+    $npc{spell_percent}   = unpack("s", substr($buf,118, 2));
+    $npc{poison_percent}  = unpack("s", substr($buf,120, 2));
+    $npc{drain_percent}   = unpack("s", substr($buf,122, 2));
+    $npc{rate}        = unpack("s", substr($buf,124, 2));
+    $npc{rate_percent}= unpack("s", substr($buf,126, 2));
+    $npc{permanent}   = unpack("s", substr($buf,128, 2));
+    $npc{talk}        = substr($buf,130, 10);  $npc{talk}        =~ s/[\0 ]+$//;
+    $npc{psionic}     = unpack("s", substr($buf,140, 2));
+    $npc{psionic_spell}=unpack("s", substr($buf,142, 2));
+
+    print "Parsed fields for record $record_num:\n";
+    foreach my $k (qw(name plural treasure exp gold number level hits poison leveldrain spell block prevent follow magic jail teleport follow_percent block_percent prevent_percent spell_percent poison_percent drain_percent rate rate_percent permanent talk psionic psionic_spell)) {
+        printf("  %-16s : %s\n", $k, defined($npc{$k}) ? $npc{$k} : '');
+    }
+    print "\n";
+
+    $record_num++;
+}
+close($fh);

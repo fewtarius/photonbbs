@@ -1,0 +1,181 @@
+# PhotonMUD Data Cache Module
+# Provides LRU caching for data files to reduce disk I/O
+#
+# Usage:
+#   my $cached = data_cache_get('monsters', $monnum);
+#   return $cached if defined $cached;
+#   ... load from disk ...
+#   data_cache_set('monsters', $monnum, \%data);
+
+use strict;
+
+# Access the global config hash from pb-framework
+our %config;
+
+{
+    # Cache storage: { type => { key => { data => $ref, accessed => time } } }
+    my %data_cache = (
+        monsters => {},
+        spells   => {},
+        objects  => {},
+        treasures => {},
+        monclass => {},
+    );
+    
+    # Cache configuration per type
+    my %cache_config = (
+        monsters  => { max_size => 200, mtime_key => 'monsters_mtime' },
+        spells    => { max_size => 100, mtime_key => 'spells_mtime' },
+        objects   => { max_size => 200, mtime_key => 'objects_mtime' },
+        treasures => { max_size => 200, mtime_key => 'treasures_mtime' },
+        monclass  => { max_size => 50,  mtime_key => 'monclass_mtime' },
+    );
+    
+    # File modification times for cache invalidation
+    my %file_mtimes;
+    
+    # Statistics
+    my %cache_stats = (
+        monsters  => { hits => 0, misses => 0 },
+        spells    => { hits => 0, misses => 0 },
+        objects   => { hits => 0, misses => 0 },
+        treasures => { hits => 0, misses => 0 },
+        monclass  => { hits => 0, misses => 0 },
+    );
+    
+    sub _get_data_file_path {
+        my ($type) = @_;
+        my %files = (
+            monsters  => "$config{'home'}/$config{'data'}/monsters.dat",
+            spells    => "$config{'home'}/$config{'data'}/spells.dat",
+            objects   => "$config{'home'}/$config{'data'}/objects.dat",
+            treasures => "$config{'home'}/$config{'data'}/treasure.dat",
+            monclass  => "$config{'home'}/$config{'data'}/monclass.dat",
+        );
+        return $files{$type};
+    }
+    
+    sub _check_file_modified {
+        my ($type) = @_;
+        my $file = _get_data_file_path($type);
+        return 0 unless $file && -e $file;
+        
+        my $current_mtime = (stat($file))[9] // 0;
+        my $cached_mtime = $file_mtimes{$type} // 0;
+        
+        if ($current_mtime != $cached_mtime) {
+            # File was modified, clear this type's cache
+            data_cache_clear_type($type);
+            $file_mtimes{$type} = $current_mtime;
+            return 1;  # File was modified
+        }
+        return 0;  # File unchanged
+    }
+    
+    sub data_cache_get {
+        my ($type, $key) = @_;
+        return undef unless exists $data_cache{$type};
+        return undef unless exists $data_cache{$type}{$key};
+        
+        # Check if underlying file changed
+        _check_file_modified($type);
+        return undef unless exists $data_cache{$type}{$key};  # Re-check after potential clear
+        
+        # Update access time and return copy
+        $data_cache{$type}{$key}{accessed} = time();
+        $cache_stats{$type}{hits}++;
+        
+        # Return a deep copy to prevent cache corruption
+        my $data = $data_cache{$type}{$key}{data};
+        if (ref($data) eq 'HASH') {
+            return { %$data };
+        } elsif (ref($data) eq 'ARRAY') {
+            return [ @$data ];
+        }
+        return $data;
+    }
+    
+    sub data_cache_set {
+        my ($type, $key, $data) = @_;
+        return unless exists $data_cache{$type};
+        return unless defined $data;
+        
+        my $max_size = $cache_config{$type}{max_size} // 100;
+        
+        # Evict oldest entries if cache is full
+        if (scalar(keys %{$data_cache{$type}}) >= $max_size) {
+            _data_cache_evict($type, int($max_size * 0.1));  # Evict 10%
+        }
+        
+        # Store a copy
+        my $stored;
+        if (ref($data) eq 'HASH') {
+            $stored = { %$data };
+        } elsif (ref($data) eq 'ARRAY') {
+            $stored = [ @$data ];
+        } else {
+            $stored = $data;
+        }
+        
+        $data_cache{$type}{$key} = {
+            data => $stored,
+            accessed => time(),
+        };
+        $cache_stats{$type}{misses}++;
+    }
+    
+    sub data_cache_invalidate {
+        my ($type, $key) = @_;
+        delete $data_cache{$type}{$key} if exists $data_cache{$type}{$key};
+    }
+    
+    sub data_cache_clear_type {
+        my ($type) = @_;
+        $data_cache{$type} = {} if exists $data_cache{$type};
+        $cache_stats{$type} = { hits => 0, misses => 0 };
+    }
+    
+    sub data_cache_clear_all {
+        for my $type (keys %data_cache) {
+            $data_cache{$type} = {};
+            $cache_stats{$type} = { hits => 0, misses => 0 };
+        }
+        %file_mtimes = ();
+    }
+    
+    sub _data_cache_evict {
+        my ($type, $count) = @_;
+        $count //= 1;
+        my $cache = $data_cache{$type};
+        my @sorted = sort { $cache->{$a}{accessed} <=> $cache->{$b}{accessed} } keys %$cache;
+        for my $i (0 .. ($count - 1)) {
+            last unless defined $sorted[$i];
+            delete $cache->{$sorted[$i]};
+        }
+    }
+    
+    sub data_cache_stats {
+        my ($type) = @_;
+        if ($type) {
+            my $total = ($cache_stats{$type}{hits} // 0) + ($cache_stats{$type}{misses} // 0);
+            my $ratio = $total > 0 ? sprintf("%.1f%%", ($cache_stats{$type}{hits} / $total) * 100) : "N/A";
+            return {
+                type => $type,
+                size => scalar(keys %{$data_cache{$type}}),
+                max_size => $cache_config{$type}{max_size},
+                hits => $cache_stats{$type}{hits},
+                misses => $cache_stats{$type}{misses},
+                hit_ratio => $ratio,
+            };
+        }
+        
+        # Return stats for all types
+        my %all_stats;
+        for my $t (keys %data_cache) {
+            $all_stats{$t} = data_cache_stats($t);
+        }
+        return \%all_stats;
+    }
+}
+
+return 1;

@@ -1,0 +1,12 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@ROOMINFO@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays detailed debug information about the current room.
+Syntax: ROOMINFO
+
+- Sysop/admin only.
+- Shows room number, descriptions, exits, monsters, features, and more.
+- Useful for troubleshooting or editing the world.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

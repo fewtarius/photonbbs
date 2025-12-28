@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@QUIT@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Ends your session and safely saves your character.
+Syntax: QUIT
+Aliases: BYE, X
+
+- Prompts for confirmation before quitting.
+- Saves all progress and cleans up your session.
+- Use RETIRE to permanently delete your character.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

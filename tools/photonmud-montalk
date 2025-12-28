@@ -1,0 +1,34 @@
+#!/usr/bin/perl
+# PhotonBBS DND montalk.dat record dumper
+use strict;
+use warnings;
+
+my $file = shift || 'data/photonmud/montalk.dat';
+my $reclen = 80;
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+my $record_num = 1;
+while (1) {
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    # If the record is all zeros, treat as empty/deleted
+    if ($buf =~ /^\0+$/) {
+        print "Record $record_num: EMPTY/DELETED\n\n";
+        $record_num++;
+        next;
+    }
+
+    my $talk = $buf;
+    $talk =~ s/[\0 ]+$//; # Trim nulls and spaces
+
+    print "Record $record_num:\n";
+    print "  TalkMessage: $talk\n";
+    print "  Raw hex: ", unpack("H*", $buf), "\n";
+    print "\n";
+
+    $record_num++;
+}
+close($fh);

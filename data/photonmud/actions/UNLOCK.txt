@@ -1,0 +1,37 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR UNLOCK Command - Open Locks with a Key @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  UNLOCK <container> WITH <key>
+  UNLOCK <exit>
+
+@DATACLR What it does:@THEMECLR
+  UNLOCK opens a locked container or exit using the correct key. Once
+  unlocked, you can open and access the contents or passage.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must have the correct key in your inventory.
+  - Some locks can be picked by Thieves if you lack the key.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None for unlocking with a key. Picking locks may require a roll.
+
+@DATACLR Outcome:@THEMECLR
+  - The container or exit is now unlocked.
+
+@DATACLR Class Features:@THEMECLR
+  - Thieves can pick locks.
+
+@DATACLR Tips:@THEMECLR
+  - Keep track of your keys.
+  - Use UNLOCK before OPEN if needed.
+
+@DATACLR Example:@THEMECLR
+  UNLOCK DOOR WITH 101
+    The door is now unlocked.
+
+@DATACLR See also:@THEMECLR
+  LOCK, OPEN, CLOSE, PICKLOCK
+-------------------------------------------------------------------------------

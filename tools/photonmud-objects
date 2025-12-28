@@ -1,0 +1,365 @@
+#!/usr/bin/perl
+# filepath: /Users/andrew/repositories/fewtarius/photonbbs/tools/photonmud-objects
+
+use strict;
+use warnings;
+use Fcntl qw(:seek);
+use Getopt::Long;
+
+my $file = 'data/photonmud/objects.dat';
+my $reclen = 270;  # 270 bytes record length
+my $csv_output = '';
+my $verbose = 0;
+my $record_number = 0;
+my $dump_hex = 0;
+my $help = 0;
+my $debug_mode = 0; # Set to 1 for debugging
+
+GetOptions(
+    "file=s"     => \$file,
+    "csv=s"      => \$csv_output,
+    "verbose!"   => \$verbose,
+    "record=i"   => \$record_number,
+    "hex!"       => \$dump_hex,
+    "debug"      => \$debug_mode,
+    "help"       => \$help
+) or die("Error in command line arguments\n");
+
+if ($help) {
+    print "Usage: $0 [options]\n";
+    print "Options:\n";
+    print "  --file=FILE     Specify the objects data file (default: data/photonmud/objects.dat)\n";
+    print "  --csv=FILE      Export objects to CSV file compatible with photonmud-object-import\n";
+    print "  --verbose       Show full object details including hex dumps\n";
+    print "  --record=N      Display only the specified record number\n";
+    print "  --hex           Include hexadecimal dump of the entire record\n";
+    print "  --debug         Show additional debugging information\n";
+    print "  --help          Show this help message\n";
+    exit(0);
+}
+
+# Check if we can read the binary data file
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+# Open CSV output file if requested
+my $csv_fh;
+if ($csv_output) {
+    open($csv_fh, ">:encoding(utf8)", $csv_output) or die "Failed to open CSV output file $csv_output: $!";
+    # Write CSV header matching import format exactly
+    print $csv_fh "name|shortname|roomlink|invisible|jailtrap|doorlock|destination|permanent|hidden|closed|keyed|relocks|longdesc|fromhour|frommin|tohour|tomin|lightroom|lighttime|shortdesc|teleport|trap\n";
+}
+
+my $record_num = 1;
+my $offset = 0;
+
+# Process each record in the binary data file
+while (1) {
+    seek($fh, $offset, SEEK_SET);
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) >= $reclen;
+
+    # Skip records that are all zeros or non-printable chars in name field
+    if ($buf =~ /^\x00{30}/) {
+        print "Record $record_num: EMPTY/DELETED\n\n" unless $csv_output;
+        $record_num++;
+        $offset += $reclen;
+        next;
+    }
+
+    # Skip records if a specific record number was requested
+    if ($record_number > 0 && $record_num != $record_number) {
+        $record_num++;
+        $offset += $reclen;
+        next;
+    }
+
+    my %obj;
+    
+    # String fields - exactly 30 bytes each
+    $obj{name} = sanitize_string(substr($buf, 0, 30));
+    $obj{shortname} = sanitize_string(substr($buf, 30, 30));
+    
+    # Single (4-byte floating point)
+    $obj{roomlink} = unpack("f<", substr($buf, 60, 4));
+    
+    # Integers (2-byte shorts) - 9 of them in sequence
+    $obj{invisible}   = unpack("s<", substr($buf, 64, 2));
+    $obj{jailtrap}    = unpack("s<", substr($buf, 66, 2));
+    $obj{doorlock}    = unpack("s<", substr($buf, 68, 2));
+    $obj{destination} = unpack("s<", substr($buf, 70, 2));
+    $obj{permanent}   = unpack("s<", substr($buf, 72, 2));
+    $obj{hidden}      = unpack("s<", substr($buf, 74, 2));
+    $obj{closed}      = unpack("s<", substr($buf, 76, 2));
+    $obj{keyed}       = unpack("s<", substr($buf, 78, 2));
+    $obj{relocks}     = unpack("s<", substr($buf, 80, 2));
+    
+    # LongDesc string - 80 bytes
+    $obj{longdesc}    = sanitize_string(substr($buf, 82, 80));
+    
+    # More integers (2-byte shorts) - 6 of them in sequence
+    $obj{fromhour}    = unpack("s<", substr($buf, 162, 2));
+    $obj{frommin}     = unpack("s<", substr($buf, 164, 2));
+    $obj{tohour}      = unpack("s<", substr($buf, 166, 2));
+    $obj{tomin}       = unpack("s<", substr($buf, 168, 2));
+    $obj{lightroom}   = unpack("s<", substr($buf, 170, 2));
+    $obj{lighttime}   = unpack("s<", substr($buf, 172, 2));
+    
+    # ShortDesc string - 80 bytes
+    $obj{shortdesc}   = sanitize_string(substr($buf, 174, 80));
+    
+    # Teleport - 4 bytes float
+    $obj{teleport}    = unpack("f<", substr($buf, 254, 4));
+    
+    # Trap - 2 bytes at offset 258
+    $obj{trap}        = unpack("s<", substr($buf, 258, 2));
+    
+    # Note: The remaining 10 bytes (260-269) are padding/reserved
+    $obj{padding}     = substr($buf, 260, 10);
+    
+    # Store raw buffer for hex dump
+    $obj{_raw_buffer} = $buf;
+    
+    # Debug - output raw values for descriptions
+    if ($debug_mode && $record_num <= 2) {
+        print "DEBUG: Record $record_num - '$obj{name}'\n";
+        print "Raw longdesc: " . unpack("H*", substr($buf, 82, 80)) . "\n";
+        print "Raw shortdesc: " . unpack("H*", substr($buf, 174, 80)) . "\n";
+    }
+    
+    # Ensure all values are reasonable - handle possible corrupt values
+    $obj{roomlink} = normalize_number($obj{roomlink});
+    $obj{teleport} = normalize_number($obj{teleport});
+    
+    foreach my $field (qw(invisible jailtrap doorlock destination permanent hidden 
+                          closed keyed relocks fromhour frommin tohour tomin 
+                          lightroom lighttime trap)) {
+        $obj{$field} = normalize_integer($obj{$field});
+    }
+    
+    # Display information if not exporting to CSV
+    unless ($csv_output) {
+        print "=============================================================\n";
+        print "Record $record_num: '$obj{name}'\n";
+        print "=============================================================\n";
+        
+        # Standard field display
+        foreach my $k (sort { 
+            # Custom sort order for fields
+            my %order = (
+                'name' => 1, 'shortname' => 2, 'roomlink' => 3,
+                'invisible' => 4, 'jailtrap' => 5, 'doorlock' => 6,
+                'destination' => 7, 'permanent' => 8, 'hidden' => 9,
+                'closed' => 10, 'keyed' => 11, 'relocks' => 12,
+                'longdesc' => 13, 'shortdesc' => 14,
+                'fromhour' => 15, 'frommin' => 16, 'tohour' => 17, 'tomin' => 18,
+                'lightroom' => 19, 'lighttime' => 20,
+                'teleport' => 21, 'trap' => 22,
+                'padding' => 23, '_raw_buffer' => 99
+            );
+            ($order{$a} || 50) <=> ($order{$b} || 50)
+        } keys %obj) {
+            next if $k eq '_raw_buffer'; # Skip raw buffer here
+            
+            if ($k eq 'padding') {
+                if ($verbose) {
+                    printf("  %-12s : %s\n", $k, unpack("H*", $obj{$k}));
+                }
+            } elsif ($k =~ /desc$/) {
+                printf("  %-12s : %s\n", $k, substr($obj{$k}, 0, 60) . 
+                       (length($obj{$k}) > 60 ? "..." : ""));
+                if ($verbose && length($obj{$k}) > 60) {
+                    my $desc = $obj{$k};
+                    print "               ";
+                    my $line_len = 0;
+                    for (my $i = 0; $i < length($desc); $i++) {
+                        print substr($desc, $i, 1);
+                        $line_len++;
+                        if ($line_len >= 60 && substr($desc, $i, 1) =~ /\s/) {
+                            print "\n               ";
+                            $line_len = 0;
+                        }
+                    }
+                    print "\n";
+                }
+            } else {
+                printf("  %-12s : %s\n", $k, defined($obj{$k}) ? $obj{$k} : '');
+            }
+        }
+        
+        # Add a full hex dump if requested
+        if ($dump_hex) {
+            print "\n  HEX DUMP:\n";
+            my $hex_data = unpack("H*", $obj{_raw_buffer});
+            for (my $i = 0; $i < length($hex_data); $i += 32) {
+                my $chunk = substr($hex_data, $i, 32);
+                my $offset = $i / 2;
+                printf("    %04X: ", $offset);
+                
+                # Print hex values in pairs
+                my @hex_pairs = $chunk =~ m/([0-9a-f]{2})/g;
+                foreach my $pair (@hex_pairs) {
+                    print "$pair ";
+                }
+                
+                # Fill remaining space if chunk is less than 16 bytes
+                my $padding = 16 - scalar(@hex_pairs);
+                print "   " x $padding;
+                
+                # Print ASCII representation
+                print "  ";
+                my $ascii_chunk = substr($obj{_raw_buffer}, $offset, 16);
+                foreach my $char (split //, $ascii_chunk) {
+                    my $ord = ord($char);
+                    if ($ord >= 32 && $ord <= 126) {
+                        print $char;
+                    } else {
+                        print ".";
+                    }
+                }
+                print "\n";
+            }
+        }
+        
+        # Structured data presentation
+        if ($verbose) {
+            print "\n  OBJECT STRUCTURE:\n";
+            printf("    %-15s [%04X-%04X] : %s\n", "name", 0, 29, $obj{name});
+            printf("    %-15s [%04X-%04X] : %s\n", "shortname", 30, 59, $obj{shortname});
+            printf("    %-15s [%04X-%04X] : %f\n", "roomlink", 60, 63, $obj{roomlink});
+            printf("    %-15s [%04X-%04X] : %d\n", "invisible", 64, 65, $obj{invisible});
+            printf("    %-15s [%04X-%04X] : %d\n", "jailtrap", 66, 67, $obj{jailtrap});
+            printf("    %-15s [%04X-%04X] : %d\n", "doorlock", 68, 69, $obj{doorlock});
+            printf("    %-15s [%04X-%04X] : %d\n", "destination", 70, 71, $obj{destination});
+            printf("    %-15s [%04X-%04X] : %d\n", "permanent", 72, 73, $obj{permanent});
+            printf("    %-15s [%04X-%04X] : %d\n", "hidden", 74, 75, $obj{hidden});
+            printf("    %-15s [%04X-%04X] : %d\n", "closed", 76, 77, $obj{closed});
+            printf("    %-15s [%04X-%04X] : %d\n", "keyed", 78, 79, $obj{keyed});
+            printf("    %-15s [%04X-%04X] : %d\n", "relocks", 80, 81, $obj{relocks});
+            printf("    %-15s [%04X-%04X] : %s\n", "longdesc", 82, 161, 
+                   substr($obj{longdesc}, 0, 40) . (length($obj{longdesc}) > 40 ? "..." : ""));
+            printf("    %-15s [%04X-%04X] : %d\n", "fromhour", 162, 163, $obj{fromhour});
+            printf("    %-15s [%04X-%04X] : %d\n", "frommin", 164, 165, $obj{frommin});
+            printf("    %-15s [%04X-%04X] : %d\n", "tohour", 166, 167, $obj{tohour});
+            printf("    %-15s [%04X-%04X] : %d\n", "tomin", 168, 169, $obj{tomin});
+            printf("    %-15s [%04X-%04X] : %d\n", "lightroom", 170, 171, $obj{lightroom});
+            printf("    %-15s [%04X-%04X] : %d\n", "lighttime", 172, 173, $obj{lighttime});
+            printf("    %-15s [%04X-%04X] : %s\n", "shortdesc", 174, 253, 
+                   substr($obj{shortdesc}, 0, 40) . (length($obj{shortdesc}) > 40 ? "..." : ""));
+            printf("    %-15s [%04X-%04X] : %f\n", "teleport", 254, 257, $obj{teleport});
+            printf("    %-15s [%04X-%04X] : %d\n", "trap", 258, 259, $obj{trap});
+            printf("    %-15s [%04X-%04X] : %s\n", "padding", 260, 269, unpack("H*", $obj{padding}));
+        }
+        
+        print "\n";
+    }
+
+    # Write to CSV if requested
+    if ($csv_output) {
+        my @csv_fields = (
+            csv_escape($obj{name}),
+            csv_escape($obj{shortname}),
+            $obj{roomlink},
+            $obj{invisible},
+            $obj{jailtrap},
+            $obj{doorlock},
+            $obj{destination},
+            $obj{permanent},
+            $obj{hidden},
+            $obj{closed},
+            $obj{keyed},
+            $obj{relocks},
+            csv_escape($obj{longdesc}),
+            $obj{fromhour},
+            $obj{frommin},
+            $obj{tohour},
+            $obj{tomin},
+            $obj{lightroom},
+            $obj{lighttime},
+            csv_escape($obj{shortdesc}),
+            $obj{teleport},
+            $obj{trap}
+        );
+        print $csv_fh join("|", @csv_fields) . "\n";
+    }
+
+    $record_num++;
+    $offset += $reclen;
+    
+    # If we were looking for a specific record and found it, we can exit
+    last if $record_number > 0 && $record_num > $record_number;
+}
+
+close($fh);
+if ($csv_output) {
+    close($csv_fh);
+    print "Exported " . ($record_num - 1) . " objects to $csv_output\n";
+}
+
+# Helper function to sanitize string fields
+sub sanitize_string {
+    my ($str) = @_;
+    return '' unless defined $str;
+    
+    # Remove null bytes
+    $str =~ s/\x00//g;
+    
+    # Replace non-printable characters with spaces
+    $str =~ s/[\x01-\x1F\x7F-\xFF]/ /g;
+    
+    # Trim leading/trailing spaces
+    $str =~ s/^\s+|\s+$//g;
+    
+    return $str;
+}
+
+# Helper function to normalize floating point values
+sub normalize_number {
+    my ($value) = @_;
+    
+    # If not a number or outside reasonable range, return 0
+    if (!defined($value) || !looks_like_number($value) || 
+        $value > 100000 || $value < -100000 || $value != $value) { # Last check for NaN
+        return 0;
+    }
+    
+    return $value;
+}
+
+# Helper function to normalize integer values
+sub normalize_integer {
+    my ($value) = @_;
+    
+    # If not a number or outside reasonable range, return 0
+    if (!defined($value) || !looks_like_number($value) || 
+        $value > 32767 || $value < -32768) {
+        return 0;
+    }
+    
+    return $value;
+}
+
+# Check if value looks like a number
+sub looks_like_number {
+    my ($value) = @_;
+    return 0 unless defined $value;
+    return 0 if $value =~ /^$/;
+    return 1 if $value =~ /^-?\d+$/;
+    return 1 if $value =~ /^-?\d+\.\d+$/;
+    return 1 if $value =~ /^-?\.\d+$/;
+    return 0;
+}
+
+# Helper function to properly escape CSV fields
+sub csv_escape {
+    my ($field) = @_;
+    return '' unless defined $field;
+    
+    # If the field contains pipe, escape with quotes
+    if ($field =~ /[\|\n\"]/) {
+        $field =~ s/"/""/g;  # Double quotes to escape them
+        return qq{"$field"};
+    }
+    
+    return $field;
+}

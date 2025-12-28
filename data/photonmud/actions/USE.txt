@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@USE <object>@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Use USE to interact with a special exit or object in the room.
+Syntax: USE <object>
+Example: USE PORTAL
+
+- Attempts to activate or move through the specified object.
+- May require the object to be unlocked or open.
+- Some objects may have special effects or requirements.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

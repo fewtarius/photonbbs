@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@RETIRE@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Permanently deletes your character from the game.
+Syntax: RETIRE
+Aliases: RET
+
+- Prompts for confirmation; cannot be undone.
+- Removes all character data and progress.
+- Use only if you wish to start over.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

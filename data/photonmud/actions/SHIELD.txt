@@ -1,0 +1,39 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR SHIELD Command - Halve Damage with Shield @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  SHIELD
+
+@DATACLR What it does:@THEMECLR
+  SHIELD is a defensive action you can take during combat if you have
+  a shield equipped. When you SHIELD, you halve the damage from the
+  next attack against you.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - SHIELD is used on your turn in combat instead of attacking.
+  - You must have a shield equipped.
+  - When attacked, you take half damage (rounded down).
+
+@DATACLR Dice Rolls:@THEMECLR
+  - No dice roll required; always halves damage if shield is equipped.
+
+@DATACLR Outcome:@THEMECLR
+  - You take half damage from the next attack.
+
+@DATACLR Class Features:@THEMECLR
+  - Fighters, Paladins, and Clerics often use shields.
+  - All classes can use SHIELD if they have one equipped.
+
+@DATACLR Tips:@THEMECLR
+  - Use SHIELD when expecting a powerful attack.
+  - Combine with armor or buffs for maximum defense.
+
+@DATACLR Example:@THEMECLR
+  SHIELD
+    On the next attack, you take half damage (if shield equipped).
+
+@DATACLR See also:@THEMECLR
+  DODGE, PARRY, GUARD, COUNTER
+-------------------------------------------------------------------------------

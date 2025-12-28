@@ -1,0 +1,140 @@
+#!/usr/bin/perl
+# Monster.dat record dumper for PhotonBBS DND (now with region field, 160 bytes)
+use strict;
+use warnings;
+use Getopt::Long;
+
+my $csv_output = 0;
+my $file;
+
+GetOptions(
+    'csv' => \$csv_output,
+    'file=s' => \$file,
+) or die "Usage: $0 [--csv] [--file=filename]\n";
+
+$file ||= 'data/photonmud/monsters.dat';
+my $reclen = 180; # Updated MonsterType size with region and behaviors
+my %config; 
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+my $record_num = 1;
+
+# Print CSV header if in CSV mode
+if ($csv_output) {
+    print "name|plural|treasure|exp|gold|number|level|hits|poison|leveldrain|spell|block|prevent|follow|magic|jail|teleport|follow_percent|block_percent|prevent_percent|spell_percent|poison_percent|drain_percent|rate|rate_percent|permanent|talk|psionic|psionic_spell|region|behaviors\n";
+}
+
+while (1) {
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    unless ($csv_output) {
+        print "Record $record_num: Read $reclen bytes\n";
+        print "Raw buffer hex: ", unpack("H*", substr($buf, 0, 64)), "\n";
+    }
+
+    # If the record is all zeros, treat as empty/deleted
+    if ($buf =~ /^\0+$/) {
+        unless ($csv_output) {
+            print "Record $record_num: EMPTY/DELETED\n\n";
+        }
+        $record_num++;
+        next;
+    }
+
+    my %mon;
+    $mon{name}        = substr($buf, 0, 30);   $mon{name}        =~ s/[\0 ]+$//;
+    $mon{plural}      = substr($buf, 30, 30);  $mon{plural}      =~ s/[\0 ]+$//;
+    $mon{treasure}    = substr($buf, 60, 10);  $mon{treasure}    =~ s/[\0 ]+$//;
+    $mon{exp}         = unpack("d", substr($buf, 70, 8));
+    $mon{gold}        = unpack("d", substr($buf, 78, 8));
+    $mon{number}      = unpack("s", substr($buf, 86, 2));
+    $mon{level}       = unpack("s", substr($buf, 88, 2));
+    $mon{hits}        = unpack("s", substr($buf, 90, 2));
+    $mon{poison}      = unpack("s", substr($buf, 92, 2));
+    $mon{leveldrain}  = unpack("s", substr($buf, 94, 2));
+    $mon{spell}       = unpack("s", substr($buf, 96, 2));
+    $mon{block}       = unpack("s", substr($buf, 98, 2));
+    $mon{prevent}     = unpack("s", substr($buf,100, 2));
+    $mon{follow}      = unpack("s", substr($buf,102, 2));
+    $mon{magic}       = unpack("s", substr($buf,104, 2));
+    $mon{jail}        = unpack("s", substr($buf,106, 2));
+    $mon{teleport}    = unpack("f<", substr($buf,108, 4));
+    $mon{follow_percent}  = unpack("s", substr($buf,112, 2));
+    $mon{block_percent}   = unpack("s", substr($buf,114, 2));
+    $mon{prevent_percent} = unpack("s", substr($buf,116, 2));
+    $mon{spell_percent}   = unpack("s", substr($buf,118, 2));
+    $mon{poison_percent}  = unpack("s", substr($buf,120, 2));
+    $mon{drain_percent}   = unpack("s", substr($buf,122, 2));
+    $mon{rate}        = unpack("s", substr($buf,124, 2));
+    $mon{rate_percent}= unpack("s", substr($buf,126, 2));
+    $mon{permanent}   = unpack("s", substr($buf,128, 2));
+    $mon{talk}        = substr($buf,130, 10);  $mon{talk}        =~ s/[\0 ]+$//;
+    $mon{psionic}     = unpack("s", substr($buf,140, 2));
+    $mon{psionic_spell}=unpack("s", substr($buf,142, 2));
+    $mon{region}      = substr($buf,144, 16);  $mon{region}      =~ s/[\0 ]+$//;
+    $mon{behaviors}   = substr($buf,160, 20);  $mon{behaviors}   =~ s/[\0 ]+$//;
+
+    # Convert treasure to hex string for CSV output
+    if ($csv_output) {
+        my $treasure_hex = unpack("H*", substr($buf, 60, 10));
+        $treasure_hex =~ s/00+$//; # Remove trailing zeros
+        $treasure_hex = uc($treasure_hex);
+        
+        # Convert talk to hex string
+        my $talk_hex = unpack("H*", substr($buf, 130, 10));
+        $talk_hex =~ s/00+$//; # Remove trailing zeros
+        $talk_hex = uc($talk_hex);
+        
+        # Escape any pipe characters in string fields
+        $mon{name} =~ s/\|/\\|/g if $mon{name};
+        $mon{plural} =~ s/\|/\\|/g if $mon{plural};
+        $mon{region} =~ s/\|/\\|/g if $mon{region};
+        $mon{behaviors} =~ s/\|/\\|/g if $mon{behaviors};
+        
+        print join('|', 
+            $mon{name} // '',
+            $mon{plural} // '',
+            $treasure_hex,
+            $mon{exp} // 0,
+            $mon{gold} // 0,
+            $mon{number} // 0,
+            $mon{level} // 0,
+            $mon{hits} // 0,
+            $mon{poison} // 0,
+            $mon{leveldrain} // 0,
+            $mon{spell} // 0,
+            $mon{block} // 0,
+            $mon{prevent} // 0,
+            $mon{follow} // 0,
+            $mon{magic} // 0,
+            $mon{jail} // 0,
+            $mon{teleport} // 0,
+            $mon{follow_percent} // 0,
+            $mon{block_percent} // 0,
+            $mon{prevent_percent} // 0,
+            $mon{spell_percent} // 0,
+            $mon{poison_percent} // 0,
+            $mon{drain_percent} // 0,
+            $mon{rate} // 0,
+            $mon{rate_percent} // 0,
+            $mon{permanent} // 0,
+            $talk_hex,
+            $mon{psionic} // 0,
+            $mon{psionic_spell} // 0,
+            $mon{region} // '',
+            $mon{behaviors} // ''
+        ) . "\n";
+    } else {
+        print "Parsed fields for record $record_num:\n";
+        foreach my $k (qw(name plural treasure exp gold number level hits poison leveldrain spell block prevent follow magic jail teleport follow_percent block_percent prevent_percent spell_percent poison_percent drain_percent rate rate_percent permanent talk psionic psionic_spell region behaviors)) {
+            printf("  %-16s : %s\n", $k, defined($mon{$k}) ? $mon{$k} : '');
+        }
+        print "\n";
+    }
+
+    $record_num++;
+}
+close($fh);

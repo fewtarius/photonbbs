@@ -65,6 +65,10 @@ require	($config{'home'}."/modules/pb-lastcallers");
 require ($config{'home'}."/modules/pb-oneliners");
 
 chomp ($mytty=`tty`);
+# Validate tty - if not a valid device, try /dev/tty or leave empty
+if (!$mytty || $mytty !~ m|^/dev/|) {
+    $mytty = (-e "/dev/tty" && -r "/dev/tty") ? "/dev/tty" : "";
+}
 
 unless (-d $config{transient}) {
     mkdir $config{transient}, 0777;
@@ -92,6 +96,7 @@ main: {
       $readit=1;
     }
     authenticate();
+    initialize_terminal_config();  # Re-initialize to use saved terminal width from user profile
     if ($info{'banned'} eq "Y") {
         logger("NOTICE: ".$info{'handle'}." is banned, terminating.");
         writeline($theme{'banned'});

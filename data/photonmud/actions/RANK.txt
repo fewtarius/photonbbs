@@ -1,0 +1,12 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@RANK@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays the Hall of Fame, showing top-ranked players.
+Syntax: RANK
+Aliases: HALL
+
+- Shows player name, class, level, and score.
+- Rankings are based on experience and achievements.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

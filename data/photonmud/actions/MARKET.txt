@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@MARKET@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays all items for sale in the current shop's market.
+Syntax: MARKET
+Aliases: MK
+
+- Only available in shops.
+- Shows item, seller, price, and market ID.
+- Use BUY <ID> to purchase, SELL <item> <price> to list.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

@@ -1,0 +1,2267 @@
+#!/usr/bin/perl
+# ---------------------------------------------------------------------------
+# PhotonMUD - Multiuser Adventure Door for PhotonBBS
+#
+# FEATURES (2025-05-20, codebase audit):
+#
+# 1. Persistent Multiuser D&D-Style MUD
+#    - Player state: class, race, stats, inventory, bank, spells, XP, level, alignment, proficiency.
+#    - Player creation: class/race selection, D&D-style stat rolling (4d6 drop lowest, class/race bias), alignment, weapon proficiency.
+#    - Player management logic in pm-player.
+#
+# 2. Combat System
+#    - D&D-style HP/max HP (class hit die + CON mod per level).
+#    - Full-featured combat: PvE, PvP, group combat, initiative, attack/defense actions, monster AI.
+#    - Monster special effects: poison, level drain, spellcasting, blocking, following, jailing, teleporting, psionics, rust, steal.
+#    - Monster AI: flee, steal, rust, block, prevent treasure, follow/jail/teleport player.
+#    - Monster talk/interactions via TALK and montalk.dat.
+#    - Permanent monsters persist in rooms if flagged.
+#    - Monster inventory/treasure drops on death.
+#    - Combat and monster logic in pm-combat and pm-monsters.
+#
+# 3. Room & World System
+#    - Rooms from rooms.dat (modern DND Door format, 1084 bytes/rec).
+#    - Exits, objects, treasures, containers, monster classes, region, feature, dynamic descriptions.
+#    - Procedurally generated world: towns, castles, caves, dungeons, rivers, roads, biomes, etc.
+#    - Room and inventory containers: open/close/lock/unlock, get/put items, multiuser-safe file IO.
+#    - Room player registry & presence tracking: entry/exit notifications, real-time player lists.
+#    - All room logic in pm-rooms and pm-containers.
+#
+# 4. Inventory & Equipment
+#    - Objects and treasures, auto-equip/wear of starting gear.
+#    - Equipment: weapons, armor, shields, rings, etc., with D&D-style bonuses and proficiency.
+#    - Inventory management: GET, DROP, PUT, EQUIP, WEAR, REMOVE, RETURN, SORT, LOOKIN, etc.
+#    - All object/treasure logic in pm-objects.
+#
+# 5. Market & Economy
+#    - Market system: list, buy, sell, manage items for sale, shopkeeper sales, black market.
+#    - Banking: gold, bank balance, deposit, withdraw, with bank/shop presence checks.
+#    - All market logic in pm-market.
+#
+# 6. Spell & Psionic System
+#    - D&D-style spell slots per class/level, spellbook, learning/forgetting, spell ingredients, psionics, spell effects.
+#    - Resting at an Inn restores HP and spell slots.
+#    - All spell logic in pm-spells.
+#
+# 7. Multiuser Interactions
+#    - Real-time messaging (dot prefix or SAY), PvP, trading, giving items, room notifications.
+#    - Players see each other and monsters/NPCs in the same room.
+#    - Multiuser presence and session cleanup on disconnect/quit.
+#    - All messaging logic in pm-rooms and pm-messaging.
+#
+# 8. Command Parser
+#    - Rich command set: movement, look, search, inventory, equip, wear, return, get, drop, put, open, close, lock, unlock, lookin, cast, bank, deposit, withdraw, market, sell, buy, mymarket, mail, readmail, users, here, talk, give, status, help, quit, rest, psionic, admin/debug, and more.
+#    - Aliases and normalization for common commands.
+#    - Robust argument validation and usage messages for all commands.
+#    - Context help for every command via HELP <command> and actions/<COMMAND>.txt.
+#
+# 9. Admin/Sysop Tools
+#    - ROOMINFO, LISTNPCS, TELEPORT/TP, MONMAP, all security-checked and robust.
+#    - All admin/debug commands are restricted to users with sufficient security level.
+#
+# 10. Data Files & Tools
+#     - All data files (rooms, objects, treasures, monsters, actions, spells, NPCs, ranklist, market) use binary DND Door-compatible formats.
+#     - Tools/scripts for dumping and inspecting all data files, matching DNDDOOR.BAS structures.
+#     - File locking for all persistent data (multiuser safety).
+#
+# 11. User Interface & Theming
+#     - All output uses writeline for colorization and theming.
+#     - Prompts are line-buffered and visually clean.
+#     - Perl's format is used for all tabular output (market, shop, etc.) for proper alignment.
+#     - All output is limited to 79 columns for compatibility.
+#
+# 12. Extensibility & Modularity
+#     - All code is modular, with each major feature in its own pm-* module.
+#     - All features are extensible and can be modified or extended by adding new modules or updating existing ones.
+#
+# 13. Documentation & Help
+#     - All commands and features are documented in PHOTONMUD.md and README.md.
+#     - In-game help and context help for every command.
+#
+# 14. Robustness & Error Handling
+#     - Defensive checks for missing files, invalid rooms, and edge cases.
+#     - Session and node maintenance, cleanup on disconnect/quit.
+#     - Debug logging for key actions and file operations.
+#
+# ---------------------------------------------------------------------------
+
+use Storable qw(store retrieve lock_store lock_retrieve);
+use Fcntl qw(:seek);
+use File::Spec;
+use Digest::SHA qw(sha1_hex);
+use JSON::PP;
+use feature qw(state);
+use Fcntl qw(:DEFAULT :flock O_RDONLY O_WRONLY O_CREAT);
+
+{
+    our $last_in_combat = 0;
+}
+
+sub require_module {
+    my ($mod) = @_;
+    my $sys_path = "/opt/photonbbs/modules/$mod";
+    my $local_path = "./modules/$mod";
+    if (-e $sys_path) {
+        require $sys_path;
+    } elsif (-e $local_path) {
+        require $local_path;
+    } else {
+        die "Cannot find required module $mod in /opt/photonbbs/modules or ./modules";
+    }
+}
+
+our %config;
+require_module("pm-defaults");
+
+# Merge pm-defaults into our %config if not already set
+for my $k (keys %pm_defaults::config) {
+    $config{$k} = $pm_defaults::config{$k} unless exists $config{$k};
+}
+
+our @dirs = qw(N S E W NE SE SW NW UP DOWN IN OUT);
+our $player;
+
+our @base_level_thresholds = (
+    0, 2000, 4000, 8000, 16000, 32000, 64000, 125000, 250000, 500000, 750000, 1000000, 1250000, 
+    1500000, 1750000, 2000000, 2250000, 2500000, 2750000, 3000000,
+);
+
+our %class_xp_table = (
+    Fighter   => [@base_level_thresholds],
+    MagicUser => [0, 2500, 5000, 10000, 20000, 40000, 60000, 90000, 135000, 250000, 375000, 750000, 1125000, 1500000, 1875000, 2250000, 2625000, 3000000, 3375000, 3750000],
+    Thief     => [0, 1250, 2500, 5000, 10000, 20000, 42500, 70000, 110000, 160000, 220000, 440000, 660000, 880000, 1100000, 1320000, 1540000, 1760000, 1980000, 2200000],
+    Cleric    => [0, 1500, 3000, 6000, 13000, 27500, 55000, 110000, 225000, 450000, 675000, 900000, 1125000, 1350000, 1575000, 1800000, 2025000, 2250000, 2475000, 2700000],
+    Paladin   => [0, 2250, 4500, 9000, 18000, 36000, 75000, 150000, 300000, 600000, 900000, 1200000, 1500000, 1800000, 2100000, 2400000, 2700000, 3000000, 3300000, 3600000],
+    Ranger    => [0, 2250, 4500, 9000, 18000, 36000, 75000, 150000, 300000, 600000, 900000, 1200000, 1500000, 1800000, 2100000, 2400000, 2700000, 3000000, 3300000, 3600000],
+    Druid     => [0, 2000, 4000, 9000, 18000, 35000, 75000, 125000, 200000, 300000, 750000, 1500000, 3000000, 6000000, 9000000, 13500000, 18000000, 22500000, 27000000, 31500000],
+);
+
+our %DEST_OBJECT_TYPES = map { $_ => 1 } qw(
+    DOOR PORTAL GATE LADDER TRAPDOOR WINDOW BACKDOOR EXIT PATH ROAD BRIDGE WALKBRIDGE STREAM
+    TUNNEL SHAFT STAIRS STAIRWAY STAIRCASE SLIDE CHUTE SAFE VAULT CRACK HATCHWAY SPLIT
+);
+
+our %action_features = (
+    lighting      => 1, airwater      => 1, level         => 1, traps         => 1,
+    fumble        => 1, breakage      => 1, healthrate    => 1, monstertalk   => 1,
+    monstertrig   => 1, spelltrig     => 1, rust          => 1, steal         => 1,
+    restrict      => 1,
+);
+
+use constant BORDER_LEN => 79;
+my $border = chr(196) x BORDER_LEN;
+
+our $PHOTONMUD_DEBUG = $ENV{PHOTONMUD_DEBUG} // 0;
+
+# Add configuration options for ambient encounters
+my $last_ambient_event = time();
+
+our %object_by_name;
+our @objects;
+
+if (-e "/etc/default/photonmud") {
+    open(my $in, "<", "/etc/default/photonmud");
+    while (<$in>) {
+        chomp;
+        my ($key, $value) = split(/\=/, $_, 2);
+        $value =~ s/^\"//;
+        $value =~ s/\".*$//;
+        $config{$key} = $value;
+    }
+    close($in);
+}
+
+# Initialize ambient encounter settings with defaults
+$config{encounter_rate_multiplier} = 1.0 unless defined $config{encounter_rate_multiplier};
+$config{enable_bosses} = 1 unless defined $config{enable_bosses};
+$config{encounter_cooldown} = 30 unless defined $config{encounter_cooldown};
+
+chomp($os = `uname`);
+$BSD_STYLE = ($os =~ /HP-UX/) ? 0 : 1;
+chomp($mytty = `tty`);
+$| = 1;
+$ppid = getppid;
+
+# Use transient directory for temp files
+$config{transient} = "/dev/shm/photonmud";
+unless (-d $config{transient}) {
+    mkdir $config{transient}, 0777;
+    chmod 0777, $config{transient};
+}
+unless (-d "$config{transient}/room_players") {
+    mkdir "$config{transient}/room_players", 0777;
+    chmod 0777, "$config{transient}/room_players";
+}
+# Ensure proper permissions even if directories already existed
+chmod 0777, $config{transient};
+chmod 0777, "$config{transient}/room_players";
+
+require ($config{'home'}."/modules/pb-framework");
+require ($config{'home'}."/modules/pb-usertools");
+require ($config{'home'}."/modules/pm-cache");      # Data caching - must load before data modules
+require ($config{'home'}."/modules/pm-monsters");
+require ($config{'home'}."/modules/pm-rooms");
+require ($config{'home'}."/modules/pm-combat");
+require ($config{'home'}."/modules/pm-spells");
+require ($config{'home'}."/modules/pm-containers");
+require ($config{'home'}."/modules/pm-market");
+require ($config{'home'}."/modules/pm-npcs");
+require ($config{'home'}."/modules/pm-player");
+require ($config{'home'}."/modules/pm-objects");
+require ($config{'home'}."/modules/pm-utils");
+require ($config{'home'}."/modules/pm-messaging");
+require ($config{'home'}."/modules/pm-broker-client");  # Message broker client
+
+# Global broker socket
+our $broker_sock = undef;
+
+$node=@ARGV[1];
+
+sub photonmud_debug {
+    my ($msg) = @_;
+    return unless $PHOTONMUD_DEBUG;
+    my $ts = scalar localtime();
+    print STDERR "[PHOTONMUD DEBUG $ts] $msg\n";
+}
+
+sub load_dorinfo {
+    my ($node) = @_;
+    my $doors_dir = $config{'doors'} || "/opt/photonbbs/doors";
+    my $dorfile = "$doors_dir/nodes/$node/dorinfo${node}.def";
+    my %doorinfo;
+    if (-e $dorfile) {
+        open(my $fh, "<", $dorfile) or die "Cannot open $dorfile: $!";
+        my @lines = <$fh>;
+        close($fh);
+        chomp @lines;
+        # Standard DORINFOx.DEF fields
+        $doorinfo{systemname}   = $lines[0]  // 'PhotonBBS';
+        $doorinfo{sysop}        = $lines[1]  // 'SysOp';
+        $doorinfo{comport}      = $lines[3]  // 'COM1:';
+        $doorinfo{baud}         = $lines[4]  // '19200 BAUD,N,8,1';
+        $doorinfo{node}         = $lines[5]  // 1;
+        $doorinfo{username}     = $lines[6]  // '';
+        $doorinfo{username}     =~ s/^\s+|\s+$//g;
+        $doorinfo{username}     = 'UNKNOWN' unless $doorinfo{username};
+        $doorinfo{location}     = $lines[8]  // 'UNKNOWN';
+        $doorinfo{ansi}         = $lines[9] // 'Y';
+        $doorinfo{security}     = $lines[10] // 10;
+        $doorinfo{timeleft}     = $lines[11] // 60;
+    }
+    return %doorinfo;
+}
+
+# --- Main startup logic ---
+$node = $ARGV[1] // 1;
+my %doorinfo = load_dorinfo($node);
+
+# Load terminal settings from fusiondoor file (PhotonBBS extension)
+my $doors_dir = $config{'doors'} || "/opt/photonbbs/doors";
+my $fusiondoor = "$doors_dir/nodes/$node/fusiondoor";
+if (-e $fusiondoor) {
+    open(my $fh, "<", $fusiondoor) or warn "Cannot open $fusiondoor: $!";
+    while (<$fh>) {
+        chomp;
+        if (/^terminal_width=(\d+)/) {
+            $config{'terminal_width'} = $1;
+        } elsif (/^terminal_height=(\d+)/) {
+            $config{'terminal_height'} = $1;
+        } elsif (/^ui_mode=(\w+)/) {
+            $config{'ui_mode'} = $1;
+        }
+    }
+    close($fh);
+}
+
+# Set defaults if not loaded from fusiondoor
+$config{'terminal_width'} //= 80;
+$config{'terminal_height'} //= 24;
+$config{'ui_mode'} //= 'standard';
+
+$info{ansi} = ($doorinfo{ansi} =~ /^Y|1/i) ? "1" : "0";
+$info{'node'} = $doorinfo{node};
+$info{'handle'} = $doorinfo{username};
+$info{'username'} = $doorinfo{username};
+$info{'location'} = $doorinfo{location};
+$info{'security'} = $doorinfo{security};
+$info{'timeleft'} = $doorinfo{timeleft};
+$info{'systemname'} = $doorinfo{systemname};
+$info{'sysop'} = $doorinfo{sysop};
+applytheme($config{'theme'});
+colorize();
+
+sub show_software_header {
+    writeline("",1);
+    writeline($config{'systemcolor'}."PhotonMUD - Multiuser Adventure Game\nCopyright (c) 2025 Fewtarius\n".$config{'themecolor'}, 1);
+}
+
+sub section_header {
+    my ($label) = @_;
+    my $pad = int((BORDER_LEN - length($label) - 4) / 2);
+    # ───┤ label ├───
+    return ($config{'systemcolor'} . chr(196) x $pad) . chr(180) . $config{'usercolor'}. " $label " . $config{'systemcolor'} . chr(195) . (chr(196) x ($pad + (BORDER_LEN - length($label) - 4) % 2));
+}
+
+sub kv_line {
+    my ($key, $val) = @_;
+    return $config{'datacolor'}.$key.": ".$config{'themecolor'}.$val.$config{'themecolor'};
+}
+
+sub show_about {
+    my @about_lines = (
+        $config{'systemcolor'}.$border.$config{'themecolor'},
+        $config{'usercolor'}.section_header("About PhotonMUD").$config{'themecolor'},
+        $config{'systemcolor'}.$border.$config{'themecolor'},
+        $config{'datacolor'}."PhotonMUD is a persistent, multiuser D&D-style adventure game for PhotonBBS.".$config{'themecolor'},
+        $config{'datacolor'}."Explore a vast, procedurally generated world filled with towns, castles, dungeons,".$config{'themecolor'},
+        $config{'datacolor'}."caves, rivers, and mysterious landmarks. Meet other adventurers, trade, and compete" . $config{'themecolor'},
+        $config{'datacolor'}."for glory in a living realm that remembers your deeds.".$config{'themecolor'},
+        $config{'systemcolor'}.$border.$config{'themecolor'},
+        $config{'datacolor'}."Type ". $config{'usercolor'}."HELP".$config{'datacolor'}." for a list of commands, or ". $config{'usercolor'}."NEWS".$config{'datacolor'}.
+            " for the latest realm events.".$config{'themecolor'},
+        $config{'datacolor'}."Type ". $config{'usercolor'}."ABOUT".$config{'datacolor'}." at any time to see this screen again.".$config{'themecolor'},
+        $config{'systemcolor'}.$border.$config{'themecolor'},
+    );
+    show_software_header();
+    foreach my $line (@about_lines) {
+        writeline($line, 1);
+    }
+}
+
+sub show_help {
+    my @help_lines = (
+        $config{'systemcolor'}.$border.$config{'themecolor'},
+        $config{'usercolor'}.section_header("PhotonMUD Commands").$config{'themecolor'},
+        $config{'systemcolor'}.$border.$config{'themecolor'},
+
+        # Movement & Room
+        kv_line("Movement", "N S E W NE NW SE SW UP DOWN IN OUT"),
+        #kv_line("Dynamic Exits", "ENTER <object>, GO <object>, USE <object>"),
+        kv_line("Look", "LOOK, L, LOOK <player>, LOOK <monster>, LOOK <direction>"),
+        kv_line("Map", "MAP"),
+        kv_line("News", "NEWS"),
+        kv_line("Hint", "HINT"),
+        kv_line("Time/Date", "TIME, CLOCK, DATE"),
+
+        $config{'usercolor'}.section_header("Inventory & Equipment").$config{'themecolor'},
+        kv_line("Inventory", "INVENTORY, INV, I"),
+        kv_line("Sort", "SORT"),
+        kv_line("Equip", "EQUIP <item> [FROM <container>]"),
+        kv_line("Wear", "WEAR <item> [FROM <container>]"),
+        kv_line("Remove", "REMOVE <item>, RETURN <item>"),
+        kv_line("Get/Take", "GET <item> [FROM <container>], TAKE <item> [FROM <container>]"),
+        kv_line("Drop", "DROP <item> [FROM <container>]"),
+        kv_line("Put", "PUT <item> IN <container>"),
+
+        $config{'usercolor'}.section_header("Containers & Doors").$config{'themecolor'},
+        kv_line("Look in Container", "LOOKIN <container>"),
+        kv_line("Open/Close", "OPEN <container>, CLOSE <container>"),
+        kv_line("Lock/Unlock", "LOCK <container> WITH <key>, UNLOCK <container> WITH <key>"),
+        kv_line("Lock/Unlock Exit", "LOCK <exit>, UNLOCK <exit>"),
+        kv_line("Open/Close Exit", "OPEN <exit>, CLOSE <exit>"),
+        kv_line("Picklock", "PICKLOCK <container/exit> (Thief only)"),
+
+        $config{'usercolor'}.section_header("Item Actions").$config{'themecolor'},
+        kv_line("Eat/Drink", "EAT <item>, DRINK <item>"),
+        kv_line("Fuel/Light", "FUEL <item> WITH <fuel>, LIGHT <item>"),
+        kv_line("Identify", "IDENTIFY <item>, ID <item>"),
+        kv_line("Bless/Curse", "BLESS <item>, CURSE <item>, BLESS, CURSE"),
+        kv_line("Fix", "FIX <item>, FIX"),
+
+        $config{'usercolor'}.section_header("Combat & Monsters").$config{'themecolor'},
+        kv_line("Attack", "ATTACK <player|monster>"),
+        kv_line("Monster Info", "MONSTERINFO <monster>"),
+        kv_line("Bribe/Offer", "BRIBE <monster> <amount>, OFFER <monster> <amount>"),
+        kv_line("Tame", "TAME <monster> (capture and tame creatures)"),
+
+        $config{'usercolor'}.section_header("Magic & Spells").$config{'themecolor'},
+        kv_line("Cast Spell", "CAST <spell> [AT <target>]"),
+        kv_line("Psionic", "PSIONIC <target>"),
+        kv_line("Learn/Forget", "LEARN <spell>, FORGET <spell>, FORGET <level> <slot>"),
+        kv_line("Spellbook", "SPELLBOOK, SB"),
+        kv_line("Spells", "SPELLS, SP"),
+
+        $config{'usercolor'}.section_header("Mounts & Boats").$config{'themecolor'},
+        kv_line("Mount/Dismount", "MOUNT (tamed creature), DISMOUNT"),
+        kv_line("Boats", "BOARD <boat>, SAIL <direction>, DISMOUNT (exit boat)"),
+
+        $config{'usercolor'}.section_header("Trading & Market").$config{'themecolor'},
+        kv_line("Market", "MARKET, MK"),
+        kv_line("My Market", "MYMARKET, MM"),
+        kv_line("Sell", "SELL <item> <price>"),
+        kv_line("Buy", "BUY <market id>"),
+        kv_line("Sell to Shop", "SELL TO SHOP, SHOP SELL"),
+        kv_line("Trade", "TRADE <player> <item/gold> [FOR <item/gold>]"),
+        kv_line("Trade Accept/Decline", "TRADE ACCEPT <player>, TRADE DECLINE <player>"),
+
+        $config{'usercolor'}.section_header("Banking & Economy").$config{'themecolor'},
+        kv_line("Bank", "BANK, BK"),
+        kv_line("Deposit", "DEPOSIT <amount>"),
+        kv_line("Withdraw", "WITHDRAW <amount>"),
+
+        $config{'usercolor'}.section_header("Social & Communication").$config{'themecolor'},
+        kv_line("Say", ".<message>, SAY <message>"),
+        kv_line("Emote", "/me <action>, /emote <action>"),
+        kv_line("Talk", "TALK <player/npc>, PARLEY <npc/monster>"),
+        kv_line("Here", "HERE"),
+        kv_line("Users", "USERS, WHO"),
+
+        $config{'usercolor'}.section_header("Party System").$config{'themecolor'},
+        kv_line("Party Invite", "PARTY INVITE <player>"),
+        kv_line("Party Accept", "PARTY ACCEPT <player>"),
+        kv_line("Party Leave", "PARTY LEAVE"),
+        kv_line("Party List", "PARTY LIST"),
+        kv_line("Party Say", "PARTY SAY <message>"),
+
+        $config{'usercolor'}.section_header("Status & Info").$config{'themecolor'},
+        kv_line("Status", "STATUS, STATS [player], SCORE"),
+        kv_line("About", "ABOUT"),
+        kv_line("Help", "HELP, ?, H [command]"),
+        kv_line("Rank/Hall", "RANK, HALL, HL"),
+
+        $config{'usercolor'}.section_header("Rest & Settings").$config{'themecolor'},
+        kv_line("Rest", "REST, R"),
+        kv_line("Brief Mode", "BRIEF, BR"),
+
+        $config{'usercolor'}.section_header("Session & Quit").$config{'themecolor'},
+        kv_line("Repeat Command", "/ (repeats last command)"),
+        kv_line("Quit", "QUIT, BYE, X"),
+        kv_line("Retire", "RETIRE, RET"),
+
+        $config{'systemcolor'}.$border.$config{'themecolor'},
+        $config{'datacolor'}."Type HELP <command> for more details on a specific command.".$config{'themecolor'},
+        $config{'systemcolor'}.$border.$config{'themecolor'},
+    );
+
+    # Sysop-only commands
+    if ($info{'security'} && $info{'security'} >= $config{'sysopsecurity'}) {
+        push @help_lines, $config{'usercolor'}.section_header("Sysop/Admin Commands").$config{'themecolor'};
+        push @help_lines, kv_line("Room Info", "ROOMINFO");
+        push @help_lines, kv_line("List NPCs", "LISTNPCS");
+        push @help_lines, kv_line("Teleport", "TELEPORT <room#>, TP <room#>");
+        push @help_lines, kv_line("Monmap", "MONMAP");
+        push @help_lines, $config{'systemcolor'}.$border.$config{'themecolor'};
+    }
+
+    my $rows = $config{'rows'} || 24;
+    my $linecount = 0;
+    foreach my $line (@help_lines) {
+        writeline($line, 1);
+        $linecount++;
+        if ($linecount >= $rows - 1) {
+            my $resp = pause();
+            $linecount = 0;
+            last if uc($resp) eq 'Q';
+        }
+    }
+}
+
+sub read_action_record {
+    my ($actionnum) = @_;
+    my $file = "$config{'home'}/$config{'data'}/actions.dat";
+    my $reclen = 60;
+    my %action;
+    lockfile($file);
+    open(my $fh, "<:raw", $file) or do { unlockfile($file); return {}; };
+    seek($fh, ($actionnum - 1) * $reclen, SEEK_SET);
+    read($fh, my $buf, $reclen);
+    close($fh);
+    unlockfile($file);
+    @action{qw(
+        attr1 attr2 encounter_rate fumble health_rate hitpoints inventory level monster_talk monster_trigger restrictions rust_rate spell_trigger steal_rate teleport
+    )} = unpack("sssss ssss ssss f", $buf);
+    return \%action;
+}
+
+sub show_context_help {
+    my ($cmd) = @_;
+    my $file = "$config{'home'}/$config{'data'}/actions/" . uc($cmd) . ".txt";
+    if (-e $file) {
+        # Use readfile for consistent colorization and paging
+        readfile($file, 1, 1);
+    } else {
+        writeline($config{'systemcolor'}."No help found for $cmd.".$config{'themecolor'});
+    }
+}
+
+sub safe_exit {
+    my ($signal) = @_;
+    if ($player && $player->{name} && !$::player_retired) {
+        photonmud_leave_room($player, $player->{room}, "quit");
+        cleanup_stale_combat_files($player->{name});
+        save_player($player);
+        add_to_ranklist($player) if $player && $player->{name};
+        photonmud_quit($player);
+        writeline("",1);
+        writeline($config{'systemcolor'}."Thank you for playing!".$config{'themecolor'});
+    }
+    cleanup_session_messages($player->{name}) if $player->{name};
+    exit(0);
+}
+
+sub cleanup_session_messages {
+    my ($playername) = @_;
+    my $msgfile = "$config{transient}/sessionmsg_" . lc($playername) . ".dat";
+    unlink $msgfile if -e $msgfile;
+}
+
+sub debug_movement {
+    my ($player, $room, $direction) = @_;
+    return unless $PHOTONMUD_DEBUG;
+    
+    photonmud_debug("=== Movement Debug ===");
+    photonmud_debug("Player: $player->{name}");
+    photonmud_debug("Current room: $player->{room}");
+    photonmud_debug("Direction: $direction");
+    photonmud_debug("Available exits: " . join(", ", keys %{$room->{exits}}));
+    
+    if ($room->{exits}{$direction}) {
+        photonmud_debug("Destination: $room->{exits}{$direction}");
+        my $dest_room = read_room_record($room->{exits}{$direction});
+        photonmud_debug("Dest room valid: " . ($dest_room ? "yes" : "no"));
+        if ($dest_room) {
+            photonmud_debug("Dest desc: " . ($dest_room->{shortdesc} // "none"));
+        }
+    } else {
+        photonmud_debug("No exit in that direction");
+    }
+    photonmud_debug("======================");
+}
+
+sub mud_getline {
+    my ($prompt) = @_;
+    
+    # --- Always respawn if HP <= 0 before any input ---
+    if ($player && $player->{hp} <= 0 && !player_in_combat($player->{name})) {
+        photonmud_debug("Player has 0 HP outside of combat, handling respawn");
+        
+        # Clean up any stale combat files
+        cleanup_stale_combat_files($player->{name});
+        $::last_in_combat = 0;
+        
+        # Handle the death
+        handle_player_death($player);
+        
+        # Ensure HP was restored
+        if ($player->{hp} <= 0) {
+            $player->{hp} = int($player->{max_hp} * 0.25) || 1;
+            save_player($player);
+        }
+        
+        # Show the result
+        my $room = read_room_record($player->{room});
+        show_room_view($player, $room);
+        writeline($config{'promptcolor'}.show_status($player)." ".$config{'themecolor'}, 0);
+        
+        # Continue with normal input instead of returning early
+        photonmud_debug("Death handled, continuing with normal input");
+    }
+
+    # Create a unique player hash that's consistent
+    my $player_hash = safe_name($player->{name});
+    my $combat_pointer = player_combat_pointer_path($player->{name});
+    my $combat_handshake = "$config{transient}/combat_handshake_$player_hash.txt";
+    my $combat_ready = "$config{transient}/combat_ready_$player_hash.txt";
+    my $in_combat = -e $combat_pointer;
+    my $combat_response_file = "$config{transient}/combat_response_$player_hash.txt";
+    
+    # --- ENHANCEMENT: Log file-state when debugging ---
+    if ($PHOTONMUD_DEBUG) {
+        my @combat_files = ($combat_handshake, $combat_pointer, $combat_response_file, $combat_ready);
+        my @file_states = map { -e $_ ? "exists" : "missing" } @combat_files;
+        photonmud_debug("Combat file state: handshake=$file_states[0], pointer=$file_states[1], response=$file_states[2], ready=$file_states[3]");
+    }
+    
+    # --- NEW: Check message broker for incoming attacks ---
+    if ($broker_sock && broker_connected($broker_sock)) {
+        my @msgs = broker_poll($broker_sock);
+        for my $msg (@msgs) {
+            if ($msg->{type} eq 'attack_incoming') {
+                # Monster or player is attacking us!
+                my $attacker = $msg->{attacker};
+                my $attacker_type = $msg->{attacker_type};
+                my $combat_id = $msg->{combat_id};
+                
+                photonmud_debug("Broker: attack_incoming from $attacker (type: $attacker_type)");
+                
+                writeline("", 1);
+                writeline($config{'errorcolor'}."$attacker attacks you!".$config{'themecolor'}, 1);
+                writeline($config{'systemcolor'}."Press Enter to defend yourself or [R] to run.".$config{'themecolor'}, 0);
+                
+                my $response = uc(waitkey(""));
+                $response = "FIGHT" if $response eq "" || $response eq "\n";
+                
+                if ($response eq "R") {
+                    writeline($config{'systemcolor'}."\nYou attempt to flee!".$config{'themecolor'}, 1);
+                    broker_combat_response($broker_sock, $combat_id, 'flee');
+                } else {
+                    writeline($config{'systemcolor'}."\nYou prepare to fight!".$config{'themecolor'}, 1);
+                    broker_combat_response($broker_sock, $combat_id, 'fight');
+                    
+                    # Wait for combat_start
+                    my $start_msg = broker_wait_for($broker_sock, 'combat_start', 5);
+                    if ($start_msg) {
+                        # Combat is starting!
+                        photonmud_debug("Combat starting! opponent: $start_msg->{opponent}");
+                        
+                        # The existing combat system will handle the combat loop via file-based handshake
+                        # This is a transitional integration - full broker combat will come later
+                    }
+                }
+            }
+            elsif ($msg->{type} eq 'room_message') {
+                # Room broadcast message from another player or system
+                my $message = $msg->{message};
+                writeline($message, 1) if $message;
+            }
+            elsif ($msg->{type} eq 'direct_message') {
+                # Direct message to this player
+                my $from = $msg->{from} || 'someone';
+                my $message = $msg->{message};
+                writeline($config{'usercolor'}."$from tells you: $message".$config{'themecolor'}, 1) if $message;
+            }
+            elsif ($msg->{type} eq 'player_entered') {
+                # Another player entered our room
+                my $other_player = $msg->{player};
+                writeline($config{'systemcolor'}."$other_player enters the area.".$config{'themecolor'}, 1);
+            }
+            elsif ($msg->{type} eq 'player_left') {
+                # Another player left our room
+                my $other_player = $msg->{player};
+                writeline($config{'systemcolor'}."$other_player leaves the area.".$config{'themecolor'}, 1);
+            }
+        }
+    }
+    
+    # --- Step 1: Check for combat initiation (handshake) from another entity ---
+    # (Legacy file-based combat - still supported if combat service unavailable)
+    if (-e $combat_handshake) {
+        # Use proper file locking for reading handshake
+        my $handshake_data = "";
+        
+        # Only try to handle handshake if we're not already in combat
+        if (!$in_combat) {
+            if (open(my $hf, "<", $combat_handshake)) {
+                # Get a shared lock for reading
+                if (flock($hf, LOCK_SH)) {
+                    $handshake_data = <$hf>;
+                    flock($hf, LOCK_UN);
+                }
+                close($hf);
+            }
+            
+            if ($handshake_data && $handshake_data =~ /^([^|]+)\|([^|]+)\|([^|]+)\|(\d+)$/) {
+                my ($attacker_name, $attacker_id, $room_id, $timestamp) = ($1, $2, $3, $4);
+                my $age = time() - $timestamp;
+                
+                # Only process recent handshakes (within 30 seconds)
+                if ($age < 30) {
+                    # Check if we're in the same room as the attacker
+                    if ($player->{room} && $player->{room} == $room_id) {
+                        photonmud_debug("Valid combat handshake from $attacker_name (id $attacker_id) in room $room_id");
+                        
+                        # Clean up any existing response file before we prompt
+                        if (-e $combat_response_file) {
+                            unlink $combat_response_file;
+                            photonmud_debug("Removed stale response file before prompting");
+                        }
+                        
+                        writeline("", 1);
+                        writeline($config{'errorcolor'}."$attacker_name attacks you!".$config{'themecolor'}, 1);
+                        writeline($config{'systemcolor'}."Press Enter to defend yourself or [R] to run.".$config{'themecolor'}, 0);
+                        
+                        my $response = uc(waitkey(""));
+                        $response = "FIGHT" if $response eq "" || $response eq "\n";
+                        
+                        # Create response file with proper file locking and flushing
+                        my $response_file = "$config{transient}/combat_response_$player_hash.txt";
+                        
+                        # Use sysopen with proper flags for atomic write
+                        if (sysopen(my $rf, $response_file, O_WRONLY | O_CREAT, 0666)) {
+                            # Get exclusive lock
+                            if (flock($rf, LOCK_EX)) {
+                                my $response_data;
+                                if ($response eq "R") {
+                                    $response_data = "run|" . time();
+                                    writeline($config{'systemcolor'}."\nYou attempt to flee!".$config{'themecolor'}, 1);
+                                } else {
+                                    $response_data = "fight|" . time();
+                                    writeline($config{'systemcolor'}."\nYou prepare to fight!".$config{'themecolor'}, 1);
+                                }
+                                
+                                # Write data and force flush
+                                print $rf $response_data;
+                                $rf->flush();
+                                # Force OS to write to disk immediately
+                                eval { require IO::Handle; $rf->sync(); };
+                                
+                                # Release lock and close
+                                flock($rf, LOCK_UN);
+                                close($rf);
+                                
+                                photonmud_debug("Combat response written: '$response_data' to $response_file");
+                                
+                                # ENHANCEMENT: Create a "ready" file to signal handshake completion
+                                if (open(my $ready_fh, ">", $combat_ready)) {
+                                    print $ready_fh time();
+                                    close($ready_fh);
+                                    photonmud_debug("Created combat ready signal file");
+                                }
+                            } else {
+                                close($rf);
+                                photonmud_debug("Failed to lock response file: $response_file");
+                            }
+                        } else {
+                            photonmud_debug("Failed to create response file: $response_file - $!");
+                        }
+                        
+                        # Remove handshake file immediately after responding
+                        unlink $combat_handshake;
+                        
+                        # If choosing to fight, wait for combat pointer to be created
+                        if ($response ne "R") {
+                            my $wait_count = 0;
+                            my $combat_initialized = 0;
+                            my $sleep_time = 0.1; # Start with short sleep
+                            
+                            # ENHANCEMENT: Graduated backoff with longer timeout
+                            # Wait up to 10 seconds for combat pointer to appear
+                            while ($wait_count < 100 && !$combat_initialized) {
+                                $wait_count++;
+                                if (-e $combat_pointer) {
+                                    $combat_initialized = 1;
+                                    
+                                    # Give a small delay for UI clarity before starting combat loop
+                                    select(undef, undef, undef, 0.5);
+                                    
+                                    photonmud_debug("Combat pointer detected after response, proceeding to combat");
+                                    last;
+                                }
+                                
+                                # ENHANCEMENT: Graduated backoff
+                                select(undef, undef, undef, $sleep_time);
+                                $sleep_time = $sleep_time < 1 ? $sleep_time * 1.2 : 1;
+                            }
+                            
+                            if (!$combat_initialized) {
+                                photonmud_debug("Combat pointer never appeared after accepting combat - handshake failed");
+                                writeline($config{'errorcolor'}."Combat initialization failed. Try again later.".$config{'themecolor'}, 1);
+                                # Clean up any remaining combat files
+                                foreach my $file ($combat_handshake, $combat_response_file, $combat_ready) {
+                                    unlink $file if -e $file;
+                                }
+                            }
+                            
+                            # Let the combat loop take over on next input cycle
+                            return "";
+                        }
+                    } else {
+                        photonmud_debug("Received combat handshake for wrong room ($room_id vs $player->{room})");
+                        unlink $combat_handshake;
+                    }
+                } else {
+                    # Stale handshake, remove it
+                    photonmud_debug("Removing stale combat handshake file (age: ${age}s)");
+                    unlink $combat_handshake;
+                }
+            } else {
+                # Invalid handshake format, remove it
+                photonmud_debug("Removing invalid combat handshake file: '$handshake_data'");
+                unlink $combat_handshake;
+            }
+        } else {
+            # Already in combat but received handshake, remove it
+            photonmud_debug("Already in combat but received handshake, removing file");
+            unlink $combat_handshake;
+        }
+    }
+
+    # --- Handle existing combat ---
+    if (-e $combat_pointer) {
+        if (!$::last_in_combat) {
+            $::last_in_combat = 1;
+            photonmud_debug("Combat pointer detected: $combat_pointer");
+            
+            # ENHANCEMENT: Clean up any stale handshake/response files when entering combat
+            foreach my $file ($combat_handshake, $combat_response_file) {
+                if (-e $file) {
+                    unlink $file;
+                    photonmud_debug("Cleaned up stale file $file when entering combat");
+                }
+            }
+        }
+        
+        # Check if player died during combat
+        if ($player->{hp} <= 0) {
+            photonmud_debug("Player died during combat, cleaning up combat files");
+            cleanup_stale_combat_files($player->{name});
+            $::last_in_combat = 0;
+            handle_player_death($player);
+            my $room = read_room_record($player->{room});
+            show_room_view($player, $room);
+            writeline($config{'promptcolor'}.show_status($player)." ".$config{'themecolor'}, 0);
+            return "";
+        }
+        
+        # Process combat round
+        pvp_combat_metaloop($player);
+        
+        # Check again if player died during combat
+        if ($player->{hp} <= 0) {
+            photonmud_debug("Player died during combat round, cleaning up combat files");
+            cleanup_stale_combat_files($player->{name});
+            $::last_in_combat = 0;
+            handle_player_death($player);
+            my $room = read_room_record($player->{room});
+            show_room_view($player, $room);
+            writeline($config{'promptcolor'}.show_status($player)." ".$config{'themecolor'}, 0);
+            return "";
+        }
+        
+        # Combat takes precedence over regular input
+        return "";
+    } elsif ($::last_in_combat) {
+        # Reset combat flag
+        $::last_in_combat = 0;
+        photonmud_debug("Combat ended, resetting combat flag");
+        
+        # ENHANCEMENT: More thorough cleanup at combat end
+        cleanup_stale_combat_files($player->{name});
+        
+        # Clean up all possible combat files to prevent state confusion
+        foreach my $file ($combat_handshake, $combat_response_file, $combat_ready) {
+            if (-e $file) {
+                unlink $file;
+                photonmud_debug("Cleaned up $file at combat end");
+            }
+        }
+        
+        # Show room after combat
+        my $room = read_room_record($player->{room});
+        show_room_view($player, $room);
+        writeline($config{'promptcolor'}.show_status($player)." ".$config{'themecolor'}, 0);
+    }
+
+    # Begin normal input handling
+    my $result = "";
+    cbreak("on");
+    writeline($prompt, 0);
+    for (;;) {
+        eval {
+            local $SIG{ALRM} = sub {
+                # Check for player death at regular intervals
+                if ($player->{hp} <= 0) {
+                    photonmud_debug("Player is dead, interrupting input");
+                    $result = "";
+                    alarm 0;
+                    die "death_interrupt";
+                }
+                
+                # ENHANCEMENT: More robust combat handshake/pointer detection
+                # Check combat files in order of priority
+                my $combat_detected = 0;
+                
+                # Combat pointer has highest priority - indicates active combat
+                if (-e $combat_pointer && !$::last_in_combat) {
+                    photonmud_debug("Combat pointer detected during input");
+                    $combat_detected = 1;
+                }
+                
+                # Handshake has second priority - new combat initiation
+                if (!$combat_detected && -e $combat_handshake) {
+                    # Only if handshake is fresh
+                    my $handshake_age = -M $combat_handshake;
+                    if (!defined($handshake_age) || $handshake_age < (30/86400)) { # 30 seconds in days
+                        photonmud_debug("Combat handshake detected during input");
+                        $combat_detected = 1;
+                    }
+                }
+                
+                if ($combat_detected) {
+                    $result = "";
+                    alarm 0;
+                    die "combat_interrupt";
+                }
+                
+                # Poll for session messages
+                my @msgs = read_session_messages($player->{name});
+                if (@msgs) {
+                    print "\n";
+                    foreach my $msg (@msgs) {
+                        writeline($msg, 1);
+                    }
+                    writeline($prompt, 0);
+                    print $result;
+                }
+                alarm 1;
+            };
+            alarm 1;
+            my $key = getc(STDIN);
+            alarm 0;
+            if ($key =~ /\n/ || $key =~ /\r/) {
+                print "\n";
+                last;
+            }
+            if ($key =~ /\c?/ || $key =~ /\ch/) {
+                if (length($result) > 0) {
+                    $result = substr($result, 0, -1);
+                    print "\e[1D \e[1D";
+                }
+                next;
+            }
+            if (ord($key) >= 32 && ord($key) <= 126) {
+                print $key;
+                $result .= $key;
+            }
+        };
+        
+        # Handle combat interrupt
+        if ($@ =~ /combat_interrupt/) {
+            photonmud_debug("Combat detected, interrupting input");
+            $result = "";
+            last;
+        }
+        
+        # Handle death interrupt
+        if ($@ =~ /death_interrupt/) {
+            photonmud_debug("Death detected, interrupting input");
+            cleanup_stale_combat_files($player->{name});
+            $::last_in_combat = 0;
+            handle_player_death($player);
+            my $room = read_room_record($player->{room});
+            show_room_view($player, $room);
+            writeline($config{'promptcolor'}.show_status($player)." ".$config{'themecolor'}, 0);
+            $result = "";
+            last;
+        }
+    }
+    cbreak("off");
+    photonmud_debug("mud_getline returning: '$result'");
+    return $result;
+}
+
+sub mud_key {
+    my ($default) = @_;
+    $default //= "A";
+    my $key = "";
+    cbreak("on");
+    for (;;) {
+        eval {
+            local $SIG{ALRM} = sub {
+                # Poll for new messages and display them
+                my @msgs = read_session_messages($player->{name});
+                if (@msgs) {
+                    print "\n";
+                    foreach my $msg (@msgs) {
+                        writeline($msg, 1);
+                    }
+                    writeline($config{'promptcolor'}."(PvP) Choose action: ".$config{'themecolor'}, 0);
+                }
+                alarm 1;
+            };
+            alarm 1;
+            $key = getc(STDIN);
+            alarm 0;
+        };
+        if (defined $key && $key ne "") {
+            last;
+        }
+    }
+    cbreak("off");
+    if ($key eq "\n" or $key eq "\r" or $key eq "") {
+        $key = $default;
+    }
+    return $key;
+}
+
+END {
+    # Disconnect from message broker
+    if ($broker_sock) {
+        broker_disconnect($broker_sock);
+        $broker_sock = undef;
+    }
+    save_player($player) if $player && $player->{name} && !$::player_retired;
+}
+
+my $prev_roomid;
+main_loop();
+
+sub main_loop {
+    show_software_header();
+    my $player_loaded = 0;
+    if ($info{'username'}) {
+        my $loaded = load_player($info{'username'});
+        if ($loaded) {
+            $player = $loaded;
+            $player_loaded = 1;
+            if ($player->{hp} <= 0) {
+                photonmud_debug("Loaded player is dead (HP: $player->{hp}), handling resurrection at startup");
+                
+                # Clear any death handling flag to prevent conflicts
+                delete $player->{_death_handled};
+                
+                # Clean up any stale combat files
+                cleanup_stale_combat_files($player->{name});
+                $::last_in_combat = 0;
+                
+                # Show a proper death message with context using section_header
+                writeline("", 1);
+                writeline(section_header("YOU HAVE DIED").$config{'themecolor'}, 1);
+                writeline("", 1);
+                writeline($config{'systemcolor'}."Your spirit drifts in the ethereal realm between life and death...".$config{'themecolor'}, 1);
+                writeline($config{'systemcolor'}."The gods take pity on your soul and grant you another chance.".$config{'themecolor'}, 1);
+                writeline("", 1);
+                
+                # Handle the death and resurrection
+                handle_player_death($player);
+                
+                # Ensure player is alive after resurrection
+                if ($player->{hp} <= 0) {
+                    photonmud_debug("Death handler failed to restore HP, forcing resurrection");
+                    # Force minimum HP if death handler didn't work
+                    $player->{hp} = int($player->{max_hp} * 0.25) || 1;  # 25% of max HP or 1
+                    $player->{max_hp} = calculate_max_hp($player) if !$player->{max_hp};
+                }
+                
+                writeline($config{'systemcolor'}."You feel the warmth of life returning to your body...".$config{'themecolor'}, 1);
+                writeline($config{'usercolor'}."You have been resurrected with ".$player->{hp}." hit points!".$config{'themecolor'}, 1);
+                writeline("", 1);
+                writeline($config{'systemcolor'}.$border.$config{'themecolor'}, 1);
+                writeline("", 1);
+                
+                photonmud_debug("Player resurrection complete, HP now: $player->{hp}/$player->{max_hp}");
+            }
+        } else {
+            $player = create_new_player($info{'username'});
+            save_player($player);
+            $player_loaded = 1;
+        }
+    }
+    unless ($player->{name}) {
+        $player->{name} = $info{'username'};
+        $player->{level} = 1;
+        $player->{class} = "Fighter";
+        $player->{gold} = 50;
+        $player->{experience} = 0;
+        my $max_room = get_max_room();
+        $player->{room} = 1 + int(rand($max_room));
+        $player->{stats}{con} = 10;
+        $player->{inventory} = [
+            (map { my $idx = find_object_index_by_name($_); { type => 'object', idx => $idx } } qw(Sword Shield Potion))
+        ];
+        $player->{bank} = 0;
+    }
+
+    # --- PATCH: Only randomize room for new characters or if room is missing/invalid ---
+    my $max_room = get_max_room();
+    my $room;
+    if (!$player_loaded || !$player->{room} || $player->{room} < 1 || $player->{room} > $max_room) {
+        # New character or invalid room, assign random valid room
+        my $attempts = 0;
+        my $max_attempts = 50;
+        while (1) {
+            my $try_room = 1 + int(rand($max_room));
+            my $try = read_room_record($try_room);
+            $try->{roomnum} = $try_room unless $try->{roomnum};
+            ensure_room_monsters($try);
+            # Only accept if has exits and not in forbidden region
+            if (
+                $try->{exits} && scalar(grep { $try->{exits}{$_} && $try->{exits}{$_} > 0 } @dirs) > 0
+                && (!$try->{region} || $try->{region} !~ /^(Mountain|Lake|Moat)$/i)
+            ) {
+                $player->{room} = $try_room;
+                $room = $try;
+                last;
+            }
+            $attempts++;
+            last if $attempts >= $max_attempts;
+        }
+    } else {
+        # Existing character, just load their saved room
+        $room = read_room_record($player->{room});
+        $room->{roomnum} = $player->{room} unless $room->{roomnum};
+        ensure_room_monsters($room);
+    }
+
+    cleanup_stale_combat_files($player->{name});
+    cleanup_session_messages($player->{name}) if $player->{name};
+    $player->{nodeid} = $info{'node'} if $info{'node'};
+    record_node_session($player);
+    
+    # Connect to message broker service
+    if (broker_available()) {
+        $broker_sock = broker_connect($player->{name});
+        if ($broker_sock) {
+            if (broker_join_room($broker_sock, $player->{room})) {
+                photonmud_debug("Connected to message broker, joined room $player->{room}");
+            } else {
+                photonmud_debug("Failed to join room via broker");
+            }
+        } else {
+            photonmud_debug("Message broker not available, using file-based messaging");
+        }
+    } else {
+        photonmud_debug("Message broker socket not found");
+    }
+    
+    writeline($config{'usercolor'}."Welcome, $player->{name}! Your adventure continues...".$config{'themecolor'}, 1);
+
+    writeline("", 1);
+    show_news();
+    writeline("", 1);
+
+    my $attempts = 0;
+    my $max_attempts = 50;
+    my $max_room = get_max_room();
+    while (
+        (!$room->{exits} || scalar(grep { $room->{exits}{$_} && $room->{exits}{$_} > 0 } @dirs) == 0)
+        || ($room->{region} && $room->{region} =~ /^(Mountain|Lake|Moat)$/i)
+    ) {
+        $player->{room} = 1 + int(rand($max_room));
+        $room = read_room_record($player->{room});
+        $room->{roomnum} = $player->{room} unless $room->{roomnum};
+        ensure_room_monsters($room);
+        $attempts++;
+        last if $attempts >= $max_attempts;
+    }
+
+    photonmud_enter_room($player, $player->{room}, undef);
+    my $prev_roomid = $player->{room};
+
+    ensure_room_monsters($room);
+    show_room_view($player, $room);
+
+    # Replace with:
+    if ($room->{feature} && $room->{feature} eq 'Inn') {
+        writeline($config{'systemcolor'}."You can REST here to recover HP and spell slots.".$config{'themecolor'}, 1);
+    }
+    if ($room->{feature} && $room->{feature} eq 'Shop') {
+        if ($room->{shop_type}) {
+            writeline($config{'systemcolor'}."This is a $room->{shop_type}. You can BUY and SELL items here.".$config{'themecolor'}, 1);
+            
+            # Add specialty hints based on shop type
+            if ($room->{shop_type} eq 'Blacksmith' || $room->{shop_type} eq 'Armory') {
+                writeline($config{'systemcolor'}."The shopkeeper specializes in weapons and armor.".$config{'themecolor'}, 1);
+            } elsif ($room->{shop_type} eq 'Magic Shop') {
+                writeline($config{'systemcolor'}."The shopkeeper specializes in magical items and scrolls.".$config{'themecolor'}, 1);
+            } elsif ($room->{shop_type} eq 'Potion Shop' || $room->{shop_type} eq 'Alchemist') {
+                writeline($config{'systemcolor'}."The shopkeeper specializes in potions and elixirs.".$config{'themecolor'}, 1);
+            } elsif ($room->{shop_type} eq 'Rare Goods Emporium') {
+                writeline($config{'systemcolor'}."The shopkeeper specializes in rare and exotic items.".$config{'themecolor'}, 1);
+            }
+        } else {
+            writeline($config{'systemcolor'}."You can BUY and SELL items here.".$config{'themecolor'}, 1);
+        }
+    }
+
+    if ($action->{health_rate}) {
+        $player->{hp} += $action->{health_rate};
+        $player->{hp} = $player->{max_hp} if $player->{hp} > $player->{max_hp};
+        $player->{hp} = 0 if $player->{hp} < 0;
+        if ($action->{health_rate} > 0) {
+            writeline($config{'systemcolor'}."You feel a little healthier! (+$action->{health_rate} HP)".$config{'themecolor'}, 1);
+        } elsif ($action->{health_rate} < 0) {
+            writeline($config{'errorcolor'}."You feel weaker... ($action->{health_rate} HP)".$config{'themecolor'}, 1);
+        }
+    }
+
+    # Just show monsters in room without automatic engagement
+    debug_room_monsters($room);
+    writeline("", 1);
+
+    my $last_command = "";
+    while (1) {
+
+        $room = read_room_record($player->{room});
+        $room->{roomnum} = $player->{room} unless $room->{roomnum};
+        my $is_shop = $room->{feature} && $room->{feature} eq 'Shop';
+        ensure_room_monsters($room);
+        $action = read_action_record($room->{action});
+        apply_room_actions($player, $room, $action);
+
+        writeline("", 1);
+        writeline($config{'promptcolor'}.show_status($player)." ".$config{'themecolor'}, 0);
+
+        my $key = "";
+        my $cmd = mud_getline($prompt);
+        next unless defined $cmd;
+        chomp $cmd;
+        $cmd =~ s/^\s+|\s+$//g;
+        next if $cmd eq '';
+        my $lcmd = lc($cmd);
+
+        # Aliases
+        $lcmd =~ s/^l$/look/;
+        $lcmd =~ s/^i$/inventory/;
+        $lcmd =~ s/^inv$/inventory/;
+        $lcmd =~ s/^eq$/equip/;
+        $lcmd =~ s/^w$/west/;
+        $lcmd =~ s/^e$/east/;
+        $lcmd =~ s/^n$/north/;
+        $lcmd =~ s/^s$/south/;
+        $lcmd =~ s/^u$/up/;
+        $lcmd =~ s/^d$/down/;
+        $lcmd =~ s/^ne$/ne/;
+        $lcmd =~ s/^nw$/nw/;
+        $lcmd =~ s/^se$/se/;
+        $lcmd =~ s/^sw$/sw/;
+        $lcmd =~ s/^score$/status/;
+        $lcmd =~ s/^stat$/status/;
+        $lcmd =~ s/^who$/users/;
+        $lcmd =~ s/^x$/quit/;
+        $lcmd =~ s/^\?$/help/;
+        $lcmd =~ s/^h$/help/;
+        $lcmd =~ s/^br$/brief/;
+        $lcmd =~ s/^sb$/spellbook/;
+        $lcmd =~ s/^sp$/spells/;
+        $lcmd =~ s/^r$/rest/;
+        $lcmd =~ s/^bk$/bank/;
+        $lcmd =~ s/^mk$/market/;
+        $lcmd =~ s/^mm$/mymarket/;
+        $lcmd =~ s/^pw$/password/;
+        $lcmd =~ s/^al$/alignment/;
+        $lcmd =~ s/^ret$/retire/;
+        $lcmd =~ s/^hl$/hall/;
+        $lcmd =~ s/^rn$/rank/;
+
+        if ($cmd eq "/") {
+            if ($last_command ne "") {
+                $cmd = $last_command;
+                $lcmd = lc($cmd);
+                writeline($config{'systemcolor'}."Repeating: $cmd".$config{'themecolor'}, 1);
+            } else {
+                writeline($config{'systemcolor'}."No previous command to repeat.".$config{'themecolor'}, 1);
+                next;
+            }
+        } else {
+            $last_command = $cmd;
+        }
+
+        # --- Room Messaging (dot prefix or 'say' command) ---
+        if ($cmd =~ /^\./ || $lcmd =~ /^say\s+/) {
+            my $msg = $cmd;
+            $msg =~ s/^say\s*//i if $lcmd =~ /^say\s+/;
+            handle_say_command($player, $room, $msg);
+            next;
+        }
+
+        # --- Movement Commands (with room registry integration) ---
+        if ($lcmd =~ /^(north|south|east|west|northeast|southeast|southwest|northwest|up|down|in|out|n|s|e|w|ne|se|sw|nw|u|d)$/) {
+            my %dir_map = (
+                'north' => 'N', 'n' => 'N',
+                'south' => 'S', 's' => 'S', 
+                'east' => 'E', 'e' => 'E',
+                'west' => 'W', 'w' => 'W',
+                'northeast' => 'NE', 'ne' => 'NE',
+                'southeast' => 'SE', 'se' => 'SE', 
+                'southwest' => 'SW', 'sw' => 'SW',
+                'northwest' => 'NW', 'nw' => 'NW',
+                'up' => 'UP', 'u' => 'UP',
+                'down' => 'DOWN', 'd' => 'DOWN',
+                'in' => 'IN', 'i' => 'IN',
+                'out' => 'OUT', 'o' => 'OUT'
+            );
+            my $dir = $dir_map{$lcmd};
+            
+            # Debug output
+            photonmud_debug("Player attempting to move $dir from room $player->{room}");
+            
+            # Get the current room data and check for the exit
+            my $current_room = read_room_record($player->{room});
+            my $dest = $current_room->{exits}{$dir};
+            photonmud_debug("Exit $dir leads to room: " . ($dest // "none"));
+
+            if ($dest && $dest > 0) {
+                # Verify destination room exists
+                my $dest_room = read_room_record($dest);
+                if ($dest_room && ($dest_room->{shortdesc} || $dest_room->{longdesc})) {
+                    my $prev_room = $player->{room};
+                    
+                    # Notify broker of room change
+                    if ($broker_sock && broker_connected($broker_sock)) {
+                        broker_leave_room($broker_sock);
+                        broker_join_room($broker_sock, $dest);
+                    }
+                    
+                    # Leave current room
+                    photonmud_leave_room($player, $player->{room}, $dir);
+                    
+                    # Update player location
+                    $player->{room} = $dest;
+                    
+                    # Enter new room
+                    photonmud_enter_room($player, $dest, $prev_room, { 
+                        direction => $dir,
+                        room => $dest_room 
+                    });
+                    
+                    # Show the new room
+                    show_room_view($player, $dest_room);
+                    
+                    photonmud_debug("Player moved from room $prev_room to room $dest");
+                } else {
+                    writeline($config{'errorcolor'}."That exit leads to an invalid location.".$config{'themecolor'}, 1);
+                }
+            } else {
+                writeline($config{'errorcolor'}."You can't go that way.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        # --- Combat Commands ---
+        elsif ($lcmd =~ /^attack\s+(.+)$/) {
+            my $target_name = $1;
+            $target_name =~ s/^\s+|\s+$//g;
+            $target_name = lc($target_name);
+
+            if ($target_name eq lc($player->{name})) {
+                writeline($config{'errorcolor'}."You can't attack yourself!".$config{'themecolor'}, 1);
+                next;
+            }
+
+            # Gather all present players (excluding self)
+            my @present_players = map { $_->{name} }
+                grep {
+                    defined $_->{name}
+                    && $_->{name} ne ''
+                    && lc($_->{name}) ne lc($player->{name})
+                }
+                list_players_in_room($player->{room}, $player->{name});
+
+            # Gather all monsters in the room
+            ensure_room_monsters($room);
+            my @monsters = get_room_monsters($room);
+
+            # Try to match a player target
+            if (my ($pname) = grep { lc($_) eq $target_name } @present_players) {
+                my @all_players = ($player, map { load_player($_) } @present_players);
+                @all_players = grep { $_->{hp} > 0 } @all_players;
+                # Start group combat if more than two players present
+                if (@all_players > 2) {
+                    start_group_combat(@all_players);
+                    group_combat_metaloop($player);
+                    next;
+                } else {
+                    # Fallback to 1v1
+                    my $target = load_player($pname);
+                    atomic_start_pvp_combat($player, $target);
+                    pvp_combat_metaloop($player);
+                    next;
+                }
+            }
+
+            # Try to match a monster target
+            my $norm_target = $target_name;
+            $norm_target =~ s/^(a |an |the )//;
+            my ($mon) = grep {
+                my $mon_name = $_->{name} // '';
+                $mon_name =~ s/^\s+|\s+$//g;
+                $mon_name =~ s/^(a |an |the )//i;
+                my $mon_lc = lc($mon_name);
+                $mon_lc eq $norm_target
+                    || index($mon_lc, $norm_target) == 0
+                    || index($norm_target, $mon_lc) == 0
+                    || $mon_lc =~ /\Q$norm_target\E/
+            } @monsters;
+
+            if ($mon) {
+                # Gather all living players and monsters in the room
+                my @all_players = ($player, map { load_player($_) } @present_players);
+                @all_players = grep { $_->{hp} > 0 } @all_players;
+                my @all_monsters = grep { $_->{hp} > 0 } @monsters;
+
+                # Start group combat if more than one player or more than one monster
+                if (@all_players + @all_monsters > 2) {
+                    start_group_combat(@all_players, @all_monsters);
+                    group_combat_metaloop($player);
+                    next;
+                } else {
+                    # Fallback to 1v1
+                    atomic_start_pvp_combat($player, $mon);
+                    pvp_combat_metaloop($player);
+                    next;
+                }
+            }
+
+            if (@monsters) {
+                my $list = join(", ", map { $_->{name} } grep { $_->{hp} > 0 } @monsters);
+                writeline($config{'errorcolor'}."No such player or monster here to attack. Monsters present: $list".$config{'themecolor'}, 1);
+            } else {
+                writeline($config{'errorcolor'}."No such player or monster here to attack.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        #-------------------- Look Commands -----------------------
+        elsif ($lcmd =~ /^look(?:\s+(.*))?$/) {
+            my $target = $1;
+            if (!defined $target || $target eq '') {
+                handle_look($player, $room);
+                next;
+            }
+            $target =~ s/^\s+|\s+$//g;
+            my $lc_target = lc($target);
+
+            my @present_players = map { $_->{name} }
+                grep {
+                    defined $_->{name}
+                    && $_->{name} ne ''
+                    && lc($_->{name}) ne lc($player->{name})
+                }
+                list_players_in_room($player->{room}, $player->{name});
+            if (my ($pname) = grep { lc($_) eq $lc_target } @present_players) {
+                show_player_status($pname);
+                next;
+            }
+
+            ensure_room_monsters($room);
+            my @monsters = get_room_monsters($room);
+
+            my $norm_target = normalize_item_name($target);
+
+            my ($mon) = grep {
+                my $mon_name = $_->{name} // '';
+                my $mon_norm = normalize_item_name($mon_name);
+                $mon_norm eq $norm_target
+                    || index($mon_norm, $norm_target) >= 0
+                    || index($norm_target, $mon_norm) >= 0
+                    || $mon_norm =~ /\Q$norm_target\E/
+            } @monsters;
+
+            if ($mon) {
+                show_monster_info($mon, $room);
+                next;
+            }
+
+            # Only print error if not a direction
+            if ($lc_target =~ /^(north|south|east|west|ne|nw|se|sw|up|down|in|out|n|s|e|w|u|d)$/) {
+                handle_look_direction($player, $room, $lc_target);
+                next;
+            }
+
+            writeline($config{'errorcolor'}."You don't see that here.".$config{'themecolor'}, 1);
+            next;
+        }
+        # --- Market listing ---
+        elsif ($lcmd eq "market" || $lcmd eq "mk") {
+            unless ($is_shop) {
+                writeline($config{'errorcolor'}."You must be in a shop to view the market.".$config{'themecolor'}, 1);
+                next;
+            }
+            list_market();
+            next;
+        }
+        # --- My Market (your listings) ---
+        elsif ($lcmd eq "mymarket" || $lcmd eq "mm") {
+            unless ($is_shop) {
+                writeline($config{'errorcolor'}."You must be in a shop to view your market listings.".$config{'themecolor'}, 1);
+                next;
+            }
+            list_my_market($player->{name});
+            next;
+        }
+        # --- Shop sell (to shopkeeper, not market) ---
+        elsif ($lcmd eq "shop sell" || $lcmd eq "sell to shop" || $lcmd eq "sell") {
+            unless ($is_shop) {
+                writeline($config{'errorcolor'}."You must be in a shop to sell items.".$config{'themecolor'}, 1);
+                next;
+            }
+            
+            # Check if this is a market listing command (sell <item> <price>)
+            if ($lcmd =~ /^sell\s+(.+?)\s+(\d+)$/) {
+                sell_item_market($player, $1, $2);
+            } else {
+                # Regular sell to shopkeeper
+                shop_sell_items($player);
+            }
+            next;
+        }
+        # --- Buy from market: BUY <number> ---
+        elsif ($lcmd =~ /^buy\s+(\d+)$/) {
+            unless ($is_shop) {
+                writeline($config{'errorcolor'}."You must be in a shop to buy items.".$config{'themecolor'}, 1);
+                next;
+            }
+            buy_item_market($player, $1);
+            next;
+        }
+        if ($cmd =~ m{^/(me|emote)\s+}i) {
+            handle_emote_command($player, $room, $cmd);
+            next;
+        }
+        elsif ($lcmd =~ /^party\s+invite\s+(\w+)$/) {
+            party_invite($player->{name}, $1);
+            next;
+        }
+        elsif ($lcmd =~ /^party\s+accept\s+(\w+)$/) {
+            party_accept($player->{name}, $1);
+            next;
+        }
+        elsif ($lcmd =~ /^party\s+leave$/) {
+            party_leave($player->{name});
+            next;
+        }
+        elsif ($lcmd =~ /^party\s+list$/) {
+            party_list($player);
+            next;
+        }
+        elsif ($lcmd =~ /^party\s+say\s+(.+)$/) {
+            party_say($player, $1);
+            next;
+        }
+        elsif ($lcmd =~ /^trade\s+(\w+)\s+(.+?)(?:\s+for\s+(.+))?$/) {
+            my ($target, $offer, $request) = ($1, $2, $3 // '');
+            if ($target eq lc($player->{name})) {
+                writeline($config{'errorcolor'}."You can't trade with yourself.".$config{'themecolor'}, 1);
+                next;
+            }
+            my @present_players = map { $_->{name} }
+                grep {
+                    defined $_->{name}
+                    && $_->{name} ne ''
+                    && lc($_->{name}) ne lc($player->{name})
+                }
+                list_players_in_room($player->{room}, $player->{name});
+            unless (grep { lc($_) eq lc($target) } @present_players) {
+                writeline($config{'errorcolor'}."No such player here to trade with.".$config{'themecolor'}, 1);
+                next;
+            }
+            $request ||= "nothing";
+            initiate_trade($player->{name}, $target, $offer, $request);
+            next;
+        }
+        elsif ($lcmd =~ /^trade\s+accept\s+(\w+)$/) {
+            handle_trade_accept($player->{name}, $1);
+            next;
+        }
+        elsif ($lcmd =~ /^trade\s+decline\s+(\w+)$/) {
+            handle_trade_decline($player->{name}, $1);
+            next;
+        }
+        #------------------- Inventory & Containers ---------------
+        elsif ($lcmd =~ /^(get|take)\s+(.+?)\s+from\s+(.+)$/) {
+            my $ok = take_item($player, $2, $3);
+            next;
+        }
+        elsif ($lcmd =~ /^(get|take)\s+(.+)$/) {
+            my $ok = take_item($player, $2);
+            next;
+        }
+        elsif ($lcmd =~ /^(get|take)$/) {
+            writeline($config{'systemcolor'}."Usage: GET <item> [FROM <container>]".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^put\s+(.+?)\s+in\s+(.+)$/) {
+            put_item($player, $1, $2);
+            save_room_record($room);
+            next;
+        }
+        elsif ($lcmd eq "put") {
+            writeline($config{'systemcolor'}."Usage: PUT <item> IN <container>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^drop\s+(.+?)\s+from\s+(.+)$/) {
+            drop_item($player, $1, $2, $room);
+            save_room_record($room);
+            next;
+        }
+        elsif ($lcmd =~ /^drop\s+(.+)$/) {
+            my $item = $1;
+            $item =~ s/^\s+|\s+$//g;
+            drop_item_to_room($item, $room);
+            save_room_record($room);
+            next;
+        }
+        elsif ($lcmd =~ /^(drop)$/) {
+            writeline($config{'systemcolor'}."Usage: DROP <item>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^take\s+(.+?)\s+from\s+(.+)$/) {
+            take_item($player, $1, $2);
+            next;
+        }
+        elsif ($lcmd eq "take") {
+            writeline($config{'systemcolor'}."Usage: TAKE <item> [FROM <container>]".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^equip\s+(.+?)\s+from\s+(.+)$/) {
+            equip_item($player, $1, $2);
+            next;
+        }
+        elsif ($lcmd =~ /^equip\s+(.+)$/) {
+            equip_item($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "equip") {
+            writeline($config{'systemcolor'}."Usage: EQUIP <item> [FROM <container>]".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^wear\s+(.+?)\s+from\s+(.+)$/) {
+            wear_item($player, $1, $2);
+            next;
+        }
+        elsif ($lcmd =~ /^wear\s+(.+)$/) {
+            wear_item($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "wear") {
+            writeline($config{'systemcolor'}."Usage: WEAR <item> [FROM <container>]".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^remove\s+(.+)$/) {
+            return_item($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "remove") {
+            writeline($config{'systemcolor'}."Usage: REMOVE <item>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^return\s+(.+)$/) {
+            return_item($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "return") {
+            writeline($config{'systemcolor'}."Usage: RETURN <item>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd eq "sort") {
+            sort_inventory($player);
+            next;
+        }
+        elsif ($lcmd eq "inventory" || $lcmd eq "inv" || $lcmd eq "i") {
+            show_inventory($player);
+            next;
+        }
+        elsif ($lcmd =~ /^(examine|look at|inspect)\s+(.+)$/) {
+            my $item_name = $2;
+            examine_item($player, $item_name);
+            next;
+        }
+        # --- Bribe/Offer Command ---
+        elsif ($lcmd =~ /^bribe\s+(\w+)\s+(\d+)$/ or $lcmd =~ /^offer\s+(\w+)\s+(\d+)$/) {
+            my ($target, $amount) = ($1, $2);
+            my $mon = find_monster_in_room($player->{room}, $target);
+            unless ($mon) {
+                writeline($config{'errorcolor'}."No such monster here.".$config{'themecolor'}, 1);
+                next;
+            }
+            bribe_monster($player, $mon, $amount);
+            save_player($player);
+            save_room_record($room);
+            next;
+        }
+        elsif ($lcmd =~ /^bribe$/ or $lcmd =~ /^offer$/) {
+            writeline($config{'systemcolor'}."Usage: BRIBE <monster> <amount>".$config{'themecolor'}, 1);
+            next;
+        }
+
+        # --- Picklock Command (Thief only) ---
+        elsif ($lcmd =~ /^picklock\s+(.+)$/) {
+            unless ($player->{class} =~ /Thief/i) {
+                writeline($config{'errorcolor'}."Only thieves can pick locks.".$config{'themecolor'}, 1);
+                next;
+            }
+            picklock($player, $1, $room);
+            next;
+        }
+        elsif ($lcmd eq "picklock") {
+            writeline($config{'systemcolor'}."Usage: PICKLOCK <container/exit>".$config{'themecolor'}, 1);
+            next;
+        }
+
+        # --- Hint Command ---
+        elsif ($lcmd eq "hint") {
+            my $hintfile = "$config{'home'}/$config{'data'}/hints.txt";
+            if (-e $hintfile) {
+                open(my $fh, "<", $hintfile);
+                my @hints = grep { /\S/ } <$fh>;
+                close($fh);
+                my $hint = $hints[ int(rand(@hints)) ];
+                $hint =~ s/[\r\n]+$//;
+                writeline($config{'systemcolor'}."Hint: $hint".$config{'themecolor'}, 1);
+            } else {
+                writeline($config{'systemcolor'}."No hints available.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+
+        # --- Time/Clock/Date Command ---
+        elsif ($lcmd eq "time" || $lcmd eq "clock" || $lcmd eq "date") {
+            my $now = scalar localtime();
+            writeline($config{'systemcolor'}."Current server time: $now".$config{'themecolor'}, 1);
+            next;
+        }
+
+        # --- Mount/Dismount Commands ---
+        elsif ($lcmd =~ /^tame\s+(.+)$/) {
+            attempt_tame_monster($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "mount" && $player->{mount}) {
+            mount_tamed_creature($player);
+            next;
+        }
+        elsif ($lcmd eq "dismount") {
+            if ($player->{mounted}) {
+                dismount_creature($player);
+            } elsif ($player->{in_boat}) {
+                exit_boat($player);
+            } else {
+                writeline($config{'errorcolor'}."You are not mounted or in a boat.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        elsif ($lcmd =~ /^board\s+(.+)$/) {
+            enter_boat($player, $1);
+            next;
+        }
+        elsif ($lcmd =~ /^sail\s+(.+)$/) {
+            sail_boat($player, $1);
+            next;
+        }
+
+        # --- Door/Lock Commands for Exits and Containers ---
+        elsif ($lcmd =~ /^(lock|unlock|open|close)\s+(\w+)$/) {
+            my ($cmd, $target) = (lc($1), lc($2));
+            # Try exit first
+            my $exit = $room->{exits}{$target};
+            if ($exit && ref($exit) eq 'HASH') {
+                if ($cmd eq 'lock') {
+                    if ($exit->{locked}) {
+                        writeline($config{'systemcolor'}."That exit is already locked.".$config{'themecolor'}, 1);
+                    } else {
+                        $exit->{locked} = 1;
+                        writeline($config{'systemcolor'}."You lock the $target exit.".$config{'themecolor'}, 1);
+                    }
+                } elsif ($cmd eq 'unlock') {
+                    if (!$exit->{locked}) {
+                        writeline($config{'systemcolor'}."That exit is already unlocked.".$config{'themecolor'}, 1);
+                    } else {
+                        $exit->{locked} = 0;
+                        writeline($config{'systemcolor'}."You unlock the $target exit.".$config{'themecolor'}, 1);
+                    }
+                } elsif ($cmd eq 'open') {
+                    if (!$exit->{closed}) {
+                        writeline($config{'systemcolor'}."That exit is already open.".$config{'themecolor'}, 1);
+                    } else {
+                        $exit->{closed} = 0;
+                        writeline($config{'systemcolor'}."You open the $target exit.".$config{'themecolor'}, 1);
+                    }
+                } elsif ($cmd eq 'close') {
+                    if ($exit->{closed}) {
+                        writeline($config{'systemcolor'}."That exit is already closed.".$config{'themecolor'}, 1);
+                    } else {
+                        $exit->{closed} = 1;
+                        writeline($config{'systemcolor'}."You close the $target exit.".$config{'themecolor'}, 1);
+                    }
+                }
+                save_room_record($room);
+                next;
+            }
+            # Try container
+            my $cont = find_container_by_name($target, $player, $room);
+            if ($cont) {
+                if ($cmd eq 'lock') {
+                    lock_container($cont->{scope}, $cont->{id}, undef, $player, $room);
+                } elsif ($cmd eq 'unlock') {
+                    unlock_container($cont->{scope}, $cont->{id}, undef, $player, $room);
+                } elsif ($cmd eq 'open') {
+                    open_container($cont->{scope}, $cont->{id}, $player, $room);
+                } elsif ($cmd eq 'close') {
+                    close_container($cont->{scope}, $cont->{id}, $player, $room);
+                }
+                next;
+            }
+            writeline($config{'errorcolor'}."No such exit or container: $target".$config{'themecolor'}, 1);
+            next;
+        }
+
+        # --- TALK and PARLEY (expanded for monsters/NPCs) ---
+        elsif ($lcmd =~ /^(talk|parley)\s+(.+)$/) {
+            my $target = $2;
+            if (player_online($target)) {
+                talk_to_user($player, $target);
+            } else {
+                # Try NPC, then monster
+                talk_to_npc($player, $target) || do {
+                    my $mon = find_monster_in_room($player->{room}, $target);
+                    if ($mon) {
+                        my $response = get_monster_talk_response($mon, $player);
+                        writeline($config{'systemcolor'}."$mon->{name} says: $response".$config{'themecolor'}, 1);
+                    } else {
+                        writeline($config{'errorcolor'}."No such NPC or monster here.".$config{'themecolor'}, 1);
+                    }
+                };
+            }
+            next;
+        }
+        #------------------- Map & Room Info ----------------------
+        elsif ($lcmd eq "map") {
+            show_map_view($player);
+            next;
+        }
+        elsif ($lcmd eq "roominfo") {
+            if ($info{'security'} && $info{'security'} >= 500) {
+                writeline($config{'systemcolor'}."[Room Debug Info]".$config{'themecolor'}, 1);
+                writeline("Room #: $player->{room}", 1);
+                writeline("Shortdesc: $room->{shortdesc}", 1);
+                writeline("Longdesc: $room->{longdesc}", 1);
+                writeline("Action: $room->{action}", 1);
+                writeline("MonsterClass: $room->{monsterclass}", 1);
+                writeline("Flags: $room->{flags}", 1);
+                writeline("Treasure: $room->{treasure}", 1);
+                writeline("TreCharges: $room->{trecharges}", 1);
+                writeline("Container: $room->{container}", 1);
+                writeline("Container.permanent: $room->{container_permanent}", 1);
+                writeline("Exits: ".join(", ", map { "$_=$room->{exits}{$_}" } grep { $room->{exits}{$_} } @dirs), 1);
+                writeline("Region: $room->{region}", 1);
+                writeline("Feature: $room->{feature}", 1);
+                writeline("Town Name: $room->{town_name}", 1);
+                writeline("Castle Name: $room->{castle_name}", 1);
+                writeline("River Name: $room->{river_name}", 1);
+            } else {
+                writeline($config{'errorcolor'}."Permission denied.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        #------------------- Help & Info --------------------------
+        elsif ($lcmd eq "about") {
+            show_about();
+            next;
+        }
+        elsif ($lcmd eq "help") {
+            writeline("",1);
+            show_help();
+            next;
+        }
+        elsif ($lcmd =~ /^help\s+(\w+)$/) {
+            show_context_help($1);
+            next;
+        }
+        elsif ($lcmd =~ /^stats(?:\s+(\w+))?$/ or $lcmd =~ /^status(?:\s+(\w+))?$/) {
+            my $who = $1;
+            if (defined $who && $who ne '') {
+                show_player_status($who);
+                next;
+            } else {
+                show_player_status($player->{name});
+                next;
+            }
+        }
+        #------------------- Monster Info Command -----------------
+        elsif ($lcmd =~ /^monsterinfo\s+(.+)$/) {
+            my $mon_name = lc($1);
+            $mon_name =~ s/^\s+|\s+$//g;
+            my $room_obj = read_room_record($player->{room});
+            my @monsters = get_room_monsters($room_obj);
+            my ($mon) = grep {
+                my $mon_name2 = $_->{name};
+                $mon_name2 =~ s/^\s+|\s+$//g;
+                my $mon_lc = lc($mon_name2);
+                $mon_lc eq $mon_name
+                    || index($mon_lc, $mon_name) == 0
+                    || index($mon_name, $mon_lc) == 0
+                    || $mon_lc =~ /\Q$mon_name\E/
+            } @monsters;
+            if ($mon) {
+                show_monster_info($mon, $room_obj);
+            } else {
+                writeline($config{'errorcolor'}."No such monster here.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        #------------------- Quit & Session -----------------------
+        elsif ($lcmd eq "quit" or $lcmd eq "bye" or $lcmd eq "x") {
+            writeline("",1);
+            writeline($config{'errorcolor'}."Are you sure you want to quit (y/N)? ".$config{'themecolor'});
+            my $ans = waitkey("N");
+            $ans = uc($ans);
+            $ans = "N" if $ans eq "\n" or $ans eq "";
+            if ($ans eq "Y") {
+                save_player($player);
+                photonmud_quit($player);
+                writeline("",1);
+                writeline($config{'systemcolor'}."Thank you for playing!".$config{'themecolor'});
+                exit(0);
+            } else {
+                writeline($config{'systemcolor'}."Quit cancelled.".$config{'themecolor'}, 1);
+                next;
+            }
+        }
+        elsif ($lcmd eq "retire" or $lcmd eq "ret") {
+            writeline($config{'errorcolor'}."Are you sure you want to retire your character? This cannot be undone. (y/N)".$config{'themecolor'});
+            my $ans = waitkey("N");
+            $ans = uc($ans);
+            if ($ans eq "Y") {
+                retire_player($player);
+                next;
+            } else {
+                writeline($config{'systemcolor'}."Retirement cancelled.".$config{'themecolor'});
+                next;
+            }
+        }
+        # --- News Command ---
+        if ($lcmd eq "news") {
+            show_news();
+            next;
+        }
+        #------------------- Banking ------------------------------
+        elsif ($lcmd =~ /^bank$/) {
+            if ($room->{feature} && $room->{feature} eq 'Bank') {
+                bank_balance($player);
+            } else {
+                writeline($config{'errorcolor'}."You must be in a bank to check your balance.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        elsif ($lcmd =~ /^deposit\s+(\d+)$/) {
+            if ($room->{feature} && $room->{feature} eq 'Bank') {
+                bank_deposit($player, $1);
+            } else {
+                writeline($config{'errorcolor'}."You must be in a bank to deposit gold.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        elsif ($lcmd eq "deposit") {
+            writeline($config{'systemcolor'}."Usage: DEPOSIT <amount>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^withdraw\s+(\d+)$/) {
+            if ($room->{feature} && $room->{feature} eq 'Bank') {
+                bank_withdraw($player, $1);
+            } else {
+                writeline($config{'errorcolor'}."You must be in a bank to withdraw gold.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        elsif ($lcmd eq "withdraw") {
+            writeline($config{'systemcolor'}."Usage: WITHDRAW <amount>".$config{'themecolor'}, 1);
+            next;
+        }
+        #------------------- Player Listing & Social --------------
+        elsif ($lcmd =~ /^users$/ or $lcmd =~ /^who$/) {
+            list_online_players();
+            next;
+        }
+        elsif ($lcmd =~ /^here$/) {
+            my @others = map { $_->{name} }
+                grep {
+                    defined $_->{name}
+                    && $_->{name} ne ''
+                    && lc($_->{name}) ne lc($player->{name})
+                }
+                list_players_in_room($player->{room}, $player->{name});
+            if (@others) {
+                writeline($config{'usercolor'}."Also here: ".join(", ", @others).$config{'themecolor'}, 1);
+            } else {
+                writeline($config{'systemcolor'}."You are alone in this room.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        elsif ($lcmd =~ /^talk\s+(.+)$/) {
+            my $target = $1;
+            if (player_online($target)) {
+                talk_to_user($player, $target);
+                next;
+            } else {
+                talk_to_npc($player, $target);
+                next;
+            }
+        }
+        elsif ($lcmd eq "talk") {
+            writeline($config{'systemcolor'}."Usage: TALK <player/npc>".$config{'themecolor'}, 1);
+            next;
+        }
+        #------------------- Magic & Spells -----------------------
+        elsif ($lcmd =~ /^cast\s+(\w+)(?:\s+at\s+(\w+))?$/) {
+            cast_spell($player, $1, $2, { method => 'cast' });
+            next;
+        }
+        elsif ($lcmd eq "cast") {
+            writeline($config{'systemcolor'}."Usage: CAST <spell> [AT <target>]".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^psionic\s+(\w+)$/) {
+            use_psionic_attack($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "psionic") {
+            writeline($config{'systemcolor'}."Usage: PSIONIC <target>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^forget\s+(\d+)\s+(\d+)$/) {
+            forget_spell_by_slot($player, $1, $2);
+            next;
+        }
+        elsif ($lcmd =~ /^forget\s+(.+)$/) {
+            forget_spell($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "forget") {
+            writeline($config{'systemcolor'}."Usage: FORGET <spell> or FORGET <level> <slot>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^learn\s+(.+)$/) {
+            learn_spell($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "learn") {
+            writeline($config{'systemcolor'}."Usage: LEARN <spell>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd eq "spells") {
+            list_known_spells($player);
+            next;
+        }
+        elsif ($lcmd eq "spellbook") {
+            handle_spellbook_command($player);
+            next;
+        }
+        #------------------- Rest & Misc --------------------------
+        elsif ($lcmd eq "rest") {
+            handle_rest_command($player);
+            next;
+        }
+        elsif ($lcmd eq "brief") {
+            toggle_brief_mode($player);
+            next;
+        }
+        elsif ($lcmd eq "rank" or $lcmd eq "hall") {
+            show_ranklist();
+            next;
+        }
+        #------------------- Item Actions -------------------------
+        elsif ($lcmd =~ /^eat\s+(.+)$/) {
+            eat_item($player, $1);
+            next;
+        }
+        elsif ($lcmd =~ /^drink\s+(.+)$/) {
+            drink_item($player, $1);
+            next;
+        }
+        elsif ($lcmd =~ /^fuel\s+(\w+)\s+with\s+(\w+)$/) {
+            fuel_item($player, $1, $2);
+            next;
+        }
+        elsif ($lcmd eq "fuel") {
+            writeline($config{'systemcolor'}."Usage: FUEL <item> WITH <fuel>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^light\s+(.+)$/) {
+            light_item($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "light") {
+            writeline($config{'systemcolor'}."Usage: LIGHT <item>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^(identify|id)\s+(.+)$/) {
+            identify_item($player, $2);
+            next;
+        }
+        elsif ($lcmd eq "identify" || $lcmd eq "id") {
+            writeline($config{'systemcolor'}."Usage: IDENTIFY <item>".$config{'themecolor'}, 1);
+            next;
+        }
+        # --- Bless/Curse/Fix (player or item) ---
+        elsif ($lcmd =~ /^bless\s+(.+)$/) {
+            bless_item($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "bless") {
+            bless_player($player);
+            next;
+        }
+        elsif ($lcmd =~ /^curse\s+(.+)$/) {
+            curse_item($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "curse") {
+            curse_player($player);
+            next;
+        }
+        elsif ($lcmd =~ /^fix\s+(.+)$/) {
+            fix_item($player, $1);
+            next;
+        }
+        elsif ($lcmd eq "fix") {
+            fix_player($player);
+            next;
+        }
+        #------------------- Containers ---------------------------
+        elsif ($lcmd =~ /^lookin\s+(.+)$/) {
+            my $cname = $1;
+            my $cont = find_container_by_name($cname, $player, $room);
+            if ($cont) {
+                lookin_container($cont->{scope}, $cont->{id}, $player, $room);
+            } else {
+                writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+            }
+            next;
+        }
+        elsif ($lcmd eq "lookin") {
+            writeline($config{'systemcolor'}."Usage: LOOKIN <container>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^open\s+(.+)$/) {
+            my $cname = $1;
+            my $cont = find_container_by_name($cname, $player, $room);
+            if ($cont) {
+                open_container($cont->{scope}, $cont->{id}, $player, $room);
+            } else {
+                writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+            }
+            next;
+        }
+        elsif ($lcmd eq "open") {
+            writeline($config{'systemcolor'}."Usage: OPEN <container>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^close\s+(.+)$/) {
+            my $cname = $1;
+            my $cont = find_container_by_name($cname, $player, $room);
+            if ($cont) {
+                close_container($cont->{scope}, $cont->{id}, $player, $room);
+            } else {
+                writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+            }
+            next;
+        }
+        elsif ($lcmd eq "close") {
+            writeline($config{'systemcolor'}."Usage: CLOSE <container>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^lock\s+(.+)\s+with\s+(\d+)$/) {
+            my ($cname, $key) = ($1, $2);
+            my $cont = find_container_by_name($cname, $player, $room);
+            if ($cont) {
+                lock_container($cont->{scope}, $cont->{id}, $key, $player, $room);
+            } else {
+                writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+            }
+            next;
+        }
+        elsif ($lcmd eq "lock") {
+            writeline($config{'systemcolor'}."Usage: LOCK <container> WITH <key>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^unlock\s+(.+)\s+with\s+(\d+)$/) {
+            my ($cname, $key) = ($1, $2);
+            my $cont = find_container_by_name($cname, $player, $room);
+            if ($cont) {
+                unlock_container($cont->{scope}, $cont->{id}, $key, $player, $room);
+            } else {
+                writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+            }
+            next;
+        }
+        elsif ($lcmd eq "unlock") {
+            writeline($config{'systemcolor'}."Usage: UNLOCK <container> WITH <key>".$config{'themecolor'}, 1);
+            next;
+        }
+        elsif ($lcmd =~ /^get\s+(.+?)\s+from\s+(.+)$/) {
+            my ($item, $cname) = ($1, $2);
+            my $cont = find_container_by_name($cname, $player, $room);
+            if ($cont) {
+                get_from_container($item, $cont->{scope}, $cont->{id}, $player, $room);
+            } else {
+                writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+            }
+            next;
+        }
+        elsif ($lcmd eq "get") {
+            writeline($config{'systemcolor'}."Usage: GET <item> [FROM <container>]".$config{'themecolor'}, 1);
+            next;
+        }
+        # --- Dynamic Exits (ENTER/GO/USE) ---
+        elsif ($lcmd =~ /^(enter|go|use)\s+(.+)$/) {
+            my $action = lc($1);
+            my $objname = $2;
+            use_dynamic_exit($player, $room, $action, $objname, $prev_roomid);
+            next;
+        }
+        elsif ($lcmd eq "enter" || $lcmd eq "go" || $lcmd eq "use") {
+            writeline($config{'systemcolor'}."Usage: ENTER/GO/USE <object>".$config{'themecolor'}, 1);
+            next;
+        }
+        #------------------- Admin/Debug --------------------------
+        elsif ($lcmd eq "listnpcs") {
+            if ($info{'security'} && $info{'security'} >= 500) {
+                list_npcs();
+            }
+            next;
+        }
+        #------------------- Sysop Teleport ----------------------
+        elsif ($lcmd =~ /^(teleport|tp)\s+(\d+)$/) {
+            # teleport <roomnum> (self)
+            if ($info{'security'} && $info{'security'} >= $config{'sysopsecurity'}) {
+                my $dest = int($2);
+                my $max_room = get_max_room();
+                if ($dest < 1 || $dest > $max_room) {
+                    writeline($config{'errorcolor'}."Invalid room number. Must be between 1 and $max_room.".$config{'themecolor'}, 1);
+                    next;
+                }
+                photonmud_leave_room($player, $player->{room}, "teleport");
+                $player->{room} = $dest;
+                record_node_session($player);
+                $room = read_room_record($player->{room});
+                
+                # Use optimized path for teleports
+                photonmud_enter_room($player, $player->{room}, $prev_roomid, { 
+                    is_teleport => 1,
+                    room => $room
+                });
+                
+                $prev_roomid = $player->{room};
+                $room->{roomnum} = $player->{room} unless $room->{roomnum};
+                ensure_room_monsters($room);
+                show_room_view($player, $room);
+                debug_room_monsters($room);
+                writeline($config{'systemcolor'}."Teleported to room $dest.".$config{'themecolor'}, 1);
+            } else {
+                writeline($config{'errorcolor'}."Permission denied. Sysop only.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        elsif ($lcmd =~ /^(teleport|tp)\s+(\d+)$/) {
+            # teleport <roomnum> (self)
+            if ($info{'security'} && $info{'security'} >= $config{'sysopsecurity'}) {
+                my $dest = int($2);
+                my $max_room = get_max_room();
+                if ($dest < 1 || $dest > $max_room) {
+                    writeline($config{'errorcolor'}."Invalid room number. Must be between 1 and $max_room.".$config{'themecolor'}, 1);
+                    next;
+                }
+                photonmud_leave_room($player, $player->{room}, "teleport");
+                $player->{room} = $dest;
+                record_node_session($player);
+                $room = read_room_record($player->{room});
+                photonmud_enter_room($player, $player->{room}, $prev_roomid);
+                $prev_roomid = $player->{room};
+                $room->{roomnum} = $player->{room} unless $room->{roomnum};
+                ensure_room_monsters($room);
+                show_room_view($player, $room);
+                debug_room_monsters($room);
+                writeline($config{'systemcolor'}."Teleported to room $dest.".$config{'themecolor'}, 1);
+            } else {
+                writeline($config{'errorcolor'}."Permission denied. Sysop only.".$config{'themecolor'}, 1);
+            }
+            next;
+        }
+        elsif ($lcmd eq "monmap") {
+            if ($info{'security'} && $info{'security'} >= 500) {
+                show_sysop_map_view($player);
+                next;
+            }
+        }
+        elsif ($cmd =~ /^treasuredebug$/i) {
+            if ($info{'security'} && $info{'security'} >= 500) {
+                debug_room_treasures($player->{room});
+            }
+            next;
+        }
+        #------------------- Unknown Command ----------------------
+        else {
+            writeline($config{'errorcolor'}."Unknown command.".$config{'themecolor'}, 1);
+            next;
+        }
+    }
+}

@@ -1,0 +1,574 @@
+sub market_path {
+    return "$config{'home'}/$config{'data'}/market.dat";
+}
+
+sub read_market {
+    my $file = market_path();
+    my $reclen = 200;  # Increased from 128
+    my @market;
+    return [] unless -e $file;
+    open(my $fh, "<:raw", $file) or return [];
+    while (read($fh, my $buf, $reclen)) {
+        next if $buf =~ /^\0+$/; # skip empty/deleted
+        my %rec;
+        $rec{name}      = substr($buf, 0, 40);   $rec{name}      =~ s/[\0 ]+$//;  # Increased from 30
+        $rec{item}      = substr($buf, 40, 40);  $rec{item}      =~ s/[\0 ]+$//;  # Increased from 16
+        $rec{seller}    = substr($buf, 80, 40);  $rec{seller}    =~ s/[\0 ]+$//;  # Increased from 16
+        $rec{price}     = unpack("l", substr($buf, 120, 4));
+        $rec{idx}       = unpack("l", substr($buf, 124, 4));
+        $rec{type}      = unpack("s", substr($buf, 128, 2));
+        $rec{charges}   = unpack("s", substr($buf, 130, 2));
+        $rec{date}      = substr($buf, 132, 24);  $rec{date}      =~ s/[\0 ]+$//;  # Increased from 16
+        # reserved: 44 bytes (increased from 38)
+        push @market, \%rec if $rec{name};
+    }
+    close($fh);
+    return \@market;
+}
+
+sub write_market {
+    my ($market) = @_;
+    my $file = market_path();
+    my $reclen = 200;  # Increased from 128
+    open(my $fh, ">:raw", $file) or return 0;
+    foreach my $rec (@$market) {
+        my $buf = '';
+        $buf .= pack("a40", $rec->{name}      // '');  # Increased from 30
+        $buf .= pack("a40", $rec->{item}      // '');  # Increased from 16
+        $buf .= pack("a40", $rec->{seller}    // '');  # Increased from 16
+        $buf .= pack("l",   $rec->{price}     // 0);
+        $buf .= pack("l",   $rec->{idx}       // 0);
+        $buf .= pack("s",   $rec->{type}      // 0);
+        $buf .= pack("s",   $rec->{charges}   // 1);
+        $buf .= pack("a24", $rec->{date}      // '');  # Increased from 16
+        $buf .= "\0" x ($reclen - length($buf)) if length($buf) < $reclen;
+        print $fh $buf;
+    }
+    close($fh);
+    return 1;
+}
+
+sub list_market {
+    my $market = read_market();
+    writeline($config{'usercolor'}.section_header("Current Market Listings").$config{'themecolor'}, 1);
+
+    # CP437 border and header (79 columns)
+    my $border = chr(196) x 79; # ─
+    my $vbar = chr(179);        # │
+
+    # Header row with CP437 vertical bars
+    writeline(
+        $config{'systemcolor'}.
+        chr(218).$border.chr(191).$config{'themecolor'}, 1
+    );
+    writeline(
+        $config{'systemcolor'}.$vbar.
+        $config{'datacolor'}." # ".
+        $config{'usercolor'}."Item Name".(" "x32).
+        $config{'systemcolor'}."Seller".(" "x17).
+        $config{'datacolor'}."Type".(" "x9).
+        $config{'promptcolor'}."Price".
+        $config{'systemcolor'}.$vbar.$config{'themecolor'}, 1
+    );
+    writeline(
+        $config{'systemcolor'}.
+        chr(195).(chr(196) x 77).chr(180).$config{'themecolor'}, 1
+    );
+
+    my $i = 1;
+    my $shown = 0;
+    foreach my $rec (@$market) {
+        next unless $rec->{name};
+        my $desc   = $rec->{item};
+        $desc     .= " (x$rec->{charges})" if $rec->{charges} && $rec->{charges} > 1;
+        my $type   = $rec->{type} == 1 ? "Object" : "Treasure";
+        my $seller = $rec->{seller} // '';
+        writeline(
+            $config{'systemcolor'}.$vbar.
+            $config{'datacolor'}.sprintf("%2d.", $i)." ".
+            $config{'usercolor'}.sprintf("%-35s", $desc).
+            $config{'systemcolor'}.sprintf("%-20s", $seller).
+            $config{'datacolor'}.sprintf("%-12s", $type).
+            $config{'promptcolor'}.sprintf("%7d", $rec->{price}).
+            $config{'systemcolor'}.$vbar.$config{'themecolor'}, 1
+        );
+        $i++;
+        $shown++;
+    }
+    if ($shown == 0) {
+        writeline($config{'systemcolor'}.$vbar.$config{'datacolor'}."(No items for sale)".(" "x61).$config{'systemcolor'}.$vbar.$config{'themecolor'}, 1);
+    }
+    writeline(
+        $config{'systemcolor'}.
+        chr(192).$border.chr(217).$config{'themecolor'}, 1
+    );
+}
+
+sub list_my_market {
+    my ($seller) = @_;
+    my $market = read_market();
+
+    my $border = chr(196) x 79;
+    my $vbar = chr(179);
+
+    writeline($config{'usercolor'}.section_header("Your Market Listings").$config{'themecolor'}, 1);
+    writeline(
+        $config{'systemcolor'}.
+        chr(218).$border.chr(191).$config{'themecolor'}, 1
+    );
+    writeline(
+        $config{'systemcolor'}.$vbar.
+        $config{'datacolor'}." # ".
+        $config{'usercolor'}."Item Name".(" "x32).
+        $config{'systemcolor'}."Seller".(" "x17).
+        $config{'datacolor'}."Type".(" "x9).
+        $config{'promptcolor'}."Price".
+        $config{'systemcolor'}.$vbar.$config{'themecolor'}, 1
+    );
+    writeline(
+        $config{'systemcolor'}.
+        chr(195).(chr(196) x 77).chr(180).$config{'themecolor'}, 1
+    );
+
+    my $i = 1;
+    my $shown = 0;
+    foreach my $rec (@$market) {
+        next unless lc($rec->{seller}) eq lc($seller);
+        my $desc   = $rec->{item};
+        $desc     .= " (x$rec->{charges})" if $rec->{charges} && $rec->{charges} > 1;
+        my $type   = $rec->{type} == 1 ? "Object" : "Treasure";
+        my $seller_name = $rec->{seller} // '';
+        writeline(
+            $config{'systemcolor'}.$vbar.
+            $config{'datacolor'}.sprintf("%2d.", $i)." ".
+            $config{'usercolor'}.sprintf("%-35s", $desc).
+            $config{'systemcolor'}.sprintf("%-20s", $seller_name).
+            $config{'datacolor'}.sprintf("%-12s", $type).
+            $config{'promptcolor'}.sprintf("%7d", $rec->{price}).
+            $config{'systemcolor'}.$vbar.$config{'themecolor'}, 1
+        );
+        $i++;
+        $shown++;
+    }
+    if ($shown == 0) {
+        writeline($config{'systemcolor'}.$vbar.$config{'datacolor'}."(No items for sale)".(" "x61).$config{'systemcolor'}.$vbar.$config{'themecolor'}, 1);
+    }
+    writeline(
+        $config{'systemcolor'}.
+        chr(192).$border.chr(217).$config{'themecolor'}, 1
+    );
+}
+
+# Helper function to read an object with the new 270-byte format
+sub read_object_for_market {
+    my ($idx) = @_;
+    my $file = "$config{'home'}/$config{'data'}/photonmud/objects.dat";
+    my $reclen = 270;  # Updated to 270 bytes
+    
+    open(my $fh, "<:raw", $file) or return;
+    seek($fh, ($idx - 1) * $reclen, 0);
+    my $buf;
+    return unless read($fh, $buf, $reclen) == $reclen;
+    close($fh);
+    
+    # Skip if empty record
+    return if $buf =~ /^\0+$/;
+    
+    my %obj;
+    # String fields - exactly 30 bytes each
+    $obj{name} = sanitize_string(substr($buf, 0, 30));
+    $obj{shortname} = sanitize_string(substr($buf, 30, 30));
+    
+    # Single (4-byte floating point)
+    $obj{roomlink} = unpack("f<", substr($buf, 60, 4));
+    
+    # Integers (2-byte shorts)
+    $obj{invisible}   = unpack("s<", substr($buf, 64, 2));
+    $obj{jailtrap}    = unpack("s<", substr($buf, 66, 2));
+    $obj{doorlock}    = unpack("s<", substr($buf, 68, 2));
+    $obj{destination} = unpack("s<", substr($buf, 70, 2));
+    $obj{permanent}   = unpack("s<", substr($buf, 72, 2));
+    $obj{hidden}      = unpack("s<", substr($buf, 74, 2));
+    $obj{closed}      = unpack("s<", substr($buf, 76, 2));
+    $obj{keyed}       = unpack("s<", substr($buf, 78, 2));
+    $obj{relocks}     = unpack("s<", substr($buf, 80, 2));
+    
+    # LongDesc string - 80 bytes
+    $obj{longdesc}    = sanitize_string(substr($buf, 82, 80));
+    
+    # More integers (2-byte shorts)
+    $obj{fromhour}    = unpack("s<", substr($buf, 162, 2));
+    $obj{frommin}     = unpack("s<", substr($buf, 164, 2));
+    $obj{tohour}      = unpack("s<", substr($buf, 166, 2));
+    $obj{tomin}       = unpack("s<", substr($buf, 168, 2));
+    $obj{lightroom}   = unpack("s<", substr($buf, 170, 2));
+    $obj{lighttime}   = unpack("s<", substr($buf, 172, 2));
+    
+    # ShortDesc string - 80 bytes
+    $obj{shortdesc}   = sanitize_string(substr($buf, 174, 80));
+    
+    # Teleport - 4 bytes float
+    $obj{teleport}    = unpack("f<", substr($buf, 254, 4));
+    
+    # Trap - 2 bytes at offset 258
+    $obj{trap}        = unpack("s<", substr($buf, 258, 2));
+    
+    # Set a default value
+    $obj{value} = 50;  # Default value for market purposes
+    
+    return \%obj;
+}
+
+# Helper function to sanitize strings from binary data
+sub sanitize_string {
+    my ($str) = @_;
+    return '' unless defined $str;
+    
+    # Remove null bytes
+    $str =~ s/\x00//g;
+    
+    # Replace non-printable characters with spaces
+    $str =~ s/[\x01-\x1F\x7F-\xFF]/ /g;
+    
+    # Trim leading/trailing spaces
+    $str =~ s/^\s+|\s+$//g;
+    
+    return $str;
+}
+
+sub sell_item_market {
+    my ($player, $item_arg, $price) = @_;
+
+    # Accept inventory number or item name
+    my $item;
+    if ($item_arg =~ /^\d+$/) {
+        my $idx = $item_arg - 1;
+        $item = $player->{inventory}[$idx] if defined $player->{inventory}[$idx];
+        # Optionally, resolve to full object for name, etc.
+        if ($item && !$item->{name}) {
+            my $obj;
+            if ($item->{type} eq 'object') {
+                $obj = read_object_record($item->{idx});
+                
+                # Check if permanent object
+                if ($obj->{permanent} && $obj->{permanent} != 0) {
+                    writeline($config{'errorcolor'}."The $obj->{name} cannot be sold because it's a permanent item.".$config{'themecolor'}, 1);
+                    return;
+                }
+                
+            } else {
+                $obj = read_treasure_record($item->{idx});
+                
+                # Check if permanent treasure
+                if ($obj->{permanent} && $obj->{permanent} != 0) {
+                    writeline($config{'errorcolor'}."The $obj->{name} cannot be sold because it's a permanent item.".$config{'themecolor'}, 1);
+                    return;
+                }
+            }
+            $item->{name} = $obj->{name} if $obj && $obj->{name};
+        }
+    } else {
+        $item = find_object_in_inventory($player, $item_arg);
+        
+        # Check if permanent object/treasure
+        if ($item) {
+            my $obj;
+            if ($item->{type} eq 'object') {
+                $obj = read_object_record($item->{idx});
+            } else {
+                $obj = read_treasure_record($item->{idx});
+            }
+            
+            if ($obj && $obj->{permanent} && $obj->{permanent} != 0) {
+                writeline($config{'errorcolor'}."The $obj->{name} cannot be sold because it's a permanent item.".$config{'themecolor'}, 1);
+                return;
+            }
+        }
+    }
+
+    if (!$item) {
+        writeline($config{'errorcolor'}."You don't have that item to sell.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    my $market = read_market();
+    my $rec = {
+        name    => $item->{name} // $item_arg,
+        item    => $item->{name} // $item_arg,
+        seller  => $player->{name},
+        price   => $price,
+        idx     => $item->{idx} // 0,
+        type    => ($item->{type} && $item->{type} eq 'object') ? 1 : 2,
+        charges => $item->{charges} // 1,
+        date    => scalar localtime,
+    };
+    push @$market, $rec;
+    write_market($market);
+    remove_item_from_inventory($player, $item);
+    writeline($config{'systemcolor'}."You have listed $item->{name} for sale at $price gold.".$config{'themecolor'}, 1);
+    save_player($player);
+}
+
+sub buy_item_market {
+    my ($player, $item_num) = @_;
+    
+    # Input validation
+    unless (defined $item_num && $item_num =~ /^\d+$/) {
+        writeline($config{'errorcolor'}."Please specify a valid item number.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    # Read market data
+    my $market = read_market();
+    
+    # Check if item exists
+    my $rec = $market->[$item_num-1];
+    unless ($rec && $rec->{name}) {
+        writeline($config{'errorcolor'}."That item is not available in the market.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    # Get current room to check if we're in a shop
+    my $room = read_room_record($player->{room});
+    my $in_shop = ($room->{feature} && $room->{feature} eq 'Shop');
+    my $shop_type = $room->{shop_type} // 'General Store';
+    
+    # Calculate final price based on shop specialization
+    my $base_price = $rec->{price};
+    my $final_price = $base_price;
+    
+    # Apply shop discount if appropriate
+    if ($in_shop) {
+        # Discount rates for specialized shops
+        my %shop_discounts = (
+            'General Store'           => { general => 0.05 },
+            'Blacksmith'              => { weapon => 0.10, armor => 0.10 },
+            'Armory'                  => { weapon => 0.15, armor => 0.15 },
+            'Magic Shop'              => { magic => 0.15 },
+            'Potion Shop'             => { potion => 0.15, magic => 0.05 },
+            'Tailor'                  => { armor => 0.10, general => 0.05 },
+            'Adventurer\'s Outfitter' => { weapon => 0.10, armor => 0.10, general => 0.05 },
+            'Rare Goods Emporium'     => { magic => 0.10, special => 0.15 },
+            'Herbalist'               => { potion => 0.15, general => 0.05 },
+            'Bowyer'                  => { weapon => 0.15, general => 0.05 },
+            'Mining Supply'           => { general => 0.10, weapon => 0.05 },
+            'Water Merchant'          => { general => 0.10 },
+            'Spice Trader'            => { general => 0.10, potion => 0.05 },
+            'Alchemist'               => { potion => 0.15, magic => 0.10 },
+        );
+        
+        # Default discount if shop type not found
+        my $shop_discounts = $shop_discounts{$shop_type} // { general => 0.05 };
+        
+        # Determine item category
+        my $item_obj;
+        my $category = 'general';
+        
+        if ($rec->{type} == 1) { # Object
+            $item_obj = read_object_for_market($rec->{idx});
+        } else { # Treasure
+            $item_obj = read_treasure_record($rec->{idx});
+            
+            if ($item_obj->{weapon} && $item_obj->{weapon} > 0) {
+                $category = 'weapon';
+            } elsif (($item_obj->{armor} && $item_obj->{armor} > 0) || 
+                    ($item_obj->{shield} && $item_obj->{shield} > 0)) {
+                $category = 'armor';
+            } elsif (($item_obj->{spell} && $item_obj->{spell} > 0) || 
+                    ($item_obj->{scroll} && $item_obj->{scroll} > 0) || 
+                    ($item_obj->{ringspell} && $item_obj->{ringspell} > 0)) {
+                $category = 'magic';
+            } elsif ($item_obj->{potion} && $item_obj->{potion} > 0) {
+                $category = 'potion';
+            }
+        }
+        
+        # Apply discount based on item category
+        my $discount = $shop_discounts->{$category} // 0;
+        $final_price = int($base_price * (1 - $discount));
+        
+        # Ensure minimum price of 1
+        $final_price = 1 if $final_price < 1;
+    }
+    
+    # Check if player has enough gold
+    if ($player->{gold} < $final_price) {
+        writeline($config{'errorcolor'}."You don't have enough gold to buy that item.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    # Apply purchase
+    $player->{gold} -= $final_price;
+    add_item_to_inventory($player, {
+        name    => $rec->{item},
+        idx     => $rec->{idx},
+        type    => $rec->{type} == 1 ? 'object' : 'treasure',
+        charges => $rec->{charges},
+    });
+    
+    # Remove from market
+    splice(@$market, $item_num-1, 1);
+    write_market($market);
+    
+    # Display purchase message with discount info if applicable
+    if ($in_shop && $final_price < $base_price) {
+        writeline($config{'systemcolor'}."The $shop_type shopkeeper offers you a discount!", 1);
+        writeline($config{'systemcolor'}."You have bought $rec->{item} for $final_price gold (original price: $base_price).".$config{'themecolor'}, 1);
+    } else {
+        writeline($config{'systemcolor'}."You have bought $rec->{item} for $final_price gold.".$config{'themecolor'}, 1);
+    }
+    
+    save_player($player);
+    return 1;
+}
+
+sub shop_sell_items {
+    my ($player) = @_;
+    
+    # Check if player has inventory
+    unless ($player->{inventory} && @{$player->{inventory}} > 0) {
+        writeline($config{'errorcolor'}."You have nothing to sell.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Prepare inventory listing
+    my @sellable_items;
+    my @inventory_display;
+    
+    foreach my $item (@{$player->{inventory}}) {
+        my $object;
+        my $sellable = 1;
+        
+        if ($item->{type} eq 'treasure') {
+            $object = read_treasure_record($item->{idx});
+            # Check if treasure is sellable (if it has a stealable field)
+            $sellable = 0 if defined $object->{stealable} && $object->{stealable} == 0;
+        } elsif ($item->{type} eq 'object') {
+            $object = read_object_record($item->{idx});
+            # Check if object is sellable (based on object properties)
+            $sellable = 0 if defined $object->{permanent} && $object->{permanent} != 0;
+        } else {
+            next; # Skip unknown item types
+        }
+        
+        next unless $object && $object->{name};
+        
+        # Skip equipped items
+        next if $player->{equipped} && 
+            (($player->{equipped}{weapon} && $player->{equipped}{weapon} == $item->{idx}) ||
+             ($player->{equipped}{armor} && $player->{equipped}{armor} == $item->{idx}) ||
+             ($player->{equipped}{shield} && $player->{equipped}{shield} == $item->{idx}));
+        
+        if ($sellable) {
+            push @sellable_items, {
+                item => $item,
+                object => $object,
+                value => calculate_sell_value($object, $player)
+            };
+            
+            my $desc = $object->{name};
+            if ($item->{type} eq 'treasure' && $item->{charges} && $item->{charges} > 1) {
+                $desc .= " (x$item->{charges})";
+            }
+            
+            push @inventory_display, $desc;
+        }
+    }
+    
+    # Check if any sellable items found
+    if (@sellable_items == 0) {
+        writeline($config{'errorcolor'}."You have nothing sellable.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Display sellable items
+    writeline($config{'datacolor'}."Items you can sell to the shopkeeper:".$config{'themecolor'}, 1);
+    for (my $i = 0; $i < @inventory_display; $i++) {
+        writeline($config{'datacolor'}.($i+1).". ".$inventory_display[$i]." - ".
+                 $sellable_items[$i]->{value}." gold".$config{'themecolor'}, 1);
+    }
+    
+    # Ask which item to sell
+    writeline($config{'datacolor'}."Which item would you like to sell? (1-".scalar(@inventory_display).", or 0 to cancel)".$config{'themecolor'}, 0);
+    my $choice = getline(numeric, 2);
+    
+    if (!defined $choice || $choice eq '' || $choice eq '0') {
+        writeline($config{'systemcolor'}."Sale canceled.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    $choice = int($choice);
+    if ($choice < 1 || $choice > @sellable_items) {
+        writeline($config{'errorcolor'}."Invalid selection.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Get the selected item
+    my $selected = $sellable_items[$choice-1];
+    my $sell_value = $selected->{value};
+    
+    # Confirm the sale
+    writeline($config{'datacolor'}."The shopkeeper offers you $sell_value gold for ".
+             $selected->{object}->{name}.". Accept? (Y/N)".$config{'themecolor'}, 0);
+    my $confirm = uc(waitkey("N"));
+    
+    if ($confirm ne "Y") {
+        writeline($config{'systemcolor'}."Sale canceled.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Complete the sale
+    # Remove the item from inventory
+    my $found_index = -1;
+    for (my $i = 0; $i < @{$player->{inventory}}; $i++) {
+        my $inv_item = $player->{inventory}->[$i];
+        if ($inv_item->{type} eq $selected->{item}->{type} && 
+            $inv_item->{idx} == $selected->{item}->{idx}) {
+            $found_index = $i;
+            last;
+        }
+    }
+    
+    if ($found_index >= 0) {
+        splice(@{$player->{inventory}}, $found_index, 1);
+    } else {
+        writeline($config{'errorcolor'}."Error: Item not found in inventory.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Add gold to player
+    $player->{gold} += $sell_value;
+    
+    # Save player state
+    save_player($player);
+    
+    # Notify player
+    writeline($config{'systemcolor'}."You sell ".$selected->{object}->{name}." for $sell_value gold.".$config{'themecolor'}, 1);
+    return 1;
+}
+
+# Helper function to calculate sell value based on item properties and player CHA
+sub calculate_sell_value {
+    my ($object, $player) = @_;
+    
+    # Base value from object data
+    my $value = $object->{value} || $object->{gold} || 5;
+    
+    # Apply charisma bonus (1-5% per point above 10)
+    my $cha_bonus = 1.0;
+    if ($player->{stats} && $player->{stats}{cha}) {
+        my $cha = $player->{stats}{cha};
+        if ($cha > 10) {
+            # 1-5% bonus per point above 10, max 50% bonus at CHA 20
+            $cha_bonus = 1.0 + (($cha - 10) * 0.05);
+        }
+    }
+    
+    # Shopkeepers only pay about 1/3 to 1/2 of value
+    $value = int($value * 0.4 * $cha_bonus);
+    
+    # Ensure minimum value of 1 gold
+    return $value > 0 ? $value : 1;
+}
+
+return 1;

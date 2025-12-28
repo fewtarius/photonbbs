@@ -1,0 +1,42 @@
+# Default configuration for PhotonMUD
+
+# This file is loaded by both photonmud and photonmud-generator.
+# It provides shared defaults for all PhotonMUD scripts.
+
+our %config = (
+    home        => "/opt/photonbbs",          ## Main BBS Path (many dependencies on this)
+    bin         => "/bin",                    ## BBS Bin path (Future use)
+    data        => "/data/photonmud",                   ## BBS Data path
+    messages    => "/data/photonmud/messages",          ## Pager / Teleconference message path
+    nodes       => "/data/photonmud/nodes",             ## Node information path
+    text        => "/data/text",              ## Ansi & BBS text files
+    themes      => "/data/themes",            ## BBS Skin file
+    users       => "/data/users",             ## User information path
+    doorexec        => "/doorexec",                   ## Script bin -> Path to door scripts
+    doors       => "/opt/photonbbs/doors",    ## Node info -> Drop files etc
+    # Map generation defaults
+    width  => 100,
+    height => 100,
+    # Seeds for map generation (can be overridden)
+    elev_seed  => undef,  # will be set to rand(10000) if not defined
+    biome_seed => undef,  # will be set to rand(10000) if not defined
+    theme       => "photon",                  ## Default Skin
+    systemcolor => '@WHT',                    ## System text color
+    usercolor   => '@BWH',                    ## User notification color
+    inputcolor  => '@WHT',                    ## User input color
+    themecolor  => '@BBL',                    ## Prompt text color
+    promptcolor => '@WHT',                    ## Prompt text color
+    errorcolor  => '@RED',                    ## Color for error messages
+    datacolor   => '@BWH',                    ## Generated data color
+    linecolor   => '@BLU',                    ## Line color (Oneliners, etc)
+    idledisconnect => "900",                  ## Idle time (in seconds) before being disconnected
+    facility    => "daemon.notice",           ## Log facility for syslog messages
+    rows        => "24",                      ## Number of rows before prompting to continue / quit
+    buffer      => "255",                     ## Chat line buffer size (255 characters recommended)
+);
+
+unless (-d $config{'home'}) {
+    $config{'home'} = "./";
+}
+
+return 1;

@@ -11,14 +11,16 @@
 ########################################################################
 # KEY|DESCRIPTION|SCRIPT_OR_SUB|SECLEVEL|HIDDEN|TYPE
 ########################################################################
-#A|Tradewars 2002|tw2002.sh|10|0|external|0
-#B|LORD|lord.sh|10|0|external|0
-#C|Lunatix|luna.sh|10|0|external|0
-#D|Barren Realms Elite|bre.sh|10|0|external|0
-#E|Operation Overkill II|ooii.sh|10|0|external|0
-#F|Simpsons|simp.sh|10|0|external|0
-#G|Darkness|darkness.sh|10|0|external|0
-#H|Dopewars|dopewars.sh|10|0|external|0
+A|PhotonMUD|photonmud|10|0|external|0
+#B|Tradewars 2002|tw2002.sh|10|0|external|0
+#C|LORD|lord.sh|10|0|external|0
+#D|Lunatix|luna.sh|10|0|external|0
+#E|Barren Realms Elite|bre.sh|10|0|external|0
+#F|Operation Overkill II|ooii.sh|10|0|external|0
+#G|Simpsons|simp.sh|10|0|external|0
+#H|Darkness|darkness.sh|10|0|external|0
+#I|Dopewars|dopewars.sh|10|0|external|0
+V|PhotonMUD Editor|photonmud-editor|500|1|external|0
 W|User Edit|useredit|500|1|external|0
 X|Bulletin Editor|bulledit|500|1|external|0
 Y|Dos Prompt|dosemu.sh|900|1|external|0

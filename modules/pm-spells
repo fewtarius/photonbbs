@@ -1,0 +1,814 @@
+# Enhanced spell system with improved categorization and spell effects
+
+# Mapping for spell effect types to names
+our %spell_effect_types = (
+    1 => "Enchantment",
+    2 => "Damage",
+    3 => "Protection",
+    4 => "Gold",
+    5 => "Poison",
+    6 => "Healing (Minor)",
+    7 => "Healing (Major)",
+    8 => "Cure Poison",
+    9 => "Level Drain",
+    10 => "Teleport",
+    11 => "Confusion",
+    12 => "Turn Undead",
+    13 => "Pass Door",
+    14 => "Summon",
+    15 => "Psionic",
+    16 => "Detect Lock",
+    17 => "Detect Evil",
+    18 => "Detect Trap",
+    20 => "Set Trap",
+    21 => "Hide",
+    22 => "Search",
+    23 => "Invisibility",
+    24 => "Identify",
+    25 => "Enlighten",
+    26 => "Light/Darkness",
+    27 => "Psyche",
+    28 => "Telepathy",
+    29 => "Levitation",
+    30 => "Divine Favor",
+    31 => "Smite",
+    32 => "Resurrection",
+    33 => "Entangle",
+    34 => "Animal Friend",
+    35 => "Call Lightning",
+    36 => "Weather Control",
+    37 => "Telekinesis",
+    38 => "Domination",
+);
+
+# Mapping for class bits to class names
+our %class_bit = (
+    Fighter   => 1,
+    MagicUser => 2,
+    Thief     => 4,
+    Cleric    => 8,
+    Paladin   => 16,
+    Ranger    => 32,
+    Druid     => 64,
+);
+
+# Updated spell slots per level with more granular progression
+our %spell_slots_per_level = (
+    MagicUser => [0, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11],
+    Cleric    => [0, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11],
+    Druid     => [0, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11],
+    Paladin   => [0, 0, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 7, 7],
+    Ranger    => [0, 0, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 7, 7],
+    Thief     => [0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6],
+    Fighter   => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+);
+
+sub find_new_spell_for_player {
+    my ($player) = @_;
+    my $file = "$config{'home'}/$config{'data'}/spells.dat";
+    my $reclen = 216;
+    my $class = $player->{class} // '';
+    
+    open(my $fh, "<:raw", $file) or return 0;
+    my $idx = 1;
+    my @candidates;
+    
+    # Track spell levels to ensure balanced distribution
+    my %level_count;
+    
+    while (read($fh, my $buf, $reclen)) {
+        my $sname = substr($buf, 0, 30); $sname =~ s/[\0 ]+$//;
+        my $level = unpack("s", substr($buf, 110, 2));
+        my $classtype = unpack("s", substr($buf, 122, 2));
+        my $spellflag = unpack("s", substr($buf, 214, 2));
+        my $type = unpack("s", substr($buf, 112, 2));
+        
+        next unless $sname;
+        next unless $classtype & $class_bit{$class};
+        next unless $level <= $player->{level};
+        next unless $spellflag & 4;
+        next if player_knows_spell($player, $idx);
+        
+        # Give preference to spells close to player's level
+        my $level_diff = $player->{level} - $level;
+        
+        # Weight by spell type and level appropriateness
+        my $weight = 10;
+        
+        # Prefer spells of player's level
+        if ($level_diff <= 2) {
+            $weight += 5;
+        }
+        
+        # Add to candidates with weighting
+        push @candidates, { idx => $idx, weight => $weight, level => $level };
+    } continue { $idx++; }
+    close($fh);
+    
+    # If we have candidates, sort by weight and return one randomly from the top choices
+    if (@candidates) {
+        # Sort by weight (highest first)
+        @candidates = sort { $b->{weight} <=> $a->{weight} } @candidates;
+        
+        # Take top 3 or fewer if we don't have 3
+        my $top_count = scalar(@candidates) > 3 ? 3 : scalar(@candidates);
+        my $chosen = $candidates[int(rand($top_count))];
+        
+        return $chosen->{idx};
+    }
+    
+    return 0;
+}
+
+sub list_player_spells {
+    my ($player) = @_;
+    my @spells;
+    my $file = "$config{'home'}/$config{'data'}/spells.dat";
+    my $reclen = 216;
+    open(my $fh, "<:raw", $file) or return [];
+    my $idx = 1;
+    while (read($fh, my $buf, $reclen)) {
+        if (player_knows_spell($player, $idx)) {
+            push @spells, $idx;
+        }
+        $idx++;
+    }
+    close($fh);
+    return \@spells;
+}
+
+sub show_spellbook {
+    my ($player) = @_;
+    my $spells = list_player_spells($player);
+    my $file = "$config{'home'}/$config{'data'}/spells.dat";
+    my $reclen = 216;
+    
+    open(my $fh, "<:raw", $file) or do {
+        writeline($config{'errorcolor'}."No spells.dat found.".$config{'themecolor'}, 1);
+        return;
+    };
+    
+    # Group spells by type for better organization
+    my %spell_groups;
+    
+    my $idx = 1;
+    while (read($fh, my $buf, $reclen)) {
+        my $sname = substr($buf, 0, 30); $sname =~ s/[\0 ]+$//;
+        next unless $sname;
+        
+        if (player_knows_spell($player, $idx)) {
+            my $level = unpack("s", substr($buf, 110, 2));
+            my $type = unpack("s", substr($buf, 112, 2));
+            my $category = $spell_effect_types{$type} // "Miscellaneous";
+            
+            $spell_groups{$category} //= [];
+            push @{$spell_groups{$category}}, {
+                idx => $idx,
+                name => $sname,
+                level => $level
+            };
+        }
+        $idx++;
+    }
+    close($fh);
+    
+    if (scalar(keys %spell_groups) > 0) {
+        # Use section_header for the main spellbook header
+        writeline($config{'usercolor'}.section_header("YOUR SPELLBOOK").$config{'themecolor'}, 1);
+        
+        foreach my $group (sort keys %spell_groups) {
+            # Use colored group headers
+            writeline($config{'usercolor'}."❯ $group Spells".$config{'themecolor'}, 1);
+            
+            foreach my $spell (sort { $a->{level} <=> $b->{level} || $a->{name} cmp $b->{name} } @{$spell_groups{$group}}) {
+                writeline(sprintf($config{'datacolor'}."  %3d. %-30s (Level %d)".$config{'themecolor'}, 
+                          $spell->{idx}, $spell->{name}, $spell->{level}), 1);
+            }
+            writeline("", 1);
+        }
+        
+        # Show spell slot usage
+        my $level = $player->{level} // 1;
+        my $max_slots = get_max_spell_slots($player, $level);
+        my $used_slots = $player->{spell_slots}{$level} // 0;
+        
+        writeline($config{'systemcolor'}."Spell Slots: " . 
+                 $config{'promptcolor'} . "$used_slots/$max_slots used" . 
+                 $config{'themecolor'}, 1);
+    } else {
+        writeline($config{'systemcolor'}."You do not know any spells.".$config{'themecolor'}, 1);
+    }
+}
+
+sub read_spell_record {
+    my ($spellnum) = @_;
+    
+    # Check cache first
+    my $cached = data_cache_get('spells', $spellnum);
+    return $cached if defined $cached;
+    
+    my $file = "$config{'home'}/$config{'data'}/spells.dat";
+    my $reclen = 216;
+    my %spell;
+    lockfile($file);
+    open(my $fh, "<:raw", $file) or do { unlockfile($file); return {}; };
+    seek($fh, ($spellnum - 1) * $reclen, SEEK_SET);
+    read($fh, my $buf, $reclen);
+    close($fh);
+    unlockfile($file);
+
+    $spell{name}         = substr($buf, 0, 30);    $spell{name}      =~ s/[\0 ]+$//;
+    $spell{chant}        = substr($buf, 30, 80);   $spell{chant}     =~ s/[\0 ]+$//;
+    $spell{level}        = unpack("s", substr($buf, 110, 2));
+    $spell{type}         = unpack("s", substr($buf, 112, 2));
+    $spell{teleport}     = unpack("f<", substr($buf, 114, 4));
+    $spell{psionic}      = unpack("s", substr($buf, 118, 2));
+    $spell{psionicmode}  = unpack("s", substr($buf, 120, 2));
+    $spell{classtype}    = unpack("s", substr($buf, 122, 2));
+    $spell{desc}         = substr($buf, 124, 80);  $spell{desc}      =~ s/[\0 ]+$//;
+    $spell{ingred}       = substr($buf, 204, 10);  $spell{ingred}    =~ s/[\0 ]+$//;
+    $spell{spellflag}    = unpack("s", substr($buf, 214, 2));
+    
+    # Add effect name for convenience
+    $spell{effect_name}  = $spell_effect_types{$spell{type}} // "Miscellaneous";
+    
+    # Cache the result
+    data_cache_set('spells', $spellnum, \%spell);
+    
+    return \%spell;
+}
+
+sub find_spell_index_by_name {
+    my ($name) = @_;
+    my $file = "$config{'home'}/$config{'data'}/spells.dat";
+    my $reclen = 216;
+    open(my $fh, "<:raw", $file) or return 0;
+    my $idx = 1;
+    
+    # Normalize the search name
+    $name = lc($name);
+    $name =~ s/\s+//g;
+    
+    while (read($fh, my $buf, $reclen)) {
+        my $sname = substr($buf, 0, 30); $sname =~ s/[\0 ]+$//;
+        
+        # Normalize the spell name for better matching
+        my $normalized = lc($sname);
+        $normalized =~ s/\s+//g;
+        
+        # Check for exact match or if search is a substring
+        if ($normalized eq $name || $normalized =~ /\Q$name\E/) {
+            close($fh);
+            return $idx;
+        }
+        $idx++;
+    }
+    close($fh);
+    return 0;
+}
+
+sub player_knows_spell {
+    my ($player, $spellnum) = @_;
+    return 0 unless $player->{learned_spells};
+    substr($player->{learned_spells}, $spellnum - 1, 1) eq '1';
+}
+
+sub player_learn_spell {
+    my ($player, $spellnum) = @_;
+    $player->{learned_spells} //= '0' x 1024;
+    substr($player->{learned_spells}, $spellnum - 1, 1, '1');
+}
+
+sub check_spell_ingredients {
+    my ($player, $spell) = @_;
+    return 1 unless $spell->{ingred} && $spell->{ingred} ne '';
+    
+    # Parse ingredients more robustly
+    my @needed = split(/,|\s+/, $spell->{ingred});
+    @needed = grep { $_ ne '' } map { lc($_) } @needed;
+    
+    my %have;
+    foreach my $inv (@{$player->{inventory}}) {
+        my $treas = read_treasure_record($inv->{idx});
+        next unless $treas->{name};
+        $have{lc($treas->{name})}++;
+    }
+    
+    my @missing;
+    foreach my $item (@needed) {
+        unless ($have{$item}) {
+            push @missing, $item;
+        }
+        $have{$item}--;
+    }
+    
+    if (@missing) {
+        writeline($config{'errorcolor'}."You lack the required ingredients: " . 
+                 join(", ", @missing) . $config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    return 1;
+}
+
+sub consume_spell_ingredients {
+    my ($player, $spell) = @_;
+    return unless $spell->{ingred} && $spell->{ingred} ne '';
+    
+    # Parse ingredients more robustly
+    my @needed = split(/,|\s+/, $spell->{ingred});
+    @needed = grep { $_ ne '' } map { lc($_) } @needed;
+    
+    foreach my $item (@needed) {
+        for (my $i = 0; $i < @{$player->{inventory}}; $i++) {
+            my $treas = read_treasure_record($player->{inventory}[$i]{idx});
+            if ($treas->{name} && lc($treas->{name}) eq $item) {
+                writeline($config{'systemcolor'}."You consume $treas->{name}...".$config{'themecolor'}, 1);
+                splice(@{$player->{inventory}}, $i, 1);
+                last;
+            }
+        }
+    }
+    save_player($player);
+}
+
+sub use_psionic_attack {
+    my ($player, $target_name) = @_;
+    my $target = load_player($target_name);
+    unless ($target && $target->{name}) {
+        writeline($config{'errorcolor'}."No such player for psionic attack.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Enhanced psionic attack with character stats and level
+    my $attacker_skill = ($player->{psionic} // 1) + int($player->{level} / 2);
+    my $attacker_int = ($player->{stats}{int} // 10) - 10;  # Bonus from intelligence
+    my $attacker_roll = int(rand(20)) + 1 + $attacker_skill + $attacker_int;
+    
+    my $defender_skill = ($target->{psionic} // 1) + int($target->{level} / 3);
+    my $defender_wis = ($target->{stats}{wis} // 10) - 10;  # Bonus from wisdom
+    my $defender_roll = int(rand(20)) + 1 + $defender_skill + $defender_wis;
+    
+    if ($attacker_roll > $defender_roll) {
+        my $damage = int(($attacker_roll - $defender_roll) / 2) + 1;
+        $target->{hp} -= $damage;
+        $target->{hp} = 0 if $target->{hp} < 0;
+        
+        writeline($config{'systemcolor'}."You focus your mental energy and launch a psionic attack at $target->{name}!".$config{'themecolor'}, 1);
+        writeline($config{'systemcolor'}."Your mind overwhelms theirs for $damage damage!".$config{'themecolor'}, 1);
+        
+        # Notify the target
+        push @{$target->{messages}}, {
+            from => "System",
+            text => "$player->{name} hit you with a psionic attack for $damage damage!",
+            time => time(),
+        };
+        
+        save_player($target);
+    } else {
+        writeline($config{'systemcolor'}."You attempt a psionic attack against $target->{name}, but they resist your mental assault.".$config{'themecolor'}, 1);
+    }
+    return 1;
+}
+
+sub can_cast_spell_by_method {
+    my ($spell, $method) = @_;
+   
+    my $flag = $spell->{spellflag} // 0;
+    return 1 if $method eq 'use'    && ($flag & 1);
+    return 1 if $method eq 'scroll' && ($flag & 2);
+    return 1 if $method eq 'cast'   && ($flag & 4);
+    return 0;
+}
+
+sub cast_spell {
+    my ($player, $spellname, $target_name, $context) = @_;
+
+    my $spellnum = find_spell_index_by_name($spellname);
+    unless ($spellnum) {
+        writeline($config{'errorcolor'}."No such spell. Type 'spellbook' to see your available spells.".$config{'themecolor'});
+        return 0;
+    }
+    my $spell = read_spell_record($spellnum);
+
+    # Class restriction
+    if ($spell->{classtype} && $class_bit{$player->{class}} && !($spell->{classtype} & $class_bit{$player->{class}})) {
+        writeline($config{'errorcolor'}."Your class cannot cast this spell.".$config{'themecolor'});
+        return 0;
+    }
+    
+    # Level restriction
+    if ($player->{level} < $spell->{level}) {
+        writeline($config{'errorcolor'}."You are not high enough level to cast $spell->{name}.".$config{'themecolor'});
+        return 0;
+    }
+    
+    # Known spell check - only needed for direct casting
+    my $method = $context && $context->{method} ? $context->{method} : 'cast';
+    if ($method eq 'cast' && !player_knows_spell($player, $spellnum)) {
+        writeline($config{'errorcolor'}."You don't know the spell $spell->{name}.".$config{'themecolor'});
+        return 0;
+    }
+
+    # Method availability check
+    unless (can_cast_spell_by_method($spell, $method)) {
+        writeline($config{'errorcolor'}."You cannot $method this spell.".$config{'themecolor'});
+        return 0;
+    }
+
+    # Check ingredients
+    unless (check_spell_ingredients($player, $spell)) {
+        return 0;
+    }
+
+    # Handle psionic spells
+    if ($spell->{psionic}) {
+        if ($spell->{psionicmode} == 1) {
+            unless ($target_name) {
+                writeline($config{'errorcolor'}."You must specify a target for this psionic attack.".$config{'themecolor'});
+                return 0;
+            }
+            use_psionic_attack($player, $target_name);
+            return 1;
+        }
+    }
+
+    # Use spell slot for normal casting
+    if ($method eq 'cast') {
+        unless (use_spell_slot($player)) {
+            writeline($config{'errorcolor'}."You have no spell slots left. Rest to recover your spell slots.".$config{'themecolor'});
+            return 0;
+        }
+    }
+
+    # Consume ingredients
+    consume_spell_ingredients($player, $spell);
+
+    # Display spell cast feedback
+    writeline($config{'systemcolor'}."You cast $spell->{name}!" . $config{'themecolor'}, 1);
+    if ($spell->{chant}) {
+        # Improved formatting for chants
+        my $chant = $spell->{chant};
+        # If it contains a quote, separate quote from description
+        if ($chant =~ /^"([^"]+)"(.*)$/) {
+            writeline($config{'promptcolor'}.'"'.$1.'"' . $config{'datacolor'}.$2 . $config{'themecolor'}, 1);
+        } else {
+            writeline($config{'datacolor'}.$chant . $config{'themecolor'}, 1);
+        }
+    }
+    
+    # Show spell description only if it's different from the chant
+    if ($spell->{desc} && $spell->{desc} ne $spell->{chant}) {
+        writeline($config{'datacolor'}.$spell->{desc} . $config{'themecolor'}, 1);
+    }
+
+    # Target resolution
+    my $target;
+    if (defined $target_name && $target_name ne '') {
+        # Targeting logic: try to find a player or monster in the current room
+        $target = load_player($target_name);
+        unless ($target && $target->{room} && $target->{room} == $player->{room}) {
+            # Try to find a monster in the room if not a player
+            if (defined &find_monster_in_room) {
+                $target = find_monster_in_room($player->{room}, $target_name);
+            }
+        }
+        unless ($target) {
+            writeline($config{'errorcolor'}."No valid target named '$target_name' here.".$config{'themecolor'}, 1);
+            return 0;
+        }
+    }
+
+    # Notify room of the spell cast
+    if ($player->{room}) {
+        broadcast_room_message($player->{room}, $player->{name},
+            $config{'usercolor'}."$player->{name} casts $spell->{name}.".$config{'themecolor'});
+    }
+
+    # Apply the spell effect
+    if (defined &apply_spell_effect) {
+        apply_spell_effect($player, $spell, $target, $context);
+    } else {
+        # Simplified effect handling if the full effect system isn't available
+        handle_basic_spell_effect($player, $spell, $target, $context);
+    }
+
+    save_player($player);
+    return 1;
+}
+
+# Simplified spell effect handler if the main one isn't available
+sub handle_basic_spell_effect {
+    my ($player, $spell, $target, $context) = @_;
+    
+    my $type = $spell->{type};
+    my $effect_name = $spell_effect_types{$type} // "Unknown";
+    
+    # Handle basic spell types
+    if ($type == 6 || $type == 7) {  # Healing
+        my $heal_amount = ($type == 6) ? 
+            int(rand(6) + 1 + $player->{level}) :  # Minor healing
+            int(rand(12) + $player->{level} * 2);  # Major healing
+            
+        if ($target) {
+            $target->{hp} += $heal_amount;
+            $target->{hp} = $target->{maxhp} if $target->{hp} > $target->{maxhp};
+            writeline($config{'systemcolor'}."You heal $target->{name} for $heal_amount hit points.".$config{'themecolor'}, 1);
+            save_player($target);
+        } else {
+            $player->{hp} += $heal_amount;
+            $player->{hp} = $player->{maxhp} if $player->{hp} > $player->{maxhp};
+            writeline($config{'systemcolor'}."You heal yourself for $heal_amount hit points.".$config{'themecolor'}, 1);
+        }
+    }
+    elsif ($type == 8) {  # Cure poison
+        if ($target) {
+            $target->{poisoned} = 0;
+            writeline($config{'systemcolor'}."You cure $target->{name} of poison.".$config{'themecolor'}, 1);
+            save_player($target);
+        } else {
+            $player->{poisoned} = 0;
+            writeline($config{'systemcolor'}."You cure yourself of poison.".$config{'themecolor'}, 1);
+        }
+    }
+    elsif ($type == 2) {  # Damage spell
+        unless ($target) {
+            writeline($config{'errorcolor'}."You must specify a target for this attack spell.".$config{'themecolor'}, 1);
+            return;
+        }
+        
+        my $base_damage = ($spell->{level} * 2) + int(rand(8)) + 1;
+        my $damage = $base_damage;
+        
+        # Add intelligence bonus for Magic Users
+        if ($player->{class} eq "MagicUser") {
+            my $int_bonus = int(($player->{stats}{int} - 10) / 2);
+            $damage += $int_bonus if $int_bonus > 0;
+        }
+        
+        if ($target->{hp}) {
+            $target->{hp} -= $damage;
+            $target->{hp} = 0 if $target->{hp} < 0;
+            writeline($config{'systemcolor'}."Your spell hits $target->{name} for $damage damage!".$config{'themecolor'}, 1);
+            save_player($target) if $target->{name};  # Only save if it's a player
+        }
+    }
+    elsif ($type == 3) {  # Protection
+        my $duration = $player->{level} * 2;  # Minutes
+        $player->{protection} = time() + ($duration * 60);
+        $player->{protection_level} = $spell->{level};
+        writeline($config{'systemcolor'}."You are surrounded by a protective aura for $duration minutes.".$config{'themecolor'}, 1);
+    }
+    elsif ($type == 26) {  # Light/Darkness
+        my $duration = $player->{level} * 10;  # Minutes
+        $player->{light_source} = time() + ($duration * 60);
+        writeline($config{'systemcolor'}."A magical light surrounds you, illuminating your path for $duration minutes.".$config{'themecolor'}, 1);
+    }
+    elsif ($type == 10) {  # Teleport
+        my $dest = $spell->{teleport};
+        if ($dest > 0) {
+            $player->{room} = $dest;
+            writeline($config{'systemcolor'}."You are teleported to a new location!".$config{'themecolor'}, 1);
+            # Process room entry
+            if (defined &process_room_entry) {
+                process_room_entry($player, $player->{room});
+            }
+        } else {
+            writeline($config{'errorcolor'}."The teleportation spell fizzles.".$config{'themecolor'}, 1);
+        }
+    }
+    else {
+        # Generic effect message for other spell types
+        writeline($config{'systemcolor'}."The spell takes effect: $effect_name".$config{'themecolor'}, 1);
+    }
+}
+
+sub get_max_spell_slots {
+    my ($player, $level) = @_;
+    $level //= $player->{level} // 1;
+    my $class = $player->{class} // '';
+    my $slots = $spell_slots_per_level{$class};
+    
+    # Default to zero if class not found or level too high
+    return 0 unless $slots;
+    return $slots->[$level] if $level <= $#$slots;
+    
+    # For levels beyond our table, use the highest defined level
+    return $slots->[$#$slots];
+}
+
+sub use_spell_slot {
+    my ($player, $level) = @_;
+    $level //= $player->{level} // 1;
+    $player->{spell_slots} //= {};
+    $player->{spell_slots}{$level} //= 0;
+    my $max = get_max_spell_slots($player, $level);
+    
+    if ($player->{spell_slots}{$level} < $max) {
+        $player->{spell_slots}{$level}++;
+        return 1;
+    }
+    return 0;
+}
+
+sub reset_spell_slots {
+    my ($player) = @_;
+    $player->{spell_slots} = {};
+    save_player($player);
+    writeline($config{'systemcolor'}."Your spell slots have been refreshed.".$config{'themecolor'}, 1);
+}
+
+sub learn_spell {
+    my ($player, $spellname) = @_;
+    my $spellnum = find_spell_index_by_name($spellname);
+    unless ($spellnum) {
+        writeline($config{'errorcolor'}."No such spell.".$config{'themecolor'});
+        return 0;
+    }
+    my $spell = read_spell_record($spellnum);
+
+    # Class restriction
+    if ($spell->{classtype} && $class_bit{$player->{class}} && !($spell->{classtype} & $class_bit{$player->{class}})) {
+        writeline($config{'errorcolor'}."Your class cannot learn this spell.".$config{'themecolor'});
+        return 0;
+    }
+    
+    # Level restriction
+    if ($player->{level} < $spell->{level}) {
+        writeline($config{'errorcolor'}."You are not high enough level to learn $spell->{name}.".$config{'themecolor'});
+        return 0;
+    }
+    
+    # Already known check
+    if (player_knows_spell($player, $spellnum)) {
+        writeline($config{'errorcolor'}."You already know this spell.".$config{'themecolor'});
+        return 0;
+    }
+    
+    # Learning chance based on primary stat
+    my $stat = ($player->{class} =~ /^(MagicUser)$/) ? 
+               ($player->{stats}{int} // 10) : 
+               ($player->{stats}{wis} // 10);
+    
+    my $difficulty = $spell->{level} * 5;
+    my $chance = ($stat * 5) - $difficulty;
+    $chance = 5 if $chance < 5;  # Minimum 5% chance
+    $chance = 95 if $chance > 95; # Maximum 95% chance
+    
+    # Roll for success
+    if (int(rand(100)) < $chance) {
+        player_learn_spell($player, $spellnum);
+        writeline($config{'systemcolor'}."You have learned $spell->{name}!" . $config{'themecolor'});
+        save_player($player);
+        return 1;
+    } else {
+        writeline($config{'errorcolor'}."You failed to learn $spell->{name}. Perhaps with more study..." . $config{'themecolor'});
+        return 0;
+    }
+}
+
+sub list_known_spells {
+    my ($player) = @_;
+    show_spellbook($player);
+}
+
+sub forget_spell {
+    my ($player, $spellname) = @_;
+    my $spellnum = $spellname =~ /^\d+$/ ? $spellname : find_spell_index_by_name($spellname);
+    unless ($spellnum) {
+        writeline($config{'errorcolor'}."No such spell.".$config{'themecolor'});
+        return 0;
+    }
+    
+    # Only allow forgetting if they know it
+    unless (player_knows_spell($player, $spellnum)) {
+        writeline($config{'errorcolor'}."You don't know that spell.".$config{'themecolor'});
+        return 0;
+    }
+    
+    my $spell = read_spell_record($spellnum);
+    $player->{learned_spells} //= '0' x 1024;
+    substr($player->{learned_spells}, $spellnum - 1, 1, '0');
+    writeline($config{'systemcolor'}."You have forgotten the spell $spell->{name}.".$config{'themecolor'}, 1);
+    save_player($player);
+    return 1;
+}
+
+sub use_magic_item {
+    my ($player, $itemname) = @_;
+    my $try_name = normalize_item_name($itemname);
+    
+    for (my $i = 0; $i < @{$player->{inventory}}; $i++) {
+        my $inv = $player->{inventory}[$i];
+        my $treas = read_treasure_record($inv->{idx});
+        next unless $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+        
+        # Scroll use
+        if ($treas->{scroll} && $treas->{scroll} > 0) {
+            my $spell = read_spell_record($treas->{spell});
+            if ($spell->{name}) {
+                writeline($config{'systemcolor'}."You read the scroll of $spell->{name}...".$config{'themecolor'}, 1);
+                
+                # Chance of success based on level difference
+                my $level_diff = $spell->{level} - $player->{level};
+                my $success_chance = 100 - (max(0, $level_diff) * 10);
+                $success_chance = max(5, $success_chance); # Minimum 5% chance
+                
+                if (rand(100) < $success_chance) {
+                    cast_spell($player, $spell->{name}, undef, { method => 'scroll' });
+                } else {
+                    writeline($config{'errorcolor'}."The magical energies of the scroll are too powerful and it burns up in your hands!".$config{'themecolor'}, 1);
+                }
+                
+                # Remove the scroll
+                splice(@{$player->{inventory}}, $i, 1);
+                save_player($player);
+                return 1;
+            }
+        }
+        
+        # Potion use
+        if ($treas->{potion} && $treas->{potion} > 0) {
+            my $spell = read_spell_record($treas->{spell});
+            if ($spell->{name}) {
+                writeline($config{'systemcolor'}."You drink the potion of $spell->{name}...".$config{'themecolor'}, 1);
+                cast_spell($player, $spell->{name}, undef, { method => 'use' });
+                
+                # Remove the potion
+                splice(@{$player->{inventory}}, $i, 1);
+                save_player($player);
+                return 1;
+            }
+        }
+        
+        # Ring/wand/staff use (reusable items)
+        if (($treas->{ringtype} && $treas->{ringtype} > 0) ||
+            ($treas->{staff} && $treas->{staff} > 0) ||
+            ($treas->{wand} && $treas->{wand} > 0)) {
+            
+            my $spell = read_spell_record($treas->{spell});
+            if ($spell->{name}) {
+                my $item_type = $treas->{ringtype} ? "ring" : 
+                                $treas->{staff} ? "staff" : "wand";
+                
+                writeline($config{'systemcolor'}."You activate the $item_type of $spell->{name}...".$config{'themecolor'}, 1);
+                
+                # Check charges
+                if ($inv->{charges} && $inv->{charges} > 0) {
+                    cast_spell($player, $spell->{name}, undef, { method => 'use' });
+                    
+                    # Reduce charges
+                    $inv->{charges}--;
+                    
+                    # Item breaks if out of charges
+                    if ($inv->{charges} <= 0) {
+                        writeline($config{'systemcolor'}."The $item_type crumbles to dust as its magic is depleted.".$config{'themecolor'}, 1);
+                        splice(@{$player->{inventory}}, $i, 1);
+                    } else {
+                        writeline($config{'systemcolor'}."The $item_type has $inv->{charges} charges remaining.".$config{'themecolor'}, 1);
+                    }
+                } else {
+                    writeline($config{'errorcolor'}."The $item_type has no charges remaining.".$config{'themecolor'}, 1);
+                }
+                
+                save_player($player);
+                return 1;
+            }
+        }
+    }
+    
+    writeline($config{'systemcolor'}."You don't have a usable magic item named $itemname.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+sub forget_spell_by_slot {
+    my ($player, $level, $slot) = @_;
+    $player->{memorized_spells} //= {};
+    if ($player->{memorized_spells}{$level} && $player->{memorized_spells}{$level}[$slot]) {
+        my $spellnum = $player->{memorized_spells}{$level}[$slot];
+        $player->{memorized_spells}{$level}[$slot] = 0;
+        writeline($config{'systemcolor'}."You have forgotten a spell from level $level, slot $slot.".$config{'themecolor'}, 1);
+        save_player($player);
+        return 1;
+    }
+    writeline($config{'errorcolor'}."No spell memorized in that slot.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+sub handle_forget_command {
+    my ($player, $spellname) = @_;
+    forget_spell($player, $spellname);
+}
+
+sub handle_spellbook_command {
+    my ($player) = @_;
+    show_spellbook($player);
+}
+
+# Helper function for max
+sub max {
+    my ($a, $b) = @_;
+    return $a > $b ? $a : $b;
+}
+
+return 1;

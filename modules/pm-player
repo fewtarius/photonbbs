@@ -1,0 +1,1189 @@
+use Fcntl qw(:flock);
+use Storable qw(lock_store lock_retrieve);
+
+# PhotonMUD data directory
+# Note: pm-defaults sets $config{'data'} = "/data/photonmud" 
+our $MUDDATA = "$config{'home'}$config{'data'}";
+
+sub show_intro_story {
+    readfile("$MUDDATA/welcome.txt",1,1);
+    pause();
+}
+
+sub show_news {
+    readfile("$MUDDATA/state_of_realm.txt",1,1);
+}
+
+sub load_realm_name {
+    my $file = "$MUDDATA/realm.txt";
+    if (-e $file) {
+        open(my $fh, "<:utf8", $file);
+        my $name = <$fh>;
+        close($fh);
+        $name =~ s/[\r\n]+$// if defined $name;
+        return $name if defined $name && $name ne '';
+    }
+    return "PhotonMUD";
+}
+
+sub create_new_player {
+    my $username = shift;
+    my %new_player;
+    $new_player{name} = $username;
+
+    while (1) {
+        writeline($config{'datacolor'}.
+            "Before you lies a world of mystery, danger, and discovery.\n".
+            "You will create a new hero to explore the unknown, face monsters,\n".
+            "uncover secrets, and forge your own legend.\n\n".
+            "Choose your path wisely-your class, race, and skills will shape\n".
+            "your journey." . $config{'themecolor'}, 1);
+
+        my @classes = (
+            { key => 'F', name => 'Fighter',
+              desc => "Strong melee warrior. High STR/CON; excels with swords and axes." },
+            { key => 'M', name => 'MagicUser',
+              desc => "Master of arcane spells. High INT/PIE; best with staves and daggers." },
+            { key => 'T', name => 'Thief',
+              desc => "Stealthy and agile. High DEX/CHA; skilled with daggers and slings." },
+            { key => 'C', name => 'Cleric',
+              desc => "Divine spellcaster and healer. High PIE/WIS; uses maces and clubs." },
+            { key => 'P', name => 'Paladin',
+              desc => "Holy warrior. Balanced STR/CON/PIE/CHA; wields swords and maces." },
+            { key => 'R', name => 'Ranger',
+              desc => "Wilderness scout. High DEX/STR/CON; adept with bows and swords." },
+            { key => 'D', name => 'Druid',
+              desc => "Nature priest. High WIS/PIE; favors staves and clubs." },
+        );
+        my @races = (
+            { key => 'H', name => 'Human',
+              stat_mod => { str=>0, int=>0, wis=>0, dex=>0, con=>0, pie=>0, cha=>0 },
+              desc => "Balanced; no stat modifiers." },
+            { key => 'E', name => 'Elf',
+              stat_mod => { str=>-1, int=>2, wis=>1, dex=>1, con=>-1, pie=>0, cha=>1 },
+              desc => "Agile and intelligent, but less strong and hardy." },
+            { key => 'G', name => 'Gnome',
+              stat_mod => { str=>-1, int=>1, wis=>2, dex=>0, con=>1, pie=>1, cha=>-1 },
+              desc => "Wise and tough, but less strong and charismatic." },
+            { key => 'D', name => 'Dwarf',
+              stat_mod => { str=>1, int=>-1, wis=>1, dex=>-1, con=>2, pie=>0, cha=>-2 },
+              desc => "Very tough and strong, but less dexterous and charismatic." },
+            { key => 'F', name => 'Halfling',
+              stat_mod => { str=>-2, int=>0, wis=>1, dex=>2, con=>1, pie=>0, cha=>1 },
+              desc => "Dexterous and lucky, but not strong." },
+            { key => 'A', name => 'Half-elf',
+              stat_mod => { str=>0, int=>1, wis=>1, dex=>1, con=>0, pie=>0, cha=>1 },
+              desc => "Versatile, with minor bonuses to most stats." },
+            { key => 'O', name => 'Half-orc',
+              stat_mod => { str=>2, int=>-2, wis=>-1, dex=>0, con=>1, pie=>-1, cha=>-2 },
+              desc => "Very strong and tough, but less intelligent and charismatic." },
+            { key => 'X', name => 'Ogre',
+              stat_mod => { str=>3, int=>-2, wis=>-2, dex=>-1, con=>2, pie=>-2, cha=>-3 },
+              desc => "Extremely strong and tough, but poor in all mental stats." },
+        );
+        my @proficiencies = (
+            { key => 'S', name => 'Sword',
+              desc => "Expert with swords and blades." },
+            { key => 'A', name => 'Axe',
+              desc => "Expert with axes and hatchets." },
+            { key => 'B', name => 'Bow',
+              desc => "Expert with bows and ranged weapons." },
+            { key => 'T', name => 'Staff',
+              desc => "Expert with staves and polearms." },
+            { key => 'D', name => 'Dagger',
+              desc => "Expert with daggers and knives." },
+            { key => 'M', name => 'Mace',
+              desc => "Expert with maces and blunt weapons." },
+            { key => 'L', name => 'Sling',
+              desc => "Expert with slings and thrown stones." },
+            { key => 'U', name => 'Unarmed',
+              desc => "Expert at fighting unarmed." },
+        );
+        my @alignments = (
+            { key => 'LG', name => 'Lawful Good',
+              desc => "Upholds law and does good." },
+            { key => 'NG', name => 'Neutral Good',
+              desc => "Does good without regard for law or chaos." },
+            { key => 'CG', name => 'Chaotic Good',
+              desc => "Acts as conscience directs, with little regard for rules." },
+            { key => 'LN', name => 'Lawful Neutral',
+              desc => "Acts in accordance with law, without regard to good or evil." },
+            { key => 'TN', name => 'True Neutral',
+              desc => "Balanced between law/chaos and good/evil." },
+            { key => 'CN', name => 'Chaotic Neutral',
+              desc => "Follows whims, neither for good nor evil, law nor chaos." },
+            { key => 'LE', name => 'Lawful Evil',
+              desc => "Methodically takes what he wants, within the limits of a code." },
+            { key => 'NE', name => 'Neutral Evil',
+              desc => "Does whatever he can get away with, without compassion or qualms." },
+            { key => 'CE', name => 'Chaotic Evil',
+              desc => "Does whatever his greed, hatred, and lust for destruction drive him to do." },
+        );
+
+        writeline($config{'systemcolor'}."\nChoose your class:".
+            $config{'themecolor'}, 1);
+        for my $i (0..$#classes) {
+            my $c = $classes[$i];
+            writeline(
+                $config{'usercolor'}."[".$c->{key}."]".$config{'themecolor'}.
+                " ".$config{'datacolor'}.$c->{name}.$config{'themecolor'}.
+                " - ".$c->{desc}, 1
+            );
+        }
+        writeline($config{'systemcolor'}."Enter class (F): ".
+            $config{'themecolor'}, 0);
+        my $class_key = uc(waitkey($classes[0]{key}));
+        my ($class_idx) = grep { $classes[$_]{key} eq $class_key } 0..$#classes;
+        unless (defined $class_idx) {
+            writeline($config{'errorcolor'}."Invalid class. Try again.".
+                $config{'themecolor'}, 1);
+            next;
+        }
+        my $class = $classes[$class_idx]{name};
+        $new_player{class} = $class;
+
+        writeline("");
+        writeline($config{'systemcolor'}."\nChoose your race:".
+            $config{'themecolor'}, 1);
+        for my $i (0..$#races) {
+            my $r = $races[$i];
+            writeline(
+                $config{'usercolor'}."[".$r->{key}."]".$config{'themecolor'}.
+                " ".$config{'datacolor'}.$r->{name}.$config{'themecolor'}.
+                " - ".$r->{desc}, 1
+            );
+        }
+        writeline($config{'systemcolor'}."Enter race (H): ".
+            $config{'themecolor'}, 0);
+        my $race_key = uc(waitkey($races[0]{key}));
+        my ($race_idx) = grep { $races[$_]{key} eq $race_key } 0..$#races;
+        unless (defined $race_idx) {
+            writeline("",1);
+            writeline($config{'errorcolor'}."Invalid race. Try again.".
+                $config{'themecolor'}, 1);
+            next;
+        }
+        my $race = $races[$race_idx]{name};
+        $new_player{race} = $race;
+        $new_player{race_num} = $race_idx + 1;
+
+        writeline("");
+        writeline($config{'systemcolor'}."\nChoose your alignment:".
+            $config{'themecolor'}, 1);
+        for my $i (0..$#alignments) {
+            my $a = $alignments[$i];
+            writeline(
+                $config{'usercolor'}."[".$a->{key}."]".$config{'themecolor'}.
+                " ".$config{'datacolor'}.$a->{name}.$config{'themecolor'}.
+                " - ".$a->{desc}, 1
+            );
+        }
+        writeline($config{'systemcolor'}."Enter alignment(LG): ".
+            $config{'themecolor'}, 0);
+        my $align_key = uc(getline(text, 3, ""));
+        $align_key =~ s/^\s+|\s+$//g;
+        $align_key = "LG" if $align_key eq "";
+        my ($align_idx) = grep { $alignments[$_]{key} eq $align_key } 0..$#alignments;
+        unless (defined $align_idx) {
+            writeline($config{'errorcolor'}."Invalid alignment. Try again.".
+                $config{'themecolor'}, 1);
+            next;
+        }
+        $new_player{alignment} = $alignments[$align_idx]{name};
+        $new_player{alignment_code} = $alignments[$align_idx]{key};
+
+        writeline("");
+        writeline($config{'systemcolor'}."\nChoose your weapon proficiency:".
+            $config{'themecolor'}, 1);
+        for my $i (0..$#proficiencies) {
+            my $p = $proficiencies[$i];
+            writeline(
+                $config{'usercolor'}."[".$p->{key}."]".$config{'themecolor'}.
+                " ".$config{'datacolor'}.$p->{name}.$config{'themecolor'}.
+                " - ".$p->{desc}, 1
+            );
+        }
+        writeline($config{'systemcolor'}."Enter proficiency (S): ".
+            $config{'themecolor'}, 0);
+        my $prof_key = uc(waitkey($proficiencies[0]{key}));
+        my ($prof_idx) = grep { $proficiencies[$_]{key} eq $prof_key } 0..$#proficiencies;
+        unless (defined $prof_idx) {
+            writeline($config{'errorcolor'}."Invalid proficiency. Try again.".
+                $config{'themecolor'}, 1);
+            next;
+        }
+        my $prof = $proficiencies[$prof_idx]{name};
+        $new_player{proficiency} = $prof;
+        $new_player{proficiency_num} = $prof_idx + 1;
+        $new_player{proficiency_exp} = 0;
+
+        my %class_default_inventory = (
+            Fighter   => [ 'longsword', 'chain mail', 'large shield', 'Potion of Healing' ],
+            MagicUser => [ 'Potion of Healing', 'Scroll of Magic Missile', 'dagger', 'dagger' ],
+            Thief     => [ 'dagger', 'shortsword', 'Potion of Healing', 'Scroll of Magic Missile' ],
+            Cleric    => [ 'club', 'Potion of Healing', 'Scroll of Cure Light Wounds', 'small shield' ],
+            Paladin   => [ 'longsword', 'plate mail', 'large shield', 'Potion of Healing' ],
+            Ranger    => [ 'shortsword', 'shortbow', 'arrows', 'Potion of Healing' ],
+            Druid     => [ 'club', 'Scroll of Cure Light Wounds', 'Potion of Healing', 'Potion of Healing' ],
+        );
+
+        my %stat_bias = (
+            Fighter   => { str => 3, con => 2, dex => 1 },
+            MagicUser => { int => 3, pie => 2, wis => 1 },
+            Thief     => { dex => 3, str => 1, cha => 2 },
+            Cleric    => { pie => 3, wis => 2, con => 1 },
+            Paladin   => { str => 2, con => 2, pie => 2, cha => 1 },
+            Ranger    => { dex => 2, str => 2, con => 2, wis => 1 },
+            Druid     => { wis => 3, pie => 2, con => 1 },
+        );
+
+        my @stats = qw(str int wis dex con pie cha);
+
+        my $accept = 0;
+        while (!$accept) {
+           
+            foreach my $stat (@stats) {
+                my $bias = $stat_bias{$class}{$stat} // 0;
+                my $race_mod = $races[$race_idx]{stat_mod}{$stat} // 0;
+                my @rolls = map { 1 + int(rand(6)) } 1..4;
+                @rolls = sort { $b <=> $a } @rolls;
+                my $base = $rolls[0] + $rolls[1] + $rolls[2];
+                $new_player{stats}{$stat} = $base + $bias + $race_mod;
+                $new_player{stats}{$stat} = 18 if $new_player{stats}{$stat} > 18;
+                $new_player{stats}{$stat} = 3  if $new_player{stats}{$stat} < 3;
+            }
+
+            $new_player{max_hp} = 18 + ($new_player{level} - 1) * 2;
+            $new_player{max_hp} = 18 if $new_player{level} < 2;
+
+            my %class_hit_die = (
+                Fighter   => 10,
+                Paladin   => 10,
+                Ranger    => 8,
+                MagicUser => 4,
+                Thief     => 6,
+                Cleric    => 8,
+                Druid     => 6,
+            );
+            my $hit_die = $class_hit_die{$new_player{class}} || 6;
+            my $con_mod = int(($new_player{stats}{con} - 10) / 2);
+            $con_mod = 0 if $con_mod < 0;
+            my $hp_roll = 1 + int(rand($hit_die));
+            $new_player{max_hp} = $hp_roll + $con_mod;
+            $new_player{max_hp} = 1 if $new_player{max_hp} < 1;
+            $new_player{hp} = $new_player{max_hp};
+
+           
+            writeline($config{'systemcolor'}."\nYour generated stats:".$config{'themecolor'}, 1);
+            foreach my $stat (@stats) {
+                writeline(sprintf("%s: %d", ucfirst($stat), $new_player{stats}{$stat}), 1);
+            }
+            writeline(sprintf("HP: %d/%d", $new_player{hp}, $new_player{max_hp}), 1);
+            writeline($config{'systemcolor'}."Accept these stats? (Y/n) ".$config{'themecolor'}, 0);
+            my $ans = waitkey("Y");
+            $ans = uc($ans // "Y");
+            writeline("",1);
+            $ans = "Y" if $ans eq "";
+            if ($ans eq "Y") {
+                $accept = 1;
+            } else {
+                writeline($config{'systemcolor'}."Re-rolling stats...".$config{'themecolor'}, 1);
+            }
+        }
+
+       
+        writeline($config{'systemcolor'}."\nSummary of your character:".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."Name: $new_player{name}", 1);
+        writeline($config{'datacolor'}."Class: $new_player{class}", 1);
+        writeline($config{'datacolor'}."Race: $new_player{race}", 1);
+        writeline($config{'datacolor'}."Alignment: $new_player{alignment}", 1);
+        writeline($config{'datacolor'}."Weapon Proficiency: $new_player{proficiency}", 1);
+        writeline($config{'datacolor'}."Stats:", 1);
+        foreach my $stat (@stats) {
+            writeline($config{'datacolor'}."  ".ucfirst($stat).": $new_player{stats}{$stat}", 1);
+        }
+        writeline(sprintf("  HP: %d/%d", $new_player{hp}, $new_player{max_hp}), 1);
+        writeline($config{'systemcolor'}."\nAre you happy with your character? [Y]es, [N]o (start over), [Q]uit".$config{'themecolor'}, 1);
+        writeline($config{'promptcolor'}."Choice (Y): ".$config{'themecolor'}, 0);
+        my $final = uc(waitkey("Y"));
+        $final = "Y" if $final eq "" or $final eq "\n";
+        writeline("",1);
+
+        if ($final eq "Y") {
+            last;
+        } elsif ($final eq "Q") {
+            writeline($config{'systemcolor'}."Character creation cancelled.".$config{'themecolor'}, 1);
+            exit(0);
+        } else {
+            writeline($config{'systemcolor'}."Starting over character creation...".$config{'themecolor'}, 1);
+            next;
+        }
+    }
+
+   
+    $new_player{level} = 1;
+    $new_player{gold} = 50;
+    $new_player{experience} = 0;
+
+   
+    my $WIDTH  = $config{'width'};
+    my $HEIGHT = $config{'height'};
+    my $max_room = $WIDTH * $HEIGHT;
+    my $attempts = 0;
+    my $max_attempts = 100;
+    my $room;
+    do {
+       
+        my $x = 1 + int(rand($WIDTH - 2));
+        my $y = 1 + int(rand($HEIGHT - 2));
+        my $roomnum = $y * $WIDTH + $x + 1;
+        $new_player{room} = $roomnum;
+        $room = read_room_record($new_player{room});
+        $attempts++;
+    } while (
+        (!$room->{exits} || scalar(grep { $room->{exits}{$_} && $room->{exits}{$_} > 0 } @dirs) == 0)
+        && $attempts < $max_attempts
+    );
+    if ($attempts >= $max_attempts) {
+        writeline($config{'errorcolor'}."Warning: Could not find a room with exits after $max_attempts attempts.".$config{'themecolor'}, 1);
+    }
+
+    my %class_default_inventory = (
+        Fighter   => [ 'longsword', 'chain mail', 'large shield', 'Potion of Healing' ],
+        MagicUser => [ 'Potion of Healing', 'Scroll of Magic Missile', 'dagger', 'dagger' ],
+        Thief     => [ 'dagger', 'shortsword', 'Potion of Healing', 'Scroll of Magic Missile' ],
+        Cleric    => [ 'club', 'Potion of Healing', 'Scroll of Cure Light Wounds', 'small shield' ],
+        Paladin   => [ 'longsword', 'plate mail', 'large shield', 'Potion of Healing' ],
+        Ranger    => [ 'shortsword', 'shortbow', 'arrows', 'Potion of Healing' ],
+        Druid     => [ 'club', 'Scroll of Cure Light Wounds', 'Potion of Healing', 'Potion of Healing' ],
+    );
+
+    my @default_treasures = @{ $class_default_inventory{$new_player{class}} };
+    my @inventory;
+    for my $item (@default_treasures) {
+        my $idx = find_treasure_index_by_name($item);
+        if ($idx > 0) {
+            push @inventory, { type => 'treasure', idx => $idx, charges => 1 };
+        } else {
+            writeline($config{'errorcolor'}."Warning: Default treasure '$item' not found in treasure.dat".$config{'themecolor'}, 1);
+        }
+    }
+    $new_player{inventory} = \@inventory;
+
+   
+    $new_player{equipped} = {};
+    foreach my $inv (@inventory) {
+        next unless $inv->{type} eq 'treasure';
+        my $treas = read_treasure_record($inv->{idx});
+        if ($treas->{weapon} && $treas->{weapon} == -1 && !$new_player{equipped}{weapon}) {
+            $new_player{equipped}{weapon} = $inv;
+        } elsif ($treas->{armor} && $treas->{armor} == -1 && !$new_player{equipped}{armor}) {
+            $new_player{equipped}{armor} = $inv;
+        } elsif ($treas->{shield} && $treas->{shield} == -1 && !$new_player{equipped}{shield}) {
+            $new_player{equipped}{shield} = $inv;
+        }
+    }
+
+    writeline($config{'systemcolor'}."Character created!".$config{'themecolor'}, 1);
+    writeline("",1);
+    writeline($config{'systemcolor'}."Welcome to the Realm of ".load_realm_name()."!".$config{'themecolor'}, 1);
+    writeline("",1);
+    show_intro_story();
+    return \%new_player;
+}
+
+sub safe_name {
+    my ($name) = @_;
+    my $lower = lc($name // '');
+    my $hash = sha1_hex($lower);
+    my ($package, $filename, $line, $subroutine) = caller(0);
+    # warn "[DEBUG] safe_name: input='$name' lower='$lower' hash='$hash' called from $subroutine ($filename line $line)\n";
+    return $hash;
+}
+
+sub player_save_path {
+    my $name = shift;
+    my $hash = sha1_hex(lc($name));
+    return "$config{'home'}/$config{'data'}/player_$hash.dat";
+}
+
+# --- Player Save/Load with Locking ---
+sub save_player {
+    my ($player) = @_;
+    my $file = player_save_path($player->{name});
+    my $ok = eval { store($player, $file); 1 };
+    if (!$ok || $@) {
+        warn "Failed to store player $player->{name} to $file: $@";
+    }
+}
+
+sub load_player {
+    my ($name) = @_;
+    my $file = player_save_path($name);
+    return undef unless -e $file;
+    my $player;
+    my $ok = eval { $player = retrieve($file); 1 };
+    if (!$ok || $@) {
+        warn "Failed to load player $name from $file: $@";
+        return undef;
+    }
+    return $player;
+}
+
+sub retire_player {
+    my ($player) = @_;
+    $::player_retired = 1;  # Set global flag
+    add_to_ranklist($player);
+    unlink player_save_path($player->{name});
+    writeline("",1);
+    writeline($config{'systemcolor'}."You retire from adventuring. Your legacy is recorded in the Hall of Fame.".$config{'themecolor'}, 1);
+    photonmud_quit($player);
+    exit(0);
+}
+
+sub show_player_status {
+    my ($name) = @_;
+    $name //= $player->{name};
+    my $target = ($name eq $player->{name}) ? $player : load_player($name);
+    unless ($target && $target->{name}) {
+        writeline($config{'errorcolor'}."Player '$name' does not exist.".$config{'themecolor'}, 1);
+        return;
+    }
+    my $xp_cur  = xp_for_current_level($target);
+    my $xp_next = xp_for_next_level($target);
+    my $to_next = $xp_next > $target->{experience} ? $xp_next - $target->{experience} : 0;
+
+    my $rows = $config{'rows'} || 24;
+    my $linecount = 0;
+
+    my @lines;
+    push @lines, $config{'systemcolor'}.$border.$config{'themecolor'};
+    push @lines, $config{'usercolor'}."$target->{name} the $target->{race} $target->{class}".$config{'themecolor'};
+    push @lines, kv_line("Alignment", ($target->{alignment} // '(None)')) . "   " .
+                 kv_line("Weapon Prof.", ($target->{proficiency} // '(None)'));
+    push @lines, kv_line("Level", $target->{level}) . "   " .
+                 kv_line("Gold", $target->{gold}) . "   " .
+                 kv_line("Bank", ($target->{bank}//0));
+    push @lines, kv_line("Exp", $target->{experience}) . " " .
+                 $config{'datacolor'}."(Next: ".$config{'themecolor'}."$xp_next".
+                 $config{'datacolor'}.", To next: ".$config{'themecolor'}."$to_next".$config{'datacolor'}.")".$config{'themecolor'};
+    push @lines, kv_line("HP", ($target->{hp}//$target->{max_hp})."/".($target->{max_hp}//1)) . "   " .
+                 kv_line("Status",
+                    ($target->{poisoned} ? "Poisoned " : "") .
+                    ($target->{blind} ? "Blind " : "") .
+                    ($target->{env_blocked} ? "EnvBlocked " : "") .
+                    ""
+                 );
+    push @lines, $config{'systemcolor'}.section_header("Stats").$config{'themecolor'};
+    push @lines, kv_line("STR", ($target->{stats}{str}//0))."  ".
+                 kv_line("INT", ($target->{stats}{int}//0))."  ".
+                 kv_line("WIS", ($target->{stats}{wis}//0))."  ".
+                 kv_line("DEX", ($target->{stats}{dex}//0))."  ".
+                 kv_line("CON", ($target->{stats}{con}//0))."  ".
+                 kv_line("PIE", ($target->{stats}{pie}//0))."  ".
+                 kv_line("CHA", ($target->{stats}{cha}//0));
+    push @lines, $config{'systemcolor'}.section_header("Equipment").$config{'themecolor'};
+    my $has_equipped = 0;
+    foreach my $slot (qw(weapon armor shield ring)) {
+        if (my $inv = $target->{equipped}{$slot}) {
+            my $name = get_item_name($inv);
+            my $bonus = get_equipped_bonus($target, $slot);
+            my $bonus_str = $bonus ? " [+$bonus]" : "";
+            my $label = ucfirst($slot);
+            $label = "Weapon" if $slot eq 'weapon';
+            $label = "Armor " if $slot eq 'armor';
+            $label = "Shield" if $slot eq 'shield';
+            $label = "Ring  " if $slot eq 'ring';
+            push @lines, kv_line($label, ($name // "(unknown)").$bonus_str);
+            $has_equipped = 1;
+        }
+    }
+    push @lines, $config{'datacolor'}."  (none)".$config{'themecolor'} unless $has_equipped;
+
+    push @lines, $config{'systemcolor'}.section_header("Inventory").$config{'themecolor'};
+    if ($target->{inventory} && @{$target->{inventory}}) {
+        for my $i (0..$#{$target->{inventory}}) {
+            my $inv = $target->{inventory}[$i];
+            my $name = get_item_name($inv);
+            my $charges = get_item_charges($inv);
+            my $extra = "";
+            $extra .= " (x$charges)" if $charges > 1;
+            $extra .= " [container]" if $inv->{type} eq 'container';
+            push @lines, $config{'datacolor'}." - $name$extra".$config{'themecolor'};
+            if ($inv->{type} eq 'container' && $inv->{contents} && @{$inv->{contents}}) {
+                for my $citem (@{$inv->{contents}}) {
+                    my $cname = get_item_name($citem);
+                    my $ccharges = get_item_charges($citem);
+                    my $cextra = $ccharges > 1 ? " (x$ccharges)" : "";
+                    push @lines, $config{'datacolor'}."      - $cname$cextra".$config{'themecolor'};
+                }
+            }
+        }
+    } else {
+        push @lines, $config{'datacolor'}." (empty)".$config{'themecolor'};
+    }
+
+    if ($target->{learned_spells}) {
+        my $file = "$config{'home'}/$config{'data'}/spells.dat";
+        my $reclen = 216;
+        open(my $fh, "<:raw", $file);
+        my $idx = 1;
+        my @spells;
+        while (read($fh, my $buf, $reclen)) {
+            my $sname = substr($buf, 0, 30); $sname =~ s/[\0 ]+$//;
+            push @spells, $sname if player_knows_spell($target, $idx);
+            $idx++;
+        }
+        close($fh);
+        if (@spells) {
+            push @lines, $config{'systemcolor'}.section_header("Known Spells").$config{'themecolor'};
+            push @lines, $config{'datacolor'}." ".join($config{'themecolor'}.", ".$config{'datacolor'}, @spells).$config{'themecolor'};
+        }
+    }
+    push @lines, $config{'systemcolor'}.$border.$config{'themecolor'};
+
+    foreach my $line (@lines) {
+        writeline($line, 1);
+        $linecount++;
+        if ($linecount >= $rows - 1) {
+            my $resp = pause();
+            $linecount = 0;
+            last if defined $resp && uc($resp) eq 'Q';
+        }
+    }
+}
+
+sub show_status {
+    my $player = shift;
+    my $xp_next = xp_for_next_level($player);
+    my $line = sprintf(
+        "[Lv:%d HP:%d/%d G:%d XP:%d/%d] >",
+        $player->{level},
+        $player->{hp} // $player->{max_hp},
+        $player->{max_hp} // 1,
+        $player->{gold},
+        $player->{experience},
+        $xp_next
+    );
+    writeline($config{'promptcolor'}.$line.$config{'themecolor'}, 0);
+}
+
+sub sort_inventory {
+    my ($player) = @_;
+    $player->{inventory} = [
+        sort {
+            ($a->{type} cmp $b->{type})
+            ||
+            (lc(get_item_name($a)) cmp lc(get_item_name($b)))
+        } @{$player->{inventory}}
+    ];
+    writeline($config{'systemcolor'}."Inventory sorted.".$config{'themecolor'}, 1);
+}
+
+sub get_item_name {
+    my ($inv) = @_;
+    if ($inv->{type} eq 'treasure') {
+        my $treas = read_treasure_record($inv->{idx});
+        return $treas->{name} // '';
+    } elsif ($inv->{type} eq 'object') {
+        my $obj = read_object_record($inv->{idx});
+        return $obj->{name} // '';
+    } elsif ($inv->{type} eq 'container') {
+        my $treas = read_treasure_record($inv->{idx});
+        return $treas->{name} // '';
+    }
+    return '';
+}
+
+sub get_item_charges {
+    my ($inv) = @_;
+    return $inv->{charges} // 1;
+}
+
+sub set_item_charges {
+    my ($inv, $charges) = @_;
+    $inv->{charges} = $charges;
+}
+
+sub handle_player_retire {
+    my ($player) = @_;
+
+    add_to_ranklist($player);
+
+    writeline($config{'systemcolor'}."You retire from adventuring. Your legacy is recorded in the Hall of Fame.".$config{'themecolor'}, 1);
+    save_player($player);
+    exit(0);
+}
+
+sub show_ranklist_if_any {
+    my $rankfile = "$config{'home'}/$config{'data'}/ranklist.dat";
+    my $reclen = 128;
+    return unless -e $rankfile && -s $rankfile;
+
+    open(my $fh, "<:raw", $rankfile) or return;
+    my @ranks;
+    while (read($fh, my $buf, $reclen)) {
+        my $name = substr($buf, 0, 30); $name =~ s/[\0 ]+$//;
+        next unless $name;
+        push @ranks, $buf;
+    }
+    close($fh);
+
+    return unless @ranks; # Only show if there are players
+
+    show_ranklist();
+}
+
+sub ranklist_path {
+    return "$config{'home'}/$config{'data'}/ranklist.dat";
+}
+
+sub read_ranklist {
+    my $file = ranklist_path();
+    my $reclen = 128;
+    my @ranks;
+    return [] unless -e $file;
+    open(my $fh, "<", $file) or return [];
+    flock($fh, LOCK_SH);
+    while (read($fh, my $buf, $reclen)) {
+        my %rec;
+        $rec{name}      = substr($buf, 0, 30);   $rec{name}      =~ s/[\0 ]+$//;
+        $rec{class}     = substr($buf, 30, 16);  $rec{class}     =~ s/[\0 ]+$//;
+        $rec{race}      = substr($buf, 46, 16);  $rec{race}      =~ s/[\0 ]+$//;
+        $rec{level}     = unpack("s", substr($buf, 62, 2));
+        $rec{experience}= unpack("l", substr($buf, 64, 4));
+        $rec{gold}      = unpack("l", substr($buf, 68, 4));
+        $rec{date}      = substr($buf, 72, 16);  $rec{date}      =~ s/[\0 ]+$//;
+        $rec{alignment} = substr($buf, 88, 16);  $rec{alignment} =~ s/[\0 ]+$//;
+        $rec{proficiency}=substr($buf,104,16);   $rec{proficiency}=~ s/[\0 ]+$//;
+        $rec{desc}      = substr($buf,120,8);    $rec{desc}      =~ s/[\0 ]+$//;
+        push @ranks, \%rec if $rec{name};
+    }
+    flock($fh, LOCK_UN);
+    close($fh);
+    return \@ranks;
+}
+
+sub write_ranklist {
+    my ($ranks) = @_;
+    my $file = ranklist_path();
+    my $reclen = 128;
+    open(my $fh, "+>", $file) or open($fh, ">", $file) or return 0;
+    flock($fh, LOCK_EX);
+    foreach my $rec (@$ranks) {
+        my $buf = '';
+        $buf .= pack("a30", $rec->{name}      // '');
+        $buf .= pack("a16", $rec->{class}     // '');
+        $buf .= pack("a16", $rec->{race}      // '');
+        $buf .= pack("s",   $rec->{level}     // 1);
+        $buf .= pack("l",   $rec->{experience}// 0);
+        $buf .= pack("l",   $rec->{gold}      // 0);
+        $buf .= pack("a16", $rec->{date}      // '');
+        $buf .= pack("a16", $rec->{alignment} // '');
+        $buf .= pack("a16", $rec->{proficiency}//'');
+        $buf .= pack("a8",  $rec->{desc}      // '');
+        $buf .= "\0" x ($reclen - length($buf)) if length($buf) < $reclen;
+        print $fh $buf;
+    }
+    truncate($fh, tell($fh));
+    flock($fh, LOCK_UN);
+    close($fh);
+    return 1;
+}
+
+sub add_to_ranklist {
+    my ($player) = @_;
+    my $ranks = read_ranklist();
+    my $date = scalar localtime;
+    my %rec = (
+        name        => $player->{name},
+        class       => $player->{class},
+        race        => $player->{race},
+        level       => $player->{level},
+        experience  => $player->{experience},
+        gold        => $player->{gold},
+        date        => $date,
+        alignment   => $player->{alignment},
+        proficiency => $player->{proficiency},
+        desc        => '',
+    );
+
+   
+    my $found = 0;
+    for my $r (@$ranks) {
+        if (lc($r->{name}) eq lc($rec{name})) {
+            $found = 1;
+           
+            %$r = %rec;
+            last;
+        }
+    }
+    push @$ranks, \%rec unless $found;
+
+   
+    @$ranks = sort {
+        $b->{level} <=> $a->{level} ||
+        $b->{experience} <=> $a->{experience} ||
+        $b->{gold} <=> $a->{gold}
+    } @$ranks;
+
+   
+    splice(@$ranks, 20) if @$ranks > 20;
+
+    write_ranklist($ranks);
+}
+
+sub show_ranklist {
+    my $ranks = read_ranklist();
+    writeline($config{'systemcolor'}.section_header("Hall of Fame").$config{'themecolor'}, 1);
+    my $i = 1;
+    if (@$ranks) {
+        foreach my $rec (@$ranks[0..($#$ranks < 19 ? $#$ranks : 19)]) {
+            writeline(
+                $config{'datacolor'}.
+                sprintf("%2d.", $i)." ".
+                $config{'themecolor'}.$rec->{name}.$config{'datacolor'}." ".
+                $rec->{class}." ".
+                $rec->{race}." ".
+                "Lv:".$config{'themecolor'}.$rec->{level}.$config{'datacolor'}.
+                " Exp:".$config{'themecolor'}.$rec->{experience}.$config{'datacolor'}.
+                " Gold:".$config{'themecolor'}.$rec->{gold}.$config{'datacolor'}.
+                " ".$rec->{date}.$config{'themecolor'},
+                1
+            );
+            $i++;
+        }
+    } else {
+        writeline($config{'systemcolor'}."(No entries yet)" . $config{'themecolor'}, 1);
+    }
+    writeline($config{'systemcolor'}.$border.$config{'themecolor'}, 1);
+}
+
+sub bank_balance {
+    my ($player) = @_;
+    my $bal = $player->{bank} // 0;
+    writeline($config{'systemcolor'}."Your bank balance is: $bal gold".$config{'themecolor'}, 1);
+}
+
+sub bank_deposit {
+    my ($player, $amount) = @_;
+    $amount = int($amount);
+    if ($player->{gold} < $amount) {
+        writeline($config{'errorcolor'}."You don't have that much gold.".$config{'themecolor'});
+        return 0;
+    }
+    $player->{gold} -= $amount;
+    $player->{bank} ||= 0;
+    $player->{bank} += $amount;
+    writeline(kv_line("You deposit", "$amount gold in the bank."), 1);
+    add_to_ranklist($player);
+    return 1;
+}
+
+sub bank_withdraw {
+    my ($player, $amount) = @_;
+    $amount = int($amount);
+    $player->{bank} ||= 0;
+    if ($player->{bank} < $amount) {
+        writeline($config{'errorcolor'}."You don't have that much in the bank.".$config{'themecolor'});
+        return 0;
+    }
+    $player->{bank} -= $amount;
+    $player->{gold} += $amount;
+    writeline(kv_line("You withdraw", "$amount gold from the bank."), 1);
+    return 1;
+}
+
+sub toggle_brief_mode {
+    my $player = shift;
+    $player->{brief} = $player->{brief} ? 0 : 1;
+    writeline($config{'systemcolor'}."Brief mode ".($player->{brief} ? "enabled" : "disabled").".".$config{'themecolor'}, 1);
+}
+
+sub handle_look_direction {
+    my ($player, $room, $lookdir) = @_;
+    my %dir_map = (
+        n => "N", s => "S", e => "E", w => "W",
+        north => "N", south => "S", east => "E", west => "W",
+        ne => "NE", nw => "NW", se => "SE", sw => "SW",
+        u => "UP", d => "DOWN", up => "UP", down => "DOWN",
+        in => "IN", out => "OUT"
+    );
+    my $dir = $dir_map{lc($lookdir)} || uc($lookdir);
+    my $dest = $room->{exits}{$dir};
+    if ($dest && $dest > 0) {
+        my $look_room = read_room_record($dest);
+        writeline("", 1);
+        writeline($config{'systemcolor'}."[$lookdir] ".$look_room->{shortdesc}.$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}.$look_room->{longdesc}.$config{'themecolor'}, 1);
+        show_room_objects($look_room);
+        show_exits($look_room);
+    } else {
+        writeline($config{'systemcolor'}."You can't see that way.".$config{'themecolor'}, 1);
+    }
+}
+
+sub handle_look {
+    my ($player, $room) = @_;
+    $room = read_room_record($player->{room});
+    return if $room->{dark}; 
+    show_room_view($player, $room);
+}
+
+sub handle_rest_command {
+    my ($player) = @_;
+    my $room = read_room_record($player->{room});
+    unless ($room->{feature} && $room->{feature} eq 'Inn') {
+        writeline($config{'systemcolor'}."You must be at an Inn to rest.".$config{'themecolor'}, 1);
+        return;
+    }
+    reset_spell_slots($player);
+    my $max_hp = $player->{max_hp} // 1;
+    my $heal = int($player->{level} / 2) + 2;
+    my $before = $player->{hp};
+    $player->{hp} += $heal;
+    $player->{hp} = $max_hp if $player->{hp} > $max_hp;
+    my $actual_heal = $player->{hp} - $before;
+
+    my %rest_msg = (
+        MagicUser => "You feel magical energies surge within you.",
+        Cleric    => "You feel divine power flow through you.",
+        Druid     => "You feel the power of nature renew you.",
+        Paladin   => "You feel a holy light strengthen you.",
+        Ranger    => "You feel the wilds grant you new vigor.",
+        Thief     => "You feel alert and ready for action.",
+        Fighter   => "You feel your strength return.",
+    );
+    my $msg = $rest_msg{$player->{class}} || "You feel rested and renewed.";
+    writeline($config{'systemcolor'}."$msg".$config{'themecolor'}, 1);
+    writeline($config{'systemcolor'}."You rest and recover $actual_heal HP.".$config{'themecolor'}, 1);
+    save_player($player);
+}
+
+sub classic_stat_gain {
+    my ($player) = @_;
+    my %prime = (
+        Fighter   => 'str',
+        Paladin   => 'str',
+        Ranger    => 'dex',
+        MagicUser => 'int',
+        Thief     => 'dex',
+        Cleric    => 'wis',
+        Druid     => 'wis',
+    );
+    my @stats = qw(str int wis dex con pie cha);
+    my $roll = 1 + int(rand(10));
+    my $stat;
+    if ($roll <= 6) {
+        # No stat gain
+        return undef;
+    } elsif ($roll <= 8) {
+        $stat = $prime{$player->{class}} || 'str';
+    } elsif ($roll == 9) {
+        my @up_stats = grep { $_ ne 'con' } @stats;
+        $stat = $up_stats[int(rand(@up_stats))];
+    } else {
+        # 10: player chooses, or random if automated
+        $stat = $stats[int(rand(@stats))];
+    }
+    $player->{stats}{$stat}++ if $stat && $player->{stats}{$stat} < 18;
+    return $stat;
+}
+
+sub bless_player {
+    my ($player) = @_;
+    $player->{blessed} = 1;
+    $player->{bless_expiry} = time() + 3600; # 1 hour
+    $player->{stats}{luck} += 2;
+    writeline($config{'systemcolor'}."You feel blessed! Luck increased.".$config{'themecolor'}, 1);
+    save_player($player);
+}
+
+sub curse_player {
+    my ($player) = @_;
+    $player->{cursed} = 1;
+    $player->{curse_expiry} = time() + 3600;
+    $player->{stats}{luck} -= 2;
+    writeline($config{'errorcolor'}."A dark cloud surrounds you. Luck decreased.".$config{'themecolor'}, 1);
+    save_player($player);
+}
+
+sub fix_player {
+    my ($player) = @_;
+    delete $player->{cursed};
+    delete $player->{blessed};
+    delete $player->{curse_expiry};
+    delete $player->{bless_expiry};
+    $player->{stats}{luck} = 10 unless defined $player->{stats}{luck};
+    writeline($config{'systemcolor'}."All curses and blessings removed.".$config{'themecolor'}, 1);
+    save_player($player);
+}
+
+sub picklock {
+    my ($player, $target) = @_;
+    my $obj = find_object_in_room_or_inventory($player, $target);
+    unless ($obj && $obj->{locked}) {
+        writeline($config{'errorcolor'}."No locked $target found.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    my $skill = ($player->{class} =~ /Thief/i) ? 5 : 0;
+    my $roll = int(rand(20)) + 1 + $skill + int(($player->{stats}{dex} // 10) - 10);
+    if ($roll > 15) {
+        $obj->{locked} = 0;
+        writeline($config{'systemcolor'}."You pick the lock on $target!".$config{'themecolor'}, 1);
+        return 1;
+    } else {
+        writeline($config{'errorcolor'}."You fail to pick the lock.".$config{'themecolor'}, 1);
+        if ($obj->{trap}) {
+            my $trapdmg = int(rand(6)) + 1;
+            $player->{hp} -= $trapdmg;
+            writeline($config{'errorcolor'}."A trap triggers! You take $trapdmg damage.".$config{'themecolor'}, 1);
+            save_player($player);
+        }
+        return 0;
+    }
+}
+
+sub teleport_player {
+    my ($player, $dest) = @_;
+    my $max_room = get_max_room();
+    if ($dest < 1 || $dest > $max_room) {
+        writeline($config{'errorcolor'}."Invalid room number.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    photonmud_leave_room($player, $player->{room}, "teleport");
+    $player->{room} = $dest;
+    record_node_session($player);
+    photonmud_enter_room($player, $dest, undef);
+    writeline($config{'systemcolor'}."Teleported to room $dest.".$config{'themecolor'}, 1);
+    return 1;
+}
+
+# --- Atomic Trade System ---
+
+sub trade_request_file {
+    my ($from, $to) = @_;
+    return "$config{transient}/trade_" . sha1_hex(lc($from)) . "_" . sha1_hex(lc($to)) . ".dat";
+}
+
+sub trade_state_file {
+    my ($from, $to) = @_;
+    return "$config{transient}/trade_state_" . sha1_hex(lc($from)) . "_" . sha1_hex(lc($to)) . ".dat";
+}
+
+sub initiate_trade {
+    my ($from, $to, $offer, $request) = @_;
+    my $file = trade_request_file($from, $to);
+    lockfile($file);
+    open(my $fh, ">", $file) or do { unlockfile($file); return 0; };
+    print $fh join("|", $from, $to, $offer, $request);
+    close($fh);
+    unlockfile($file);
+    write_session_message($to, "$from wants to trade: offering '$offer' for '$request'. Type TRADE ACCEPT $from or TRADE DECLINE $from.");
+    writeline($config{'systemcolor'}."Trade request sent to $to.".$config{'themecolor'}, 1);
+    return 1;
+}
+
+sub handle_trade_accept {
+    my ($to, $from) = @_;
+    my $file = trade_request_file($from, $to);
+    unless (-e $file) {
+        writeline($config{'errorcolor'}."No trade request from $from.".$config{'themecolor'}, 1);
+        return;
+    }
+    lockfile($file);
+    open(my $fh, "<", $file) or do { unlockfile($file); return; };
+    my $line = <$fh>;
+    close($fh);
+    unlockfile($file);
+    my ($from_user, $to_user, $offer, $request) = split(/\|/, $line, 4);
+    my $from_player = load_player($from_user);
+    my $to_player = load_player($to_user);
+
+    # Lock both players for atomicity
+    my $from_lock = player_save_path($from_user) . ".lock";
+    my $to_lock   = player_save_path($to_user) . ".lock";
+    lockfile($from_lock);
+    lockfile($to_lock);
+
+    # Validate both still have the items/gold
+    my $offer_ok = ($offer =~ /^\d+ gold$/i)
+        ? ($from_player->{gold} >= $1)
+        : find_object_in_inventory($from_player, $offer);
+    my $request_ok = ($request =~ /^\d+ gold$/i)
+        ? ($to_player->{gold} >= $1)
+        : find_object_in_inventory($to_player, $request);
+
+    if (!$offer_ok || !$request_ok) {
+        unlockfile($from_lock);
+        unlockfile($to_lock);
+        writeline($config{'errorcolor'}."Trade failed: one or both players lack the required item/gold.".$config{'themecolor'}, 1);
+        write_session_message($from_user, "Trade with $to_user failed: missing item/gold.");
+        unlink $file;
+        return;
+    }
+
+    # Perform the exchange
+    if ($offer =~ /^(\d+)\s+gold$/i) {
+        $from_player->{gold} -= $1;
+        $to_player->{gold} += $1;
+    } else {
+        remove_item_from_inventory($from_player, $offer);
+        my $item = find_object_in_inventory($from_player, $offer);
+        add_item_to_inventory($to_player, $item) if $item;
+    }
+    if ($request =~ /^(\d+)\s+gold$/i) {
+        $to_player->{gold} -= $1;
+        $from_player->{gold} += $1;
+    } else {
+        remove_item_from_inventory($to_player, $request);
+        my $item = find_object_in_inventory($to_player, $request);
+        add_item_to_inventory($from_player, $item) if $item;
+    }
+
+    save_player($from_player);
+    save_player($to_player);
+
+    unlockfile($from_lock);
+    unlockfile($to_lock);
+
+    writeline($config{'systemcolor'}."Trade completed with $from_user.".$config{'themecolor'}, 1);
+    write_session_message($from_user, "Trade completed with $to_user.");
+    unlink $file;
+}
+
+sub handle_trade_decline {
+    my ($to, $from) = @_;
+    my $file = trade_request_file($from, $to);
+    if (-e $file) {
+        unlink $file;
+        write_session_message($from, "$to declined your trade request.");
+        writeline($config{'systemcolor'}."Trade declined.".$config{'themecolor'}, 1);
+    } else {
+        writeline($config{'errorcolor'}."No trade request from $from.".$config{'themecolor'}, 1);
+    }
+}
+
+# --- Party/Group System ---
+
+sub party_file {
+    my ($leader) = @_;
+    my $hash = sha1_hex(lc($leader));
+    return "$config{home}/$config{data}/party_$hash.dat";
+}
+
+sub party_members {
+    my ($leader) = @_;
+    my $file = party_file($leader);
+    return () unless -e $file;
+    open(my $fh, "<", $file);
+    flock($fh, LOCK_SH);
+    my @members = grep { /\S/ } map { chomp; $_ } <$fh>;
+    flock($fh, LOCK_UN);
+    close($fh);
+    return @members;
+}
+
+sub party_leader_of {
+    my ($player) = @_;
+    my $data_dir = "$config{home}/$config{data}";
+    opendir(my $dh, $data_dir);
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^party_(.+)\.dat$/;
+        my $leader = $1;
+        my @members = party_members($leader);
+        if (grep { lc($_) eq lc($player) } @members) {
+            closedir($dh);
+            return $leader;
+        }
+    }
+    closedir($dh);
+    return;
+}
+
+sub party_invite {
+    my ($leader, $invitee) = @_;
+    my $file = party_file($leader);
+    open(my $fh, ">>", $file);
+    flock($fh, LOCK_EX);
+    print $fh "$invitee\n";
+    flock($fh, LOCK_UN);
+    close($fh);
+    write_session_message($invitee, "$leader has invited you to join their party. Type PARTY ACCEPT $leader to join.");
+    writeline($config{'systemcolor'}."Invitation sent to $invitee.".$config{'themecolor'}, 1);
+}
+
+sub party_accept {
+    my ($player, $leader) = @_;
+    my $file = party_file($leader);
+    unless (-e $file) {
+        writeline($config{'errorcolor'}."No party led by $leader.".$config{'themecolor'}, 1);
+        return;
+    }
+    open(my $fh, "+<", $file);
+    flock($fh, LOCK_EX);
+    my @members = grep { /\S/ } map { chomp; $_ } <$fh>;
+    if (grep { lc($_) eq lc($player) } @members) {
+        flock($fh, LOCK_UN);
+        close($fh);
+        writeline($config{'systemcolor'}."You are already in $leader\'s party.".$config{'themecolor'}, 1);
+        return;
+    }
+    seek($fh, 0, 2); # append
+    print $fh "$player\n";
+    flock($fh, LOCK_UN);
+    close($fh);
+    write_session_message($leader, "$player has joined your party.");
+    writeline($config{'systemcolor'}."You have joined $leader\'s party.".$config{'themecolor'}, 1);
+}
+
+sub party_leave {
+    my ($player) = @_;
+    my $leader = party_leader_of($player);
+    unless ($leader) {
+        writeline($config{'errorcolor'}."You are not in a party.".$config{'themecolor'}, 1);
+        return;
+    }
+    my $file = party_file($leader);
+    open(my $fh, "+<", $file);
+    flock($fh, LOCK_EX);
+    my @members = grep { /\S/ } map { chomp; $_ } <$fh>;
+    @members = grep { lc($_) ne lc($player) } @members;
+    seek($fh, 0, 0);
+    print $fh "$_\n" for @members;
+    truncate($fh, tell($fh));
+    flock($fh, LOCK_UN);
+    close($fh);
+    write_session_message($leader, "$player has left your party.");
+    writeline($config{'systemcolor'}."You have left $leader\'s party.".$config{'themecolor'}, 1);
+}
+
+sub party_list {
+    my ($player) = @_;
+    my $leader = party_leader_of($player) // $player->{name};
+    my @members = party_members($leader);
+    writeline($config{'systemcolor'}."Party led by $leader: ".join(", ", @members).$config{'themecolor'}, 1);
+}
+
+sub party_say {
+    my ($player, $msg) = @_;
+    my $leader = party_leader_of($player->{name}) // $player->{name};
+    my @members = party_members($leader);
+    foreach my $m (@members) {
+        write_session_message($m, "[Party] $player->{name}: $msg");
+    }
+    writeline($config{'systemcolor'}."[Party] $player->{name}: $msg".$config{'themecolor'}, 1);
+}
+
+# --- Emotes ---
+
+sub handle_emote_command {
+    my ($player, $room, $msg) = @_;
+    my $emote = $msg;
+    $emote =~ s/^\/(?:me|emote)\s*//i;
+    my $broadcast = $player->{name} . " " . $emote;
+    broadcast_room_message($player->{room}, $player->{name}, $config{'usercolor'}.$broadcast.$config{'themecolor'});
+    writeline($config{'usercolor'}.$broadcast.$config{'themecolor'}, 1);
+}
+
+return 1;

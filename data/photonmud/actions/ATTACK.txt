@@ -1,0 +1,51 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR ATTACK Command - Engage in Combat @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  ATTACK <target>
+
+@DATACLR What it does:@THEMECLR
+  ATTACK initiates combat with a monster or player in your current room.
+  You must specify the target's name (e.g., ATTACK GOBLIN or ATTACK BOB).
+  If multiple targets match, the closest match is chosen.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Combat is turn-based. Initiative is rolled (d20 + DEX mod) for all.
+  - On your turn, ATTACK performs a standard melee or ranged attack.
+  - You may only attack if you are not already in combat.
+  - PvP (player vs player) and PvE (player vs monster) are both supported.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - Attack Roll: d20 + STR/DEX modifier + proficiency + magic + bonuses
+    - Melee: STR/DEX average (rounded down)
+    - Ranged: DEX modifier
+    - Proficiency: +2 if using your chosen weapon type
+    - Magic weapons: add their bonus to hit and damage
+  - Target's Armor Class (AC): 10 + DEX mod + armor/shield/magic
+
+@DATACLR Outcome:@THEMECLR
+  - If your attack roll >= target's AC, you hit and roll damage.
+  - Damage: Weapon dice + STR/DEX mod + proficiency + magic
+  - Minimum damage is always 1.
+  - If you reduce a monster's HP to 0, it dies and may drop loot.
+  - If you reduce a player's HP to 0, they are defeated and respawn.
+
+@DATACLR Class Features:@THEMECLR
+  - Fighters, Paladins, and Rangers gain extra attacks at higher levels.
+  - Thieves can use BACKSTAB for extra damage (see BACKSTAB).
+  - MagicUsers and Clerics may attack, but are less effective in melee.
+
+@DATACLR Tips:@THEMECLR
+  - Use LOOK to see who/what is in the room before attacking.
+  - Use STATUS to check your own stats and HP.
+  - Use SPELLS or special actions for tactical advantage.
+
+@DATACLR Example:@THEMECLR
+  ATTACK GOBLIN
+    Rolls d20 + bonuses vs. goblin's AC. If hit, rolls weapon damage.
+
+@DATACLR See also:@THEMECLR
+  BACKSTAB, LUNGE, THRUST, CHARGE, DODGE, PARRY, GUARD, SHIELD, COUNTER
+-------------------------------------------------------------------------------

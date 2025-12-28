@@ -1,0 +1,39 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR USERS/WHO Command - List All Online Players @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  USERS
+  WHO
+
+@DATACLR What it does:@THEMECLR
+  USERS (or WHO) displays a list of all players currently online in the realm,
+  along with their level, class, and current location (if visible).
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Shows all connected players, not just those in your room.
+  - Some players may be hidden or invisible (admin or spell effects).
+  - Useful for finding friends, rivals, or potential trading partners.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You see a list of online players and their basic info.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use USERS/WHO the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Use USERS to see if your friends are online.
+  - Look for high-level players for help or competition.
+
+@DATACLR Example:@THEMECLR
+  USERS
+    Alice (Fighter, Level 5) - Town Plaza
+    Bob (Cleric, Level 3) - Castle Gate
+
+@DATACLR See also:@THEMECLR
+  HERE, TALK, STATUS
+-------------------------------------------------------------------------------

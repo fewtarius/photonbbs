@@ -1,0 +1,128 @@
+#!/bin/bash
+
+export PATH="/bin:/sbin:/usr/bin:/usr/sbin:/doorexec:/usr/doorexec:$PATH"
+
+###
+### Set up the PhotonBBS data files to be persistent.
+###
+
+if [ -d '/opt/photonbbs/data' ]
+then
+  if [ ! -e '/appdata/.migrated' ]
+  then
+    mv /opt/photonbbs/data/* /appdata
+  fi
+  rm -rf /opt/photonbbs/data
+  ln -s /appdata /opt/photonbbs/data
+  touch /appdata/.migrated
+fi
+
+# Ensure photonmud data directory exists and has base files
+if [ ! -d '/appdata/photonmud' ]
+then
+  mkdir -p /appdata/photonmud
+  # Copy default data files from the image if available
+  if [ -d '/tmp/photonbbs-data/photonmud' ]
+  then
+    cp -r /tmp/photonbbs-data/photonmud/* /appdata/photonmud/
+  fi
+fi
+chown -R nobody:nobody /appdata/photonmud 2>/dev/null || true
+
+if [ ! -h '/opt/photonbbs/doorexec' ]
+then
+  if [ ! -d '/appdata/doorexec' ]
+  then
+    mv /opt/photonbbs/doorexec /appdata
+  fi
+  rm -rf /opt/photonbbs/doorexec
+  ln -s /appdata/doorexec /opt/photonbbs
+fi
+
+if [ ! -h '/opt/photonbbs/doors' ]
+then
+  if [ ! -d '/appdata/doors' ]
+  then
+    mv /opt/photonbbs/doors /appdata
+  fi
+  rm -rf /opt/photonbbs/doors
+  ln -s /appdata/doors /opt/photonbbs
+fi
+
+###
+### Create the nodeinfo directory, this is needed for doors to work.
+###
+
+if [ ! -d '/dev/shm/photonbbs/doors/nodes' ]
+then
+  mkdir -p /dev/shm/photonbbs/doors/nodes
+fi
+# Ensure the BBS user can write to this directory
+chown -R nobody:nobody /dev/shm/photonbbs
+chmod -R 777 /dev/shm/photonbbs
+
+# Ensure photonmud transient directory exists with proper permissions
+if [ ! -d '/dev/shm/photonmud' ]
+then
+  mkdir -p /dev/shm/photonmud/room_players
+fi
+chown -R nobody:nobody /dev/shm/photonmud
+chmod -R 777 /dev/shm/photonmud
+
+###
+### Link the node info directory into the doors directory passed to dosemu
+### to make it available to the doors.
+###
+
+if [ ! -L '/appdata/doors/nodes' ]
+then
+  ln -sf /dev/shm/photonbbs/doors/nodes /appdata/doors/nodes
+fi
+
+###
+### Dosemu
+###
+
+if [ ! -e '/appdata/.dosemu/drive_c' ]
+then
+  mkdir -p /appdata/.dosemu/drive_c
+fi
+
+if [ ! -e '/appdata/.dosemu/drives' ]
+then
+  mkdir -p /appdata/.dosemu/drives
+fi
+
+if [ ! -h '/appdata/.dosemu/drives/d' ]
+then
+  ln -s /usr/share/dosemu/drive_z /appdata/.dosemu/drives/d
+fi
+
+if [ ! -h '/appdata/.dosemu/drives/c' ]
+then
+  ln -s /appdata/.dosemu/drive_c /appdata/.dosemu/drives/c 2>/dev/null
+fi
+
+if [ ! -h '/opt/photonbbs/.dosemu' ]
+then
+  ln -s /appdata/.dosemu /opt/photonbbs
+fi
+
+###
+### Move /etc/default/photonbbs to /appdata
+###
+
+if [ ! -h "/appdata/default/photonbbs" ]
+then
+  mkdir /appdata/default 2>/dev/null
+  mv /etc/default/photonbbs /appdata/default 2>/dev/null
+  ln -s /appdata/default/photonbbs /etc/default 2>/dev/null
+fi
+
+### The BBS won't manage this since it's a link
+chown -R nobody:nobody /appdata /opt/photonbbs/data
+
+# Start PhotonBBS daemon (handles telnet connections and TTY management)
+
+/opt/photonbbs/photonbbs
+exit 0

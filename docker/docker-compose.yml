@@ -1,7 +1,7 @@
 version: '2'
 services:
   photonbbs:
-    build: .
+    build: ..
     image: fewtarius/photonbbs
     hostname: photonbbs
     network_mode: bridge
@@ -12,11 +12,12 @@ services:
     - 23:23/tcp
     privileged: true
     tty: true
+    environment:
+    - PHOTONMUD_DEBUG=0
+    - PHOTON_MONSTER_DEBUG=0
+    - PHOTON_ROOMS_DEBUG=0
     volumes:
     - appdata:/appdata:rw
 
 volumes:
   appdata:
-    driver: rancher-nfs
-    driver_opts:
-      onRemove: retain

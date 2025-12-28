@@ -1,0 +1,37 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR HERE Command - List Players in the Same Room @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  HERE
+
+@DATACLR What it does:@THEMECLR
+  HERE lists all players currently present in your room. Use HERE to see who
+  you can interact with, trade, or team up with.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Shows the names of all players in the same room, except yourself.
+  - Does not list monsters or NPCs (see LOOK for those).
+  - Useful for coordinating actions or starting conversations.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You see a list of player names present in your room.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use HERE the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Use HERE before attempting to TALK, TRADE, or ATTACK another player.
+  - If you are alone, consider moving to a more populated area.
+
+@DATACLR Example:@THEMECLR
+  HERE
+    Also here: Alice, Bob, and Charlie
+
+@DATACLR See also:@THEMECLR
+  USERS, LOOK, TALK
+-------------------------------------------------------------------------------

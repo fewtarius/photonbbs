@@ -1,0 +1,48 @@
+#!/usr/bin/perl
+# PhotonBBS DND actions.dat record dumper (matches DNDDOOR.BAS ActionType)
+use strict;
+use warnings;
+use Fcntl qw(:seek);
+
+my $file = shift || 'data/photonmud/actions.dat';
+my $reclen = 60; # ActionType is 14 shorts (2 bytes each) + 1 float (4 bytes) = 28 + 28 + 4 = 60 bytes
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+my $record_num = 1;
+my $offset = 0;
+
+while (1) {
+    seek($fh, $offset, SEEK_SET);
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    # If the record is all zeros, treat as empty/deleted
+    if ($buf =~ /^\0+$/) {
+        print "Record $record_num: EMPTY/DELETED\n\n";
+        $record_num++;
+        $offset += $reclen;
+        next;
+    }
+
+    print "Record $record_num:\n";
+    print "Raw buffer hex: ", unpack("H*", substr($buf, 0, 32)), "\n";
+
+    my @fields = qw(
+        attr1 attr2 encounter_rate fumble health_rate hitpoints inventory level
+        monster_talk monster_trigger restrictions rust_rate spell_trigger steal_rate
+    );
+    my %action;
+    @action{@fields} = unpack("sssss ssss ssss", substr($buf, 0, 28));
+    $action{teleport} = unpack("f<", substr($buf, 56, 4));
+
+    foreach my $k (@fields, 'teleport') {
+        printf("  %-15s : %s\n", $k, defined($action{$k}) ? $action{$k} : '');
+    }
+    print "\n";
+
+    $record_num++;
+    $offset += $reclen;
+}
+close($fh);

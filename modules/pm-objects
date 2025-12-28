@@ -1,0 +1,2020 @@
+use Fcntl qw(:flock);
+
+sub save_object {
+    my ($obj, $objnum) = @_;
+    my $file = "$config{'home'}/$config{'data'}/objects.dat";
+    my $reclen = 256;
+    $objnum //= $obj->{id} // $obj->{num};
+    return 0 unless $objnum && $objnum > 0;
+
+    open(my $fh, "+<:raw", $file) or return 0;
+    flock($fh, LOCK_EX);
+
+    seek($fh, ($objnum - 1) * ($reclen + 4), SEEK_SET);
+
+    my $buf = '';
+    $buf .= pack("a30", $obj->{name}      // '');
+    $buf .= pack("a30", $obj->{shortname} // '');
+    $buf .= pack("f<",  $obj->{roomlink}  // 0);
+    $buf .= pack("s",   $obj->{invisible} // 0);
+    $buf .= pack("s",   $obj->{jailtrap}  // 0);
+    $buf .= pack("s",   $obj->{doorlock}  // 0);
+    $buf .= pack("s",   $obj->{destination}//0);
+    $buf .= pack("s",   $obj->{permanent} // 0);
+    $buf .= pack("s",   $obj->{hidden}    // 0);
+    $buf .= pack("s",   $obj->{closed}    // 0);
+    $buf .= pack("s",   $obj->{keyed}     // 0);
+    $buf .= pack("s",   $obj->{relocks}   // 0);
+    $buf .= pack("a80", $obj->{longdesc}  // '');
+    $buf .= pack("s",   $obj->{fromhour}  // 0);
+    $buf .= pack("s",   $obj->{frommin}   // 0);
+    $buf .= pack("s",   $obj->{tohour}    // 0);
+    $buf .= pack("s",   $obj->{tomin}     // 0);
+    $buf .= pack("s",   $obj->{lightroom} // 0);
+    $buf .= pack("s",   $obj->{lighttime} // 0);
+    $buf .= pack("a80", $obj->{shortdesc} // '');
+    $buf .= pack("f<",  $obj->{teleport}  // 0);
+    $buf .= pack("s",   $obj->{trap}      // 0);
+
+    $buf .= "\0" x ($reclen - length($buf)) if length($buf) < $reclen;
+
+    print $fh $buf;
+    flock($fh, LOCK_UN);
+    close($fh);
+    return 1;
+}
+
+sub read_object_record {
+    my ($objnum) = @_;
+    
+    # Check cache first
+    my $cached = data_cache_get('objects', $objnum);
+    return $cached if defined $cached;
+    
+    my $file = "$config{'home'}/$config{'data'}/objects.dat";
+    my $reclen = 256;
+
+    open(my $fh, "<:raw", $file) or return {};
+    flock($fh, LOCK_SH);
+
+    seek($fh, ($objnum - 1) * ($reclen + 4), SEEK_SET);
+    read($fh, my $buf, $reclen);
+    flock($fh, LOCK_UN);
+    close($fh);
+
+    return {} if !$buf || $buf =~ /^\0+$/;
+
+    my $offset = 0;
+    if (substr($buf, 0, 2) eq "\0\0" && substr($buf, 2, 1) =~ /[ -~]/) {
+        $offset = 2;
+    }
+
+    my %obj;
+    $obj{name}        = substr($buf,   $offset + 0, 30); $obj{name}        =~ s/[\0 ]+$//;
+    $obj{shortname}   = substr($buf,  $offset + 30, 30); $obj{shortname}   =~ s/[\0 ]+$//;
+    $obj{roomlink}    = unpack("f<", substr($buf, $offset + 60, 4));
+    $obj{invisible}   = unpack("s",  substr($buf, $offset + 64, 2));
+    $obj{jailtrap}    = unpack("s",  substr($buf, $offset + 66, 2));
+    $obj{doorlock}    = unpack("s",  substr($buf, $offset + 68, 2));
+    $obj{destination} = unpack("s",  substr($buf, $offset + 70, 2));
+    $obj{permanent}   = unpack("s",  substr($buf, $offset + 72, 2));
+    $obj{hidden}      = unpack("s",  substr($buf, $offset + 74, 2));
+    $obj{closed}      = unpack("s",  substr($buf, $offset + 76, 2));
+    $obj{keyed}       = unpack("s",  substr($buf, $offset + 78, 2));
+    $obj{relocks}     = unpack("s",  substr($buf, $offset + 80, 2));
+    $obj{longdesc}    = substr($buf, $offset + 82, 80);  $obj{longdesc}    =~ s/[\0 ]+$//;
+    $obj{fromhour}    = unpack("s",  substr($buf, $offset + 162, 2));
+    $obj{frommin}     = unpack("s",  substr($buf, $offset + 164, 2));
+    $obj{tohour}      = unpack("s",  substr($buf, $offset + 166, 2));
+    $obj{tomin}       = unpack("s",  substr($buf, $offset + 168, 2));
+    $obj{lightroom}   = unpack("s",  substr($buf, $offset + 170, 2));
+    $obj{lighttime}   = unpack("s",  substr($buf, $offset + 172, 2));
+    $obj{shortdesc}   = substr($buf, $offset + 174, 80); $obj{shortdesc}   =~ s/[\0 ]+$//;
+    $obj{teleport}    = unpack("f<", substr($buf, $offset + 252, 4));
+    $obj{trap}        = unpack("s",  substr($buf, $offset + 254, 2));
+
+    # Cache the result
+    data_cache_set('objects', $objnum, \%obj);
+    
+    return \%obj;
+}
+
+sub read_treasure_record {
+    my ($treasnum) = @_;
+    
+    # Check cache first
+    my $cached = data_cache_get('treasures', $treasnum);
+    return $cached if defined $cached;
+    
+    my $file = "$config{'home'}/$config{'data'}/treasure.dat";
+    my $reclen = 140;
+
+    open(my $fh, "<:raw", $file) or do {
+        return {};
+    };
+
+    seek($fh, ($treasnum - 1) * $reclen, SEEK_SET);
+    read($fh, my $buf, $reclen);
+    close($fh);
+
+   
+    if ($buf =~ /^\0+$/) {
+        return {};
+    }
+
+   
+    my $offset = 0;
+    if (substr($buf, 0, 2) eq "\0\0" && substr($buf, 2, 1) =~ /[ -~]/) {
+        $offset = 2;
+    }
+
+    my %treas;
+    $treas{name}        = substr($buf,   $offset + 0, 30);  $treas{name}      =~ s/[\0 ]+$//;
+    $treas{shortname}   = substr($buf,  $offset + 30, 30);  $treas{shortname} =~ s/[\0 ]+$//;
+    $treas{weight}      = unpack("s", substr($buf, $offset + 60, 2));
+    $treas{gold}        = unpack("s", substr($buf, $offset + 62, 2));
+    $treas{spell}       = unpack("s", substr($buf, $offset + 64, 2));
+    $treas{plus}        = unpack("s", substr($buf, $offset + 66, 2));
+    $treas{coin}        = unpack("s", substr($buf, $offset + 68, 2));
+    $treas{keyed}       = unpack("s", substr($buf, $offset + 70, 2));
+    $treas{scroll}      = unpack("s", substr($buf, $offset + 72, 2));
+    $treas{charges}     = unpack("s", substr($buf, $offset + 74, 2));
+    $treas{potion}      = unpack("s", substr($buf, $offset + 76, 2));
+    $treas{armor}       = unpack("s", substr($buf, $offset + 78, 2));
+    $treas{shield}      = unpack("s", substr($buf, $offset + 80, 2));
+    $treas{weapon}      = unpack("s", substr($buf, $offset + 82, 2));
+    $treas{container}   = unpack("s", substr($buf, $offset + 84, 2));
+    $treas{type}        = unpack("s", substr($buf, $offset + 86, 2));
+    $treas{locked}      = unpack("s", substr($buf, $offset + 88, 2));
+    $treas{closed}      = unpack("s", substr($buf, $offset + 90, 2));
+    $treas{loadable}    = unpack("s", substr($buf, $offset + 92, 2));
+    $treas{ammunition}  = unpack("s", substr($buf, $offset + 94, 2));
+    $treas{ammoloads}   = unpack("s", substr($buf, $offset + 96, 2));
+    $treas{invisible}   = unpack("s", substr($buf, $offset + 98, 2));
+    $treas{permanent}   = unpack("s", substr($buf, $offset +100, 2));
+    $treas{proficiency} = unpack("s", substr($buf, $offset +102, 2));
+    $treas{ringtype}    = unpack("s", substr($buf, $offset +104, 2));
+    $treas{ringspell}   = unpack("s", substr($buf, $offset +106, 2));
+    $treas{edible}      = unpack("s", substr($buf, $offset +108, 2));
+    $treas{rustable}    = unpack("s", substr($buf, $offset +110, 2));
+    $treas{rustpercent} = unpack("s", substr($buf, $offset +112, 2));
+    $treas{stealable}   = unpack("s", substr($buf, $offset +114, 2));
+    $treas{stealpercent}= unpack("s", substr($buf, $offset +116, 2));
+    $treas{launchable}  = unpack("s", substr($buf, $offset +118, 2));
+    $treas{launchloads} = unpack("s", substr($buf, $offset +120, 2));
+    $treas{launchammo}  = unpack("s", substr($buf, $offset +122, 2));
+    $treas{movable}     = unpack("s", substr($buf, $offset +124, 2));
+    $treas{vehicle}     = unpack("s", substr($buf, $offset +126, 2));
+    $treas{vehiclehits} = unpack("s", substr($buf, $offset +128, 2));
+    $treas{vehicletype} = unpack("s", substr($buf, $offset +130, 2));
+    $treas{lighttype}   = unpack("s", substr($buf, $offset +132, 2));
+    $treas{lightcharges}= unpack("s", substr($buf, $offset +134, 2));
+    $treas{fueltype}    = unpack("s", substr($buf, $offset +136, 2));
+    $treas{fuelcharges} = unpack("s", substr($buf, $offset +138, 2));
+    
+    # Cache the result
+    data_cache_set('treasures', $treasnum, \%treas);
+    
+    return \%treas;
+}
+
+sub find_treasure_index_by_name {
+    my ($name) = @_;
+    my $try_name = normalize_item_name($name);
+    for my $i (1..1000) {
+        my $treas = read_treasure_record($i);
+        return $i if $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+    }
+    return 0;
+}
+
+sub identify_item {
+    my ($player, $itemname) = @_;
+    my $try_name = normalize_item_name($itemname);
+    for my $inv (@{$player->{inventory}}) {
+        if ($inv->{type} eq 'treasure') {
+            my $treas = read_treasure_record($inv->{idx});
+            next unless $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+            
+            writeline($config{'systemcolor'}."Identification: ".$treas->{name}, 1);
+            writeline($config{'datacolor'}."Type: ".(
+                $treas->{weapon} ? "Weapon " : ""
+            ).(
+                $treas->{armor} ? "Armor " : ""
+            ).(
+                $treas->{shield} ? "Shield " : ""
+            ).(
+                $treas->{potion} ? "Potion " : ""
+            ).(
+                $treas->{scroll} ? "Scroll " : ""
+            ).(
+                $treas->{ringtype} ? "Ring " : ""
+            ).(
+                $treas->{container} ? "Container " : ""
+            ).(
+                $treas->{edible} ? "Edible " : ""
+            ).(
+                $treas->{lighttype} ? "Light " : ""
+            ).(
+                $treas->{loadable} ? "Loadable " : ""
+            ).(
+                $treas->{launchable} ? "Launchable " : ""
+            ).(
+                $treas->{vehicle} ? "Vehicle " : ""
+            ), 1);
+            
+            writeline($config{'datacolor'}."Plus: ".$treas->{plus}." Charges: ".($treas->{charges} // 0), 1);
+            writeline($config{'datacolor'}."Weight: ".$treas->{weight}." Gold Value: ".$treas->{gold}, 1);
+            
+            if ($treas->{lighttype} && $treas->{lightcharges}) {
+                writeline($config{'datacolor'}."Light charges: ".$treas->{lightcharges}, 1);
+            }
+            
+            if ($treas->{vehicle} && $treas->{vehiclehits}) {
+                writeline($config{'datacolor'}."Vehicle HP: ".$treas->{vehiclehits}, 1);
+            }
+            
+            if ($treas->{scroll} || $treas->{potion} || $treas->{ringtype}) {
+                my $spellnum = $treas->{spell};
+                if ($spellnum && $spellnum > 0) {
+                    my $spell = read_spell_record($spellnum);
+                    writeline($config{'datacolor'}."Spell: ".$spell->{name}, 1) if $spell->{name};
+                    writeline($config{'datacolor'}."Effect: ".$spell->{desc}, 1) if $spell->{desc};
+                }
+            }
+            return 1;
+        }
+    }
+    writeline($config{'systemcolor'}."You don't have $itemname.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+sub bless_item {
+    my ($player, $item_name) = @_;
+    my $item_idx = find_treasure_index_by_name($item_name);
+    return writeline($config{'errorcolor'}."You don't have $item_name.".$config{'themecolor'}, 1)
+        unless $item_idx;
+
+    my $item;
+    for my $i (0..$#{$player->{inventory}}) {
+        my $inv = $player->{inventory}[$i];
+        if ($inv->{type} eq 'treasure' && $inv->{idx} == $item_idx) {
+            $item = read_treasure_record($inv->{idx});
+            last;
+        }
+    }
+    return writeline($config{'errorcolor'}."You don't have $item_name.".$config{'themecolor'}, 1)
+        unless $item;
+
+    return writeline($config{'errorcolor'}."Only Clerics and Paladins can bless items.".$config{'themecolor'}, 1)
+        unless $player->{class} =~ /Cleric|Paladin/i;
+
+    $item->{blessed} = 1;
+    writeline($config{'systemcolor'}."$item->{name} has been blessed.".$config{'themecolor'}, 1);
+    save_treasure($item);
+}
+
+sub curse_item {
+    my ($player, $itemname) = @_;
+    return writeline($config{'errorcolor'}."Only Clerics and Paladins can curse items.".$config{'themecolor'}, 1)
+        unless $player->{class} =~ /Cleric|Paladin/i;
+
+    my $try_name = normalize_item_name($itemname);
+    for my $inv (@{$player->{inventory}}) {
+        next unless $inv->{type} eq 'treasure';
+        my $treas = read_treasure_record($inv->{idx});
+        next unless $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+        $treas->{plus}-- if $treas->{plus} > 0;
+        writeline($config{'errorcolor'}."You curse $treas->{name}. Its power decreases! (-1)", 1);
+        save_player($player);
+        return 1;
+    }
+    writeline($config{'systemcolor'}."You don't have $itemname to curse.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+sub fix_item {
+    my ($player, $itemname) = @_;
+    return writeline($config{'errorcolor'}."Only Clerics and Paladins can fix magical items.".$config{'themecolor'}, 1)
+        unless $player->{class} =~ /Cleric|Paladin/i;
+
+    my $try_name = normalize_item_name($itemname);
+    for my $inv (@{$player->{inventory}}) {
+        next unless $inv->{type} eq 'treasure';
+        my $treas = read_treasure_record($inv->{idx});
+        next unless $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+        if ($treas->{charges} && $inv->{charges} < $treas->{charges}) {
+            $inv->{charges} = $treas->{charges};
+            writeline($config{'systemcolor'}."You repair $treas->{name}. It is restored to full charges.", 1);
+            save_player($player);
+            return 1;
+        }
+    }
+    writeline($config{'systemcolor'}."You can't repair $itemname.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+
+sub eat_item {
+    my ($player, $itemname) = @_;
+    my $try_name = normalize_item_name($itemname);
+    for (my $i = 0; $i < @{$player->{inventory}}; $i++) {
+        my $inv = $player->{inventory}[$i];
+        next unless $inv->{type} eq 'treasure';
+        my $treas = read_treasure_record($inv->{idx});
+        next unless $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+        if ($treas->{edible}) {
+            my $max_hp = $player->{max_hp} // 1;
+            $player->{hp} += 2;
+            $player->{hp} = $max_hp if $player->{hp} > $max_hp;
+            writeline($config{'systemcolor'}."You eat $treas->{name} and feel a bit better. (+2 HP)", 1);
+            splice(@{$player->{inventory}}, $i, 1);
+            save_player($player);
+            return 1;
+        }
+    }
+    writeline($config{'systemcolor'}."You can't eat $itemname.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+sub drink_item {
+    my ($player, $itemname) = @_;
+    my $try_name = normalize_item_name($itemname);
+    for (my $i = 0; $i < @{$player->{inventory}}; $i++) {
+        my $inv = $player->{inventory}[$i];
+        next unless $inv->{type} eq 'treasure';
+        my $treas = read_treasure_record($inv->{idx});
+        next unless $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+        if ($treas->{potion}) {
+            my $max_hp = $player->{max_hp} // 1;
+            $player->{hp} += 3;
+            $player->{hp} = $max_hp if $player->{hp} > $max_hp;
+            writeline($config{'systemcolor'}."You drink $treas->{name} and feel invigorated. (+3 HP)", 1);
+            splice(@{$player->{inventory}}, $i, 1);
+            save_player($player);
+            return 1;
+        }
+    }
+    writeline($config{'systemcolor'}."You can't drink $itemname.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+sub fuel_item {
+    my ($player, $itemname, $fuelname) = @_;
+    my $item_idx = find_treasure_index_by_name($itemname);
+    my $fuel_idx = find_treasure_index_by_name($fuelname);
+    my ($item, $fuel, $item_inv, $fuel_inv, $item_i, $fuel_i);
+    for my $i (0..$#{$player->{inventory}}) {
+        my $inv = $player->{inventory}[$i];
+        if ($inv->{type} eq 'treasure' && $inv->{idx} == $item_idx) {
+            $item = read_treasure_record($inv->{idx});
+            $item_inv = $inv; $item_i = $i;
+        }
+        if ($inv->{type} eq 'treasure' && $inv->{idx} == $fuel_idx) {
+            $fuel = read_treasure_record($inv->{idx});
+            $fuel_inv = $inv; $fuel_i = $i;
+        }
+    }
+    unless ($item && $fuel && $item->{lighttype} && $fuel->{fueltype}) {
+        writeline($config{'errorcolor'}."You can't fuel that.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    $item_inv->{charges} = ($item_inv->{charges} // 0) + ($fuel_inv->{charges} // 1);
+    writeline($config{'systemcolor'}."You fuel $item->{name} with $fuel->{name}.".$config{'themecolor'}, 1);
+    splice(@{$player->{inventory}}, $fuel_i, 1);
+    save_player($player);
+    return 1;
+}
+
+sub light_item {
+    my ($player, $itemname) = @_;
+    my $try_name = normalize_item_name($itemname);
+    for my $inv (@{$player->{inventory}}) {
+        next unless $inv->{type} eq 'treasure';
+        my $treas = read_treasure_record($inv->{idx});
+        next unless $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+        if ($treas->{lighttype} && $inv->{charges} && $inv->{charges} > 0) {
+            $inv->{charges}--;
+            writeline($config{'systemcolor'}."You light $treas->{name}. It glows brightly.".$config{'themecolor'}, 1);
+            save_player($player);
+            return 1;
+        }
+    }
+    writeline($config{'systemcolor'}."You can't light $itemname.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+sub find_object_in_inventory {
+    my ($player, $itemname) = @_;
+    my $try_name = normalize_item_name($itemname);
+    foreach my $inv (@{$player->{inventory}}) {
+        if ($inv->{type} eq 'object') {
+            my $obj = read_object_record($inv->{idx});
+            return $inv if $obj->{name} && normalize_item_name($obj->{name}) eq $try_name;
+        } elsif ($inv->{type} eq 'treasure') {
+            my $treas = read_treasure_record($inv->{idx});
+            return $inv if $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+        }
+    }
+    return undef;
+}
+
+sub find_object_in_room {
+    my ($roomnum, $itemname) = @_;
+    my $room = ref($roomnum) ? $roomnum : read_room_record($roomnum);
+    my $try_name = normalize_item_name($itemname);
+    my $objs = parse_room_objects($room);
+    foreach my $o (@$objs) {
+        my $obj = read_object_record($o->{idx});
+        return $obj if $obj->{name} && normalize_item_name($obj->{name}) eq $try_name;
+    }
+    my $treasures = parse_room_treasures($room);
+    foreach my $t (@$treasures) {
+        my $treas = read_treasure_record($t->{idx});
+        return $treas if $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+    }
+    return undef;
+}
+
+sub remove_item_from_inventory {
+    my ($player, $itemname) = @_;
+    my $try_name = normalize_item_name($itemname);
+    for (my $i = 0; $i < @{$player->{inventory}}; $i++) {
+        my $inv = $player->{inventory}[$i];
+        if ($inv->{type} eq 'object') {
+            my $obj = read_object_record($inv->{idx});
+            if ($obj->{name} && normalize_item_name($obj->{name}) eq $try_name) {
+                splice(@{$player->{inventory}}, $i, 1);
+                save_player($player);
+                return 1;
+            }
+        } elsif ($inv->{type} eq 'treasure') {
+            my $treas = read_treasure_record($inv->{idx});
+            if ($treas->{name} && normalize_item_name($treas->{name}) eq $try_name) {
+                splice(@{$player->{inventory}}, $i, 1);
+                save_player($player);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+sub add_item_to_inventory {
+    my ($player, $item) = @_;
+    push @{$player->{inventory}}, $item;
+    save_player($player);
+    return 1;
+}
+
+sub launch_item {
+    my ($player, $item_name, $target) = @_;
+    my $item = find_object_in_inventory($player, $item_name);
+    
+    if (!$item || !$item->{launchable}) {
+        writeline($config{'errorcolor'}."You can't launch that.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    my $room = read_room_record($player->{room});
+    my $target_obj = find_object_in_room($player->{room}, $target) || find_monster_in_room($room, $target);
+    
+    if (!$target_obj) {
+        writeline($config{'errorcolor'}."There's no $target here to launch at.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    my $damage = int(rand($item->{damage_max} - $item->{damage_min} + 1)) + $item->{damage_min};
+    
+    if ($target_obj->{monster}) {
+        $target_obj->{hp} -= $damage;
+        writeline($config{'systemcolor'}."You launch the $item->{name} at the $target_obj->{name}, dealing $damage damage!".$config{'themecolor'}, 1);
+        if ($target_obj->{hp} <= 0) {
+            handle_monster_death($player, $target_obj);
+        }
+    } else {
+        writeline($config{'systemcolor'}."You launch the $item->{name} at the $target_obj->{name}!".$config{'themecolor'}, 1);
+    }
+    
+    remove_item_from_inventory($player, $item);
+    save_player($player);
+}
+
+sub toggle_magical_hiding {
+    my ($player, $object_name) = @_;
+    my $object = find_object_in_room($player->{room}, $object_name);
+    
+    if (!$object) {
+        writeline($config{'errorcolor'}."There's no $object_name here.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    if (!($object->{flag} & 4)) { 
+        writeline($config{'errorcolor'}."The $object->{name} cannot be magically hidden or revealed.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    $object->{hidden} = !$object->{hidden};
+    my $state = $object->{hidden} ? "hidden" : "revealed";
+    writeline($config{'systemcolor'}."The $object->{name} is now $state.".$config{'themecolor'}, 1);
+    save_object($object);
+}
+
+sub handle_object_state {
+    my ($player, $object, $action) = @_;
+    if ($action eq 'open') {
+        if ($object->{closed}) {
+            if ($object->{locked}) {
+                writeline($config{'errorcolor'}."The $object->{name} is locked.".$config{'themecolor'}, 1);
+            } else {
+                $object->{closed} = 0;
+                writeline($config{'systemcolor'}."You open the $object->{name}.".$config{'themecolor'}, 1);
+            }
+        } else {
+            writeline($config{'errorcolor'}."The $object->{name} is already open.".$config{'themecolor'}, 1);
+        }
+    } elsif ($action eq 'close') {
+        if (!$object->{closed}) {
+            $object->{closed} = 1;
+            writeline($config{'systemcolor'}."You close the $object->{name}.".$config{'themecolor'}, 1);
+        } else {
+            writeline($config{'errorcolor'}."The $object->{name} is already closed.".$config{'themecolor'}, 1);
+        }
+    } elsif ($action eq 'lock') {
+        if ($object->{closed}) {
+            if (!$object->{locked}) {
+                if (player_has_key($player, $object->{key})) {
+                    $object->{locked} = 1;
+                    writeline($config{'systemcolor'}."You lock the $object->{name}.".$config{'themecolor'}, 1);
+                } else {
+                    writeline($config{'errorcolor'}."You don't have the right key to lock the $object->{name}.".$config{'themecolor'}, 1);
+                }
+            } else {
+                writeline($config{'errorcolor'}."The $object->{name} is already locked.".$config{'themecolor'}, 1);
+            }
+        } else {
+            writeline($config{'errorcolor'}."You need to close the $object->{name} before locking it.".$config{'themecolor'}, 1);
+        }
+    } elsif ($action eq 'unlock') {
+        if ($object->{locked}) {
+            if (player_has_key($player, $object->{key})) {
+                $object->{locked} = 0;
+                writeline($config{'systemcolor'}."You unlock the $object->{name}.".$config{'themecolor'}, 1);
+            } else {
+                writeline($config{'errorcolor'}."You don't have the right key to unlock the $object->{name}.".$config{'themecolor'}, 1);
+            }
+        } else {
+            writeline($config{'errorcolor'}."The $object->{name} is not locked.".$config{'themecolor'}, 1);
+        }
+    }
+    save_object($object);
+}
+
+sub is_object_visible {
+    my ($object, $player) = @_;
+    return 0 if $object->{invisible} && !$player->{detect_invisible};
+    return 0 if $object->{hidden} && !$player->{detect_hidden};
+    return 1;
+}
+
+sub display_room_objects {
+    my ($room, $player) = @_;
+    foreach my $obj (@{$room->{objects}}) {
+        next unless is_object_visible($obj, $player);
+        my $state = $obj->{closed} ? "closed" : "open";
+        $state .= " and locked" if $obj->{locked};
+        writeline($config{'datacolor'}."$obj->{name} ($state)".$config{'themecolor'}, 1);
+    }
+}
+
+sub refuel_object {
+    my ($player, $object, $fuel_item) = @_;
+    if ($object->{fueltype} && $object->{fueltype} == $fuel_item->{fueltype}) {
+        my $max_charges = $object->{maxcharges} // 100;
+        my $added_charges = $fuel_item->{charges} // 1;
+        $object->{charges} += $added_charges;
+        $object->{charges} = $max_charges if $object->{charges} > $max_charges;
+        writeline($config{'systemcolor'}."You refuel the $object->{name}. It now has $object->{charges} charges.".$config{'themecolor'}, 1);
+        remove_item_from_inventory($player, $fuel_item);
+        save_object($object);
+        save_player($player);
+    } else {
+        writeline($config{'errorcolor'}."You can't use that to refuel the $object->{name}.".$config{'themecolor'}, 1);
+    }
+}
+
+sub get_item_from_room {
+    my ($itemname, $room, $player) = @_;
+    
+    # Ensure we have the correct references
+    $player //= $::player;
+    $room = read_room_record($room->{roomnum} || $room) unless ref($room) eq 'HASH';
+    
+    # Normalize the item name for matching
+    my $try_name = normalize_item_name($itemname);
+    
+    # Check treasures in the room first
+    for my $i (0..19) {
+        my $idx = unpack("s", substr($room->{treasure}, $i*2, 2));
+        next unless $idx > 0;
+        
+        my $treas = read_treasure_record($idx);
+        next unless $treas && $treas->{name};
+        
+        if (normalize_item_name($treas->{name}) eq $try_name) {
+            # Get the charges for this treasure
+            my $charges = unpack("s", substr($room->{trecharges}, $i*2, 2)) || 1;
+            
+            # Check if it's a permanent treasure
+            if ($treas->{permanent} && $treas->{permanent} != 0) {
+                writeline($config{'errorcolor'}."The $treas->{name} seems to be fixed in place and cannot be moved.".$config{'themecolor'}, 1);
+                return 0;
+            }
+            
+            # Update the player's inventory
+            push @{$player->{inventory}}, { 
+                type => 'treasure', 
+                idx => $idx, 
+                charges => $charges 
+            };
+            
+            # SIMPLIFIED FIX: Use a direct file update for just the treasure field
+            my $success = update_room_treasure_slot($room->{roomnum}, $i, 0, 0);
+            
+            unless ($success) {
+                # If update failed, revert the inventory change
+                pop @{$player->{inventory}};
+                writeline($config{'errorcolor'}."Error updating room data.".$config{'themecolor'}, 1);
+                return 0;
+            }
+            
+            # Notify the player and other players in the room
+            writeline($config{'systemcolor'}."You pick up $treas->{name}.".$config{'themecolor'}, 1);
+            broadcast_room_message($player->{room}, $player->{name},
+                $config{'usercolor'}."$player->{name} picks up $treas->{name}.".$config{'themecolor'});
+            
+            # Save the player's inventory
+            save_player($player);
+            
+            return 1;
+        }
+    }
+    
+    # Check objects in the room if no matching treasure was found
+    for my $i (0..19) {
+        my $idx = unpack("s", substr($room->{object}, $i*2, 2));
+        next unless $idx > 0;
+        
+        # Skip hidden objects
+        my $hidden = 0;
+        if (exists $room->{hiddenobj}) {
+            $hidden = unpack("s", substr($room->{hiddenobj}, $i*2, 2));
+            next if $hidden;
+        }
+        
+        my $obj = read_object_record($idx);
+        next unless $obj && $obj->{name};
+        
+        if (normalize_item_name($obj->{name}) eq $try_name) {
+            # Check if it's a permanent object
+            if ($obj->{permanent} && $obj->{permanent} != 0) {
+                writeline($config{'errorcolor'}."The $obj->{name} seems to be fixed in place and cannot be moved.".$config{'themecolor'}, 1);
+                return 0;
+            }
+            
+            # Update the player's inventory
+            push @{$player->{inventory}}, { 
+                type => 'object', 
+                idx => $idx 
+            };
+            
+            # SIMPLIFIED FIX: Use a direct file update for just the object field
+            my $success = update_room_object_slot($room->{roomnum}, $i, 0, 0);
+            
+            unless ($success) {
+                # If update failed, revert the inventory change
+                pop @{$player->{inventory}};
+                writeline($config{'errorcolor'}."Error updating room data.".$config{'themecolor'}, 1);
+                return 0;
+            }
+            
+            # Notify the player and other players in the room
+            writeline($config{'systemcolor'}."You pick up $obj->{name}.".$config{'themecolor'}, 1);
+            broadcast_room_message($player->{room}, $player->{name},
+                $config{'usercolor'}."$player->{name} picks up $obj->{name}.".$config{'themecolor'});
+            
+            # Save the player's inventory
+            save_player($player);
+            
+            return 1;
+        }
+    }
+    
+    # If we get here, the item wasn't found
+    writeline($config{'systemcolor'}."You don't see $itemname here.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+# New helper function for updating just a specific treasure slot in a room
+# This avoids corrupting other room data
+sub update_room_treasure_slot {
+    my ($room_num, $slot, $treasure_id, $charges) = @_;
+    
+    # Validate parameters
+    return 0 unless defined $room_num && defined $slot;
+    $treasure_id //= 0;
+    $charges //= 0;
+    
+    # Calculate file offsets based on room record structure
+    my $roomrec_len = 1096;
+    my $treasure_base_offset = 652;  # Start of treasure array in room record
+    my $trecharges_base_offset = 692; # Start of trecharges array in room record
+    
+    # Calculate specific offsets for this slot
+    my $treasure_offset = $treasure_base_offset + ($slot * 2);
+    my $charges_offset = $trecharges_base_offset + ($slot * 2);
+    
+    # Get the file path
+    my $file = "$config{'home'}/$config{'data'}/rooms.dat";
+    
+    # Open the file for binary update (read+write)
+    open(my $fh, "+<:raw", $file) or return 0;
+    flock($fh, LOCK_EX);
+    
+    # Seek to the treasure index position
+    my $room_offset = ($room_num - 1) * $roomrec_len;
+    seek($fh, $room_offset + $treasure_offset, SEEK_SET) or do {
+        flock($fh, LOCK_UN);
+        close($fh);
+        return 0;
+    };
+    
+    # Write the updated treasure ID
+    print $fh pack("s", $treasure_id);
+    
+    # Seek to the charges position
+    seek($fh, $room_offset + $charges_offset, SEEK_SET) or do {
+        flock($fh, LOCK_UN);
+        close($fh);
+        return 0;
+    };
+    
+    # Write the updated charges
+    print $fh pack("s", $charges);
+    
+    # Flush to ensure data is written
+    $fh->flush();
+    
+    # Release lock and close
+    flock($fh, LOCK_UN);
+    close($fh);
+    
+    return 1;
+}
+
+# Similar helper for object slots
+sub update_room_object_slot {
+    my ($room_num, $slot, $object_id, $hidden) = @_;
+    
+    # Validate parameters
+    return 0 unless defined $room_num && defined $slot;
+    $object_id //= 0;
+    $hidden //= 0;
+    
+    # Calculate file offsets based on room record structure
+    my $roomrec_len = 1096;
+    my $object_base_offset = 492;    # Start of object array in room record
+    my $hiddenobj_base_offset = 532; # Start of hiddenobj array in room record
+    
+    # Calculate specific offsets for this slot
+    my $object_offset = $object_base_offset + ($slot * 2);
+    my $hidden_offset = $hiddenobj_base_offset + ($slot * 2);
+    
+    # Get the file path
+    my $file = "$config{'home'}/$config{'data'}/rooms.dat";
+    
+    # Open the file for binary update (read+write)
+    open(my $fh, "+<:raw", $file) or return 0;
+    flock($fh, LOCK_EX);
+    
+    # Seek to the object index position
+    my $room_offset = ($room_num - 1) * $roomrec_len;
+    seek($fh, $room_offset + $object_offset, SEEK_SET) or do {
+        flock($fh, LOCK_UN);
+        close($fh);
+        return 0;
+    };
+    
+    # Write the updated object ID
+    print $fh pack("s", $object_id);
+    
+    # Seek to the hidden flag position
+    seek($fh, $room_offset + $hidden_offset, SEEK_SET) or do {
+        flock($fh, LOCK_UN);
+        close($fh);
+        return 0;
+    };
+    
+    # Write the updated hidden flag
+    print $fh pack("s", $hidden);
+    
+    # Flush to ensure data is written
+    $fh->flush();
+    
+    # Release lock and close
+    flock($fh, LOCK_UN);
+    close($fh);
+    
+    return 1;
+}
+
+sub mount_object {
+    my ($player, $obj) = @_;
+    return 0 unless $obj && $obj->{mountable};
+    $player->{mounted} = $obj->{name};
+    $player->{move_bonus} = 1; # Example: +1 movement speed
+    $player->{combat_bonus} = 1; # Example: +1 to hit/damage
+    writeline($config{'systemcolor'}."You mount the $obj->{name}. Movement and combat improved!".$config{'themecolor'}, 1);
+    save_player($player);
+    return 1;
+}
+
+sub dismount_object {
+    my ($player) = @_;
+    if ($player->{mounted}) {
+        writeline($config{'systemcolor'}."You dismount from $player->{mounted}.".$config{'themecolor'}, 1);
+        delete $player->{mounted};
+        delete $player->{move_bonus};
+        delete $player->{combat_bonus};
+        save_player($player);
+        return 1;
+    } else {
+        writeline($config{'errorcolor'}."You are not mounted.".$config{'themecolor'}, 1);
+        return 0;
+    }
+}
+
+sub bless_item {
+    my ($player, $itemname) = @_;
+    my $item = find_item_in_inventory($player, $itemname);
+    unless ($item) {
+        writeline($config{'errorcolor'}."No such item.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    $item->{blessed} = 1;
+    $item->{bonus} = ($item->{bonus} // 0) + 1;
+    writeline($config{'systemcolor'}."$item->{name} glows with holy light!".$config{'themecolor'}, 1);
+    save_player($player);
+    return 1;
+}
+
+sub curse_item {
+    my ($player, $itemname) = @_;
+    my $item = find_item_in_inventory($player, $itemname);
+    unless ($item) {
+        writeline($config{'errorcolor'}."No such item.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    $item->{cursed} = 1;
+    $item->{bonus} = ($item->{bonus} // 0) - 1;
+    writeline($config{'errorcolor'}."$item->{name} is cursed!".$config{'themecolor'}, 1);
+    save_player($player);
+    return 1;
+}
+
+sub fix_item {
+    my ($player, $itemname) = @_;
+    my $item = find_item_in_inventory($player, $itemname);
+    unless ($item) {
+        writeline($config{'errorcolor'}."No such item.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    delete $item->{cursed};
+    delete $item->{blessed};
+    $item->{bonus} = 0;
+    writeline($config{'systemcolor'}."$item->{name} is restored to normal.".$config{'themecolor'}, 1);
+    save_player($player);
+    return 1;
+}
+
+sub drop_item_to_room {
+    my ($item, $room) = @_;
+    my $try_name = normalize_item_name($item);
+    for (my $i = 0; $i < @{$player->{inventory}}; $i++) {
+        my $inv = $player->{inventory}[$i];
+        if ($inv->{type} eq 'object') {
+            my $obj = read_object_record($inv->{idx});
+            if ($obj->{name} && normalize_item_name($obj->{name}) eq $try_name) {
+                # Check if this is a permanent object
+                if ($obj->{permanent} && $obj->{permanent} != 0) {
+                    writeline($config{'errorcolor'}."The $obj->{name} seems to be magically bound to you and cannot be dropped.".$config{'themecolor'}, 1);
+                    return 0;
+                }
+
+                for my $slot (0..19) {
+                    my $idx = unpack("s", substr($room->{object}, $slot*2, 2));
+                    if ($idx <= 0) {
+                        substr($room->{object}, $slot*2, 2, pack("s", $inv->{idx}));
+                        substr($room->{hiddenobj}, $slot*2, 2, pack("s", 0));
+                        save_room_record($player->{room}, $room);
+                        writeline($config{'systemcolor'}."You drop $obj->{name}.".$config{'themecolor'}, 1);
+                        broadcast_room_message($player->{room}, $player->{name},
+                            $config{'usercolor'}."$player->{name} drops $obj->{name}.".$config{'themecolor'});
+                        splice(@{$player->{inventory}}, $i, 1);
+                        return 1;
+                    }
+                }
+                writeline($config{'systemcolor'}."There is no room to drop that here.".$config{'themecolor'}, 1);
+                return 0;
+            }
+        } elsif ($inv->{type} eq 'treasure') {
+            my $treas = read_treasure_record($inv->{idx});
+            if ($treas->{name} && normalize_item_name($treas->{name}) eq $try_name) {
+                # Check if this is a permanent treasure
+                if ($treas->{permanent} && $treas->{permanent} != 0) {
+                    writeline($config{'errorcolor'}."The $treas->{name} seems to be magically bound to you and cannot be dropped.".$config{'themecolor'}, 1);
+                    return 0;
+                }
+
+                for my $slot (0..19) {
+                    my $idx = unpack("s", substr($room->{treasure}, $slot*2, 2));
+                    if ($idx <= 0) {
+                        substr($room->{treasure}, $slot*2, 2, pack("s", $inv->{idx}));
+                        substr($room->{trecharges}, $slot*2, 2, pack("s", $inv->{charges} // 1));
+                        save_room_record($player->{room}, $room);
+                        writeline($config{'systemcolor'}."You drop $treas->{name}.".$config{'themecolor'}, 1);
+                        broadcast_room_message($player->{room}, $player->{name},
+                            $config{'usercolor'}."$player->{name} drops $treas->{name}.".$config{'themecolor'});
+                        splice(@{$player->{inventory}}, $i, 1);
+                        return 1;
+                    }
+                }
+                writeline($config{'systemcolor'}."There is no room to drop that here.".$config{'themecolor'}, 1);
+                return 0;
+            }
+        }
+    }
+    writeline($config{'systemcolor'}."You don't have $item to drop.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+sub player_has_light {
+    my ($player) = @_;
+    foreach my $inv (@{$player->{inventory}}) {
+        my $treas = read_treasure_record($inv->{idx});
+        return 1 if $treas->{lighttype} && $treas->{lightcharges} && $treas->{lightcharges} > 0;
+    }
+    return 0;
+}
+
+sub player_has_env_protection {
+    my ($player, $type) = @_;
+    foreach my $inv (@{$player->{inventory}}) {
+        my $treas = read_treasure_record($inv->{idx});
+        return 1 if $type eq "air" && $treas->{vehicle} == 1;
+        return 1 if $type eq "underwater" && $treas->{vehicle} == 2;
+    }
+    return 0;
+}
+
+sub normalize_item_name {
+    my ($name) = @_;
+    $name = lc($name // '');
+    $name =~ s/^\s*(a|an|the|some)\s+//;  
+    $name =~ s/\s+/ /g;                   
+    $name =~ s/^\s+|\s+$//g;              
+    return $name;
+}
+
+sub equip_item {
+    my ($player, $itemname, $containername) = @_;
+    my $inv;
+    my $try_name = normalize_item_name($itemname);
+    
+    if ($containername) {
+        my ($ci, $cont) = find_container_in_inventory($player, $containername);
+        unless ($cont) {
+            writeline($config{'systemcolor'}."No such container in your inventory.".$config{'themecolor'});
+            return 0;
+        }
+        my ($ii, $item) = find_item_in_container($cont, $itemname);
+        $inv = $item;
+    } else {
+        for my $i (0..$#{$player->{inventory}}) {
+            my $item = $player->{inventory}[$i];
+            next unless $item->{type} eq 'treasure';
+            my $treas = read_treasure_record($item->{idx});
+            next unless $treas && $treas->{name};
+            if (normalize_item_name($treas->{name}) eq $try_name) {
+                $inv = $item;
+                last;
+            }
+        }
+    }
+    
+    unless ($inv) {
+        writeline($config{'systemcolor'}."You don't have $itemname to equip.".$config{'themecolor'});
+        return 0;
+    }
+    
+    my $treas = read_treasure_record($inv->{idx});
+    
+    # Handle weapons
+    if ($treas->{weapon} && $treas->{weapon} != 0) {
+        $player->{equipped}{weapon} = $inv;
+        writeline($config{'systemcolor'}."You wield $treas->{name}.".$config{'themecolor'});
+        save_player($player);
+        return 1;
+    }
+    
+    # Handle shields
+    if ($treas->{shield} && $treas->{shield} != 0) {
+        $player->{equipped}{shield} = $inv;
+        writeline($config{'systemcolor'}."You equip $treas->{name} as a shield.".$config{'themecolor'});
+        save_player($player);
+        return 1;
+    }
+    
+    # Handle armor - THIS IS THE NEW PART
+    if ($treas->{armor} && $treas->{armor} != 0) {
+        $player->{equipped}{armor} = $inv;
+        writeline($config{'systemcolor'}."You wear $treas->{name}.".$config{'themecolor'});
+        save_player($player);
+        return 1;
+    }
+    
+    # Handle if the item name contains "armor", "mail", "plate", etc.
+    if ($treas->{name} =~ /\b(armor|mail|plate|leather|cuirass|breastplate)\b/i) {
+        $player->{equipped}{armor} = $inv;
+        writeline($config{'systemcolor'}."You wear $treas->{name}.".$config{'themecolor'});
+        save_player($player);
+        return 1;
+    }
+    
+    writeline($config{'systemcolor'}."You can't equip $itemname.".$config{'themecolor'});
+    return 0;
+}
+
+# Fix the wear_item function to be more robust with armor detection
+
+sub wear_item {
+    my ($player, $item_name, $container_name) = @_;
+    my $try_name = normalize_item_name($item_name);
+    
+    # First try to find the item
+    my $found = 0;
+    my $item_idx = -1;
+    my $item_type = "";
+    my $item_record = undef;
+    my $inventory_index = -1;
+    
+    # If container specified, get from container
+    if ($container_name) {
+        my $cont = find_container_by_name($container_name, $player, read_room_record($player->{room}));
+        if (!$cont) {
+            writeline($config{'errorcolor'}."You don't have $container_name.".$config{'themecolor'}, 1);
+            return 0;
+        }
+        
+        my ($i, $item) = find_item_in_container($cont, $item_name);
+        if (!$item) {
+            writeline($config{'errorcolor'}."$container_name doesn't contain $item_name.".$config{'themecolor'}, 1);
+            return 0;
+        }
+        
+        $item_idx = $item->{idx};
+        $item_type = $item->{type};
+        
+        if ($item_type eq 'treasure') {
+            $item_record = read_treasure_record($item_idx);
+        } else {
+            $item_record = read_object_record($item_idx);
+        }
+        
+        # Remove from container, add to inventory, then continue with wearing
+        remove_from_container($item_name, $cont->{scope}, $cont->{id});
+        push @{$player->{inventory}}, { type => $item_type, idx => $item_idx };
+    } else {
+        # Search player's inventory
+        for my $i (0..$#{$player->{inventory}}) {
+            my $item = $player->{inventory}[$i];
+            my $record;
+            
+            if ($item->{type} eq 'treasure') {
+                $record = read_treasure_record($item->{idx});
+            } elsif ($item->{type} eq 'object') {
+                $record = read_object_record($item->{idx});
+            } else {
+                next;
+            }
+            
+            next unless $record && $record->{name};
+            
+            if (normalize_item_name($record->{name}) eq $try_name) {
+                $found = 1;
+                $item_idx = $item->{idx};
+                $item_type = $item->{type};
+                $item_record = $record;
+                $inventory_index = $i;
+                last;
+            }
+        }
+        
+        unless ($found) {
+            writeline($config{'errorcolor'}."You don't have $item_name.".$config{'themecolor'}, 1);
+            return 0;
+        }
+    }
+    
+    # Now try to wear the item
+    if ($item_type eq 'treasure') {
+        # Check for armor by flag or name pattern
+        if (($item_record->{armor} && $item_record->{armor} > 0) || 
+            ($item_record->{name} =~ /\b(armor|mail|plate|leather|cuirass|breastplate)\b/i)) {
+            $player->{equipped}{armor} = $item_idx;
+            writeline($config{'systemcolor'}."You wear $item_record->{name}.".$config{'themecolor'}, 1);
+            save_player($player);
+            return 1;
+        } elsif ($item_record->{shield} && $item_record->{shield} > 0) {
+            $player->{equipped}{shield} = $item_idx;
+            writeline($config{'systemcolor'}."You wear $item_record->{name}.".$config{'themecolor'}, 1);
+            save_player($player);
+            return 1;
+        } elsif ($item_record->{ringtype} && $item_record->{ringtype} > 0) {
+            # Fix for rings: Add support for wearing rings
+            $player->{equipped}{ring} = $item_idx;
+            writeline($config{'systemcolor'}."You wear $item_record->{name}.".$config{'themecolor'}, 1);
+            save_player($player);
+            return 1;
+        } else {
+            writeline($config{'errorcolor'}."You can't wear $item_record->{name}.".$config{'themecolor'}, 1);
+            return 0;
+        }
+    } elsif ($item_type eq 'object') {
+        if ($item_record->{is_armor} && $item_record->{is_armor} > 0) {
+            $player->{equipped}{armor} = $item_idx;
+            writeline($config{'systemcolor'}."You wear $item_record->{name}.".$config{'themecolor'}, 1);
+            save_player($player);
+            return 1;
+        } elsif ($item_record->{is_shield} && $item_record->{is_shield} > 0) {
+            $player->{equipped}{shield} = $item_idx;
+            writeline($config{'systemcolor'}."You wear $item_record->{name}.".$config{'themecolor'}, 1);
+            save_player($player);
+            return 1;
+        } else {
+            writeline($config{'errorcolor'}."You can't wear $item_record->{name}.".$config{'themecolor'}, 1);
+            return 0;
+        }
+    } else {
+        writeline($config{'errorcolor'}."You can't wear $item_name.".$config{'themecolor'}, 1);
+        return 0;
+    }
+}
+
+sub return_item {
+    my ($player, $itemname) = @_;
+    my $try_name = normalize_item_name($itemname);
+    for my $slot (qw(weapon armor shield ring)) {
+        my $inv = $player->{equipped}{$slot};
+        next unless $inv;
+        my $name = get_item_name($inv);
+        if (normalize_item_name($name) eq $try_name) {
+            delete $player->{equipped}{$slot};
+            writeline($config{'systemcolor'}."You remove $name.".$config{'themecolor'});
+            return 1;
+        }
+    }
+    writeline($config{'systemcolor'}."You are not wielding or wearing $itemname.".$config{'themecolor'});
+    return 0;
+}
+
+sub find_object_index_by_name {
+    my ($name) = @_;
+    # Normalize name for lookup
+    $name = normalize_item_name($name);
+    # Try direct lookup
+    return $object_by_name{$name} + 1 if exists $object_by_name{$name};
+    # Fallback: linear search (case-insensitive)
+    for my $i (0..$#objects) {
+        return $i+1 if normalize_item_name($objects[$i]{name}) eq $name;
+    }
+    return 0;
+}
+
+sub ride_vehicle {
+    my ($player, $item_name) = @_;
+    my $try_name = normalize_item_name($item_name);
+    
+    # Find vehicle in inventory or room
+    my $vehicle;
+    my $inv_vehicle;
+    
+    # Check inventory first
+    for my $inv (@{$player->{inventory}}) {
+        next unless $inv->{type} eq 'treasure';
+        my $treas = read_treasure_record($inv->{idx});
+        if ($treas->{name} && normalize_item_name($treas->{name}) eq $try_name) {
+            if ($treas->{vehicle}) {
+                $vehicle = $treas;
+                $inv_vehicle = 1;
+                last;
+            }
+        }
+    }
+    
+    # Check room if not in inventory
+    unless ($vehicle) {
+        my $room = read_room_record($player->{room});
+        for my $treasure (@{$room->{treasure} || []}) {
+            my $treas = read_treasure_record($treasure->{idx});
+            if ($treas->{name} && normalize_item_name($treas->{name}) eq $try_name && $treas->{vehicle}) {
+                $vehicle = $treas;
+                last;
+            }
+        }
+    }
+    
+    unless ($vehicle) {
+        writeline($config{'errorcolor'}."You can't find that vehicle.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    unless ($vehicle->{vehicle}) {
+        writeline($config{'errorcolor'}."The $vehicle->{name} is not a vehicle.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    if ($player->{riding}) {
+        writeline($config{'errorcolor'}."You are already riding something.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    $player->{riding} = $vehicle->{name};
+    $player->{vehicle_type} = $vehicle->{vehicletype} || 1;
+    $player->{move_bonus} = 1; # Faster movement
+    
+    writeline($config{'systemcolor'}."You are now riding the $vehicle->{name}.".$config{'themecolor'}, 1);
+    save_player($player);
+    return 1;
+}
+
+# Update the existing drive_vehicle function  
+sub drive_vehicle {
+    my ($player, $vehicle_name, $direction) = @_;
+    
+    unless ($player->{riding}) {
+        writeline($config{'errorcolor'}."You are not riding any vehicle.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    my $normalized_vehicle = normalize_item_name($vehicle_name);
+    my $normalized_riding = normalize_item_name($player->{riding});
+    
+    unless ($normalized_vehicle eq $normalized_riding) {
+        writeline($config{'errorcolor'}."You are not riding the $vehicle_name.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    my $room = read_room_record($player->{room});
+    my $dest = $room->{exits}{$direction};
+    
+    unless ($dest) {
+        writeline($config{'errorcolor'}."You can't drive that way.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Check vehicle type compatibility with destination
+    my $dest_room = read_room_record($dest);
+    if ($player->{vehicle_type}) {
+        # 1 = land, 2 = air, 3 = water, etc.
+        if ($player->{vehicle_type} == 2 && $dest_room->{sector} =~ /underground|cave/i) {
+            writeline($config{'errorcolor'}."You can't fly there.".$config{'themecolor'}, 1);
+            return 0;
+        }
+        if ($player->{vehicle_type} == 3 && $dest_room->{sector} !~ /water|lake|river|ocean/i) {
+            writeline($config{'errorcolor'}."You can't sail on land.".$config{'themecolor'}, 1);
+            return 0;
+        }
+    }
+    
+    $player->{room} = $dest;
+    writeline($config{'systemcolor'}."You drive the $player->{riding} $direction.".$config{'themecolor'}, 1);
+    save_player($player);
+    show_room_view($player, $dest_room);
+    return 1;
+}
+
+# Add a dismount function specifically for vehicles
+sub dismount_vehicle {
+    my ($player) = @_;
+    
+    unless ($player->{riding}) {
+        writeline($config{'errorcolor'}."You are not riding any vehicle.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    my $vehicle_name = $player->{riding};
+    delete $player->{riding};
+    delete $player->{vehicle_type};
+    delete $player->{move_bonus};
+    
+    writeline($config{'systemcolor'}."You dismount from the $vehicle_name.".$config{'themecolor'}, 1);
+    save_player($player);
+    return 1;
+}
+
+sub check_and_trigger_trap {
+    my ($player, $object) = @_;
+    return unless $object->{trap};
+
+    my $trap_type = $object->{traptype} // 1; 
+    my $trap_triggered = 0;
+
+    if ($trap_type == 1) { 
+        $player->{poisoned} = 1;
+        writeline($config{'errorcolor'}."You've been poisoned by a trap!".$config{'themecolor'}, 1);
+        $trap_triggered = 1;
+    } elsif ($trap_type == 2) { 
+        my $dest_room = get_random_room();
+        $player->{room} = $dest_room;
+        writeline($config{'errorcolor'}."You've been teleported by a trap!".$config{'themecolor'}, 1);
+        $trap_triggered = 1;
+    } elsif ($trap_type == 3) { 
+        my $damage = int(rand(10)) + 1;
+        $player->{hp} -= $damage;
+        $player->{hp} = 0 if $player->{hp} < 0;
+        writeline($config{'errorcolor'}."A trap hits you for $damage damage!".$config{'themecolor'}, 1);
+        $trap_triggered = 1;
+    } elsif ($trap_type == 4) { 
+        my $jail_room = get_jail_room();
+        $player->{room} = $jail_room;
+        writeline($config{'errorcolor'}."You've been sent to jail by a trap!".$config{'themecolor'}, 1);
+        $trap_triggered = 1;
+    }
+
+    if ($trap_triggered) {
+        $object->{trap} = 0 unless $object->{permanent};
+        save_object($object);
+    }
+}
+
+sub handle_object_relock {
+    my ($object) = @_;
+    if ($object->{relocks}) {
+        $object->{closed} = 1;
+        $object->{locked} = 1;
+        save_object($object);
+        writeline($config{'systemcolor'}."The $object->{name} relocks itself.".$config{'themecolor'}, 1);
+    }
+}
+
+sub update_room_lighting {
+    my ($room) = @_;
+    my $total_light = 0;
+    foreach my $obj (@{$room->{objects}}) {
+        if ($obj->{lighttype}) {
+            if ($obj->{lighttype} == 1) { 
+                $total_light += $obj->{charges} > 0 ? 1 : 0;
+            } elsif ($obj->{lighttype} == 2) { 
+                my $current_time = time();
+                my $light_duration = $obj->{lighthours} * 3600; 
+                if ($obj->{last_lit} && $current_time - $obj->{last_lit} < $light_duration) {
+                    $total_light += 1;
+                }
+            }
+        }
+    }
+    $room->{light} = $total_light > 0 ? 1 : 0;
+    save_room($room);
+}
+
+sub use_light_source {
+    my ($player, $object) = @_;
+    if ($object->{lighttype} == 1) { 
+        if ($object->{charges} > 0) {
+            $object->{charges}--;
+            writeline($config{'systemcolor'}."You use the $object->{name}. It provides light.".$config{'themecolor'}, 1);
+        } else {
+            writeline($config{'errorcolor'}."The $object->{name} is out of charges.".$config{'themecolor'}, 1);
+        }
+    } elsif ($object->{lighttype} == 2) { 
+        $object->{last_lit} = time();
+        writeline($config{'systemcolor'}."You light the $object->{name}. It will provide light for $object->{lighthours} hours.".$config{'themecolor'}, 1);
+    }
+    save_object($object);
+    update_room_lighting(read_room_record($player->{room}));
+}
+
+sub enter_portal {
+    my ($player, $portal) = @_;
+    if ($portal->{closed}) {
+        writeline($config{'errorcolor'}."The $portal->{name} is closed.".$config{'themecolor'}, 1);
+        return;
+    }
+    if ($portal->{locked}) {
+        writeline($config{'errorcolor'}."The $portal->{name} is locked.".$config{'themecolor'}, 1);
+        return;
+    }
+    check_and_trigger_trap($player, $portal);
+    if ($portal->{destination}) {
+        $player->{room} = $portal->{destination};
+        writeline($config{'systemcolor'}."You enter the $portal->{name}.".$config{'themecolor'}, 1);
+        handle_object_relock($portal);
+        save_player($player);
+        display_room(read_room_record($player->{room}), $player);
+    } else {
+        writeline($config{'errorcolor'}."The $portal->{name} doesn't lead anywhere.".$config{'themecolor'}, 1);
+    }
+}
+
+sub toggle_magical_hiding {
+    my ($player, $object) = @_;
+    if ($object->{flag} & 4) { 
+        $object->{hidden} = !$object->{hidden};
+        my $state = $object->{hidden} ? "hidden" : "revealed";
+        writeline($config{'systemcolor'}."The $object->{name} is now $state.".$config{'themecolor'}, 1);
+        save_object($object);
+    } else {
+        writeline($config{'errorcolor'}."The $object->{name} cannot be magically hidden or revealed.".$config{'themecolor'}, 1);
+    }
+}
+
+sub ride_vehicle {
+    my ($player, $item_name) = @_;
+    my $idx = find_treasure_index_by_name($item_name);
+    my $vehicle = $idx ? read_treasure_record($idx) : undef;
+    if ($vehicle && $vehicle->{rideable}) {
+        writeline($config{'systemcolor'}."You are now riding the $vehicle->{name}.".$config{'themecolor'}, 1);
+        save_player($player);
+    } else {
+        writeline($config{'errorcolor'}."You can't ride the ".($vehicle ? $vehicle->{name} : $item_name).".".$config{'themecolor'}, 1);
+    }
+}
+
+sub bless_player {
+    my ($player) = @_;
+    $player->{blessed} = 1;
+    writeline($config{'systemcolor'}."You feel a glow about you! (Blessed)", 1);
+    save_player($player);
+}
+
+sub curse_player {
+    my ($player) = @_;
+    $player->{cursed} = 1;
+    writeline($config{'errorcolor'}."You feel a darkening about you! (Cursed)", 1);
+    save_player($player);
+}
+
+sub load_item {
+    my ($player, $device_name, $ammo_name) = @_;
+    my $dev_idx = find_treasure_index_by_name($device_name);
+    my $ammo_idx = find_treasure_index_by_name($ammo_name);
+    unless ($dev_idx && $ammo_idx) {
+        writeline($config{'errorcolor'}."You don't have the device or ammo.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    my ($device, $ammo, $dev_inv, $ammo_inv, $dev_i, $ammo_i);
+    for my $i (0..$#{$player->{inventory}}) {
+        my $inv = $player->{inventory}[$i];
+        if ($inv->{type} eq 'treasure' && $inv->{idx} == $dev_idx) {
+            $device = read_treasure_record($inv->{idx});
+            $dev_inv = $inv; $dev_i = $i;
+        }
+        if ($inv->{type} eq 'treasure' && $inv->{idx} == $ammo_idx) {
+            $ammo = read_treasure_record($inv->{idx});
+            $ammo_inv = $inv; $ammo_i = $i;
+        }
+    }
+    unless ($device && $ammo) {
+        writeline($config{'errorcolor'}."You don't have the device or ammo.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    unless ($device->{loadable} || $device->{launchable}) {
+        writeline($config{'errorcolor'}."$device->{name} can't be loaded or launched.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    unless ($ammo->{ammunition} || $ammo->{launchloads}) {
+        writeline($config{'errorcolor'}."$ammo->{name} is not valid ammunition.".$config{'themecolor'}, 1);
+        return 0;
+    }
+   
+    $dev_inv->{charges} = ($dev_inv->{charges} // 0) + ($ammo_inv->{charges} // 1);
+    writeline($config{'systemcolor'}."You load $ammo->{name} into $device->{name}.".$config{'themecolor'}, 1);
+    splice(@{$player->{inventory}}, $ammo_i, 1);
+    save_player($player);
+    return 1;
+}
+
+sub fire_item {
+    my ($player, $device_name, $target_name) = @_;
+    my $dev_idx = find_treasure_index_by_name($device_name);
+    my ($device, $dev_inv, $dev_i);
+    for my $i (0..$#{$player->{inventory}}) {
+        my $inv = $player->{inventory}[$i];
+        if ($inv->{type} eq 'treasure' && $inv->{idx} == $dev_idx) {
+            $device = read_treasure_record($inv->{idx});
+            $dev_inv = $inv; $dev_i = $i;
+        }
+    }
+    unless ($device) {
+        writeline($config{'errorcolor'}."You don't have $device_name.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    unless ($device->{loadable} || $device->{launchable}) {
+        writeline($config{'errorcolor'}."$device->{name} can't be fired or launched.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    unless ($dev_inv->{charges} && $dev_inv->{charges} > 0) {
+        writeline($config{'errorcolor'}."$device->{name} is not loaded.".$config{'themecolor'}, 1);
+        return 0;
+    }
+   
+    my $room = read_room_record($player->{room});
+    my $monclass = read_monclass_record($room->{monsterclass});
+    my $target;
+    foreach my $monidx (@$monclass) {
+        my $monster = read_monster_record($monidx);
+        if ($monster->{name} && lc($monster->{name}) eq lc($target_name)) {
+            $target = $monster;
+            last;
+        }
+    }
+    unless ($target) {
+        writeline($config{'systemcolor'}."You fire into empty air!" . $config{'themecolor'}, 1);
+        $dev_inv->{charges}--;
+        save_player($player);
+        return 1;
+    }
+   
+    my $dmg = 2 + int(rand($player->{stats}{dex} // 10));
+    $target->{hits} -= $dmg;
+    writeline($config{'systemcolor'}."You fire $device->{name} at $target->{name} for $dmg damage!" . $config{'themecolor'}, 1);
+    $dev_inv->{charges}--;
+    save_player($player);
+    return 1;
+}
+
+sub launch_item {
+    my ($player, $item_name, $dir) = @_;
+    my $idx = find_treasure_index_by_name($item_name);
+    my ($item, $inv, $inv_i);
+    for my $i (0..$#{$player->{inventory}}) {
+        my $invref = $player->{inventory}[$i];
+        if ($invref->{type} eq 'treasure' && $invref->{idx} == $idx) {
+            $item = read_treasure_record($invref->{idx});
+            $inv = $invref; $inv_i = $i;
+        }
+    }
+    unless ($item && $item->{launchable}) {
+        writeline($config{'errorcolor'}."You can't launch that.".$config{'themecolor'}, 1);
+        return 0;
+    }
+   
+    splice(@{$player->{inventory}}, $inv_i, 1);
+    writeline($config{'systemcolor'}."You launch $item->{name} $dir.".$config{'themecolor'}, 1);
+    save_player($player);
+    return 1;
+}
+
+sub enter_boat {
+    my ($player, $boat_name) = @_;
+    
+    # Find boat in current room
+    my $room = read_room_record($player->{room});
+    my $boat = find_object_in_room($player->{room}, $boat_name);
+    
+    unless ($boat) {
+        writeline($config{'errorcolor'}."There is no $boat_name here.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Check if it's actually a boat
+    unless ($boat->{shortname} =~ /BOAT|SHIP|RAFT|CANOE/i) {
+        writeline($config{'errorcolor'}."You can't sail in that.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    if ($player->{in_boat}) {
+        writeline($config{'errorcolor'}."You are already in a boat.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    $player->{in_boat} = {
+        name => $boat->{name},
+        type => 'water',
+        speed => 2,
+        room => $player->{room}, # Where boat is docked
+    };
+    
+    writeline($config{'systemcolor'}."You board the $boat->{name}.".$config{'themecolor'}, 1);
+    broadcast_room_message($player->{room}, $player->{name},
+        $config{'usercolor'}."$player->{name} boards the $boat->{name}.".$config{'themecolor'});
+    
+    save_player($player);
+    return 1;
+}
+
+sub sail_boat {
+    my ($player, $direction) = @_;
+    
+    unless ($player->{in_boat}) {
+        writeline($config{'errorcolor'}."You are not in a boat.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    my $room = read_room_record($player->{room});
+    my $dest = $room->{exits}{uc($direction)};
+    
+    unless ($dest) {
+        writeline($config{'errorcolor'}."You can't sail that way.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    my $dest_room = read_room_record($dest);
+    
+    # Check if destination has water
+    unless ($dest_room->{region} =~ /Lake|River|Ocean/i || 
+            $dest_room->{feature} =~ /Harbor|Port|Dock/i) {
+        writeline($config{'errorcolor'}."You can't sail to dry land.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Move player
+    photonmud_leave_room($player, $player->{room}, $direction);
+    $player->{room} = $dest;
+    photonmud_enter_room($player, $dest, $room->{roomnum}, { 
+        direction => uc($direction), 
+        is_sailing => 1 
+    });
+    
+    writeline($config{'systemcolor'}."You sail $direction.".$config{'themecolor'}, 1);
+    show_room_view($player, $dest_room);
+    
+    save_player($player);
+    return 1;
+}
+
+sub exit_boat {
+    my ($player) = @_;
+    
+    unless ($player->{in_boat}) {
+        writeline($config{'errorcolor'}."You are not in a boat.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    my $room = read_room_record($player->{room});
+    
+    # Check if we can dock here
+    unless ($room->{region} =~ /Lake|River|Ocean/i || 
+            $room->{feature} =~ /Harbor|Port|Dock|Shore|Beach/i) {
+        writeline($config{'errorcolor'}."You can't dock here - find a shore or harbor.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    my $boat_name = $player->{in_boat}{name};
+    delete $player->{in_boat};
+    
+    writeline($config{'systemcolor'}."You disembark from the $boat_name.".$config{'themecolor'}, 1);
+    broadcast_room_message($player->{room}, $player->{name},
+        $config{'usercolor'}."$player->{name} disembarks from the $boat_name.".$config{'themecolor'});
+    
+    save_player($player);
+    return 1;
+}
+
+sub examine_item {
+    my ($player, $item_name) = @_;
+    
+    # Normalize the item name for easier matching
+    my $normalized_name = normalize_item_name($item_name);
+    
+    # First check player's inventory
+    my $found_in_inventory = 0;
+    my $item_data = undef;
+    
+    foreach my $item (@{$player->{inventory}}) {
+        my $record;
+        my $type = '';
+        
+        if ($item->{type} eq 'treasure') {
+            $record = read_treasure_record($item->{idx});
+            $type = 'treasure';
+        } elsif ($item->{type} eq 'object') {
+            $record = read_object_record($item->{idx});
+            $type = 'object';
+        }
+        
+        next unless $record && $record->{name};
+        
+        if (normalize_item_name($record->{name}) eq $normalized_name) {
+            $found_in_inventory = 1;
+            $item_data = {
+                record => $record,
+                type => $type,
+                item => $item
+            };
+            last;
+        }
+    }
+    
+    # If not found in inventory, check the room
+    my $room_record = undef;
+    if (!$found_in_inventory) {
+        $room_record = read_room_record($player->{room});
+        
+        # Check room treasures
+        if ($room_record->{treasure}) {
+            for my $i (0..19) {
+                my $idx = unpack("s", substr($room_record->{treasure}, $i*2, 2));
+                next unless $idx > 0;
+                
+                my $treasure = read_treasure_record($idx);
+                next unless $treasure && $treasure->{name};
+                
+                if (normalize_item_name($treasure->{name}) eq $normalized_name) {
+                    $found_in_inventory = 0;
+                    $item_data = {
+                        record => $treasure,
+                        type => 'treasure',
+                        charges => unpack("s", substr($room_record->{trecharges}, $i*2, 2)) || 1
+                    };
+                    last;
+                }
+            }
+        }
+        
+        # Check room objects if still not found
+        if (!$item_data && $room_record->{object}) {
+            for my $i (0..19) {
+                my $idx = unpack("s", substr($room_record->{object}, $i*2, 2));
+                next unless $idx > 0;
+                
+                # Skip hidden objects
+                next if $room_record->{hiddenobj} && 
+                       unpack("s", substr($room_record->{hiddenobj}, $i*2, 2));
+                
+                my $object = read_object_record($idx);
+                next unless $object && $object->{name};
+                
+                if (normalize_item_name($object->{name}) eq $normalized_name) {
+                    $found_in_inventory = 0;
+                    $item_data = {
+                        record => $object,
+                        type => 'object'
+                    };
+                    last;
+                }
+            }
+        }
+    }
+    
+    # If item not found anywhere
+    unless ($item_data) {
+        writeline($config{'errorcolor'}."You don't see $item_name here.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    # Display the item information
+    my $record = $item_data->{record};
+    my $location = $found_in_inventory ? "in your inventory" : "here";
+    
+    # Basic description
+    writeline($config{'datacolor'}."You carefully examine the $record->{name} $location:".$config{'themecolor'}, 1);
+    
+    # Description field (if available)
+    if ($record->{desc} && $record->{desc} =~ /\S/) {
+        writeline($config{'datacolor'}."$record->{desc}".$config{'themecolor'}, 1);
+    } elsif ($record->{longdesc} && $record->{longdesc} =~ /\S/) {
+        writeline($config{'datacolor'}."$record->{longdesc}".$config{'themecolor'}, 1);
+    } else {
+        writeline($config{'datacolor'}."It's a $record->{name}.".$config{'themecolor'}, 1);
+    }
+    
+    # Item-specific properties
+    writeline($config{'systemcolor'}."--- Item Properties ---".$config{'themecolor'}, 1);
+    
+    if ($item_data->{type} eq 'treasure') {
+        # Show treasure-specific properties
+        if ($record->{gold} && $record->{gold} > 0) {
+            writeline($config{'datacolor'}."Value: $record->{gold} gold pieces".$config{'themecolor'}, 1);
+        }
+        
+        if ($item_data->{charges} && $item_data->{charges} > 1) {
+            writeline($config{'datacolor'}."Charges: $item_data->{charges}".$config{'themecolor'}, 1);
+        }
+        
+        if ($record->{weight} && $record->{weight} > 0) {
+            writeline($config{'datacolor'}."Weight: $record->{weight}".$config{'themecolor'}, 1);
+        }
+        
+        # Magical properties
+        if ($record->{magical} && $record->{magical} > 0) {
+            writeline($config{'datacolor'}."This item radiates magical energy.".$config{'themecolor'}, 1);
+        }
+        
+        # Container properties
+        if ($record->{container} && $record->{container} > 0) {
+            my $status = "";
+            if ($record->{closed} && $record->{closed} > 0) {
+                $status = " (closed)";
+                if ($record->{locked} && $record->{locked} > 0) {
+                    $status = " (locked)";
+                }
+            } else {
+                $status = " (open)";
+            }
+            writeline($config{'datacolor'}."This is a container$status.".$config{'themecolor'}, 1);
+        }
+        
+        # Weapon properties
+        if ($record->{weapon} && $record->{weapon} > 0) {
+            my $bonus = $record->{plus} || 0;
+            my $bonus_str = $bonus > 0 ? "+$bonus" : ($bonus < 0 ? "$bonus" : "");
+            writeline($config{'datacolor'}."Weapon damage: 1d8$bonus_str".$config{'themecolor'}, 1);
+        }
+        
+        # Armor properties
+        if ($record->{armor} && $record->{armor} > 0) {
+            my $bonus = $record->{plus} || 0;
+            my $ac = 2 + $bonus; # Base AC plus bonus
+            writeline($config{'datacolor'}."Armor class: $ac".$config{'themecolor'}, 1);
+        }
+        
+        # Shield properties
+        if ($record->{shield} && $record->{shield} > 0) {
+            my $bonus = $record->{plus} || 0;
+            my $ac = 1 + $bonus; # Base AC plus bonus
+            writeline($config{'datacolor'}."Shield bonus: +$ac AC".$config{'themecolor'}, 1);
+        }
+        
+        # Ring properties
+        if ($record->{ringtype} && $record->{ringtype} > 0) {
+            my $ring_effect = "unknown magic";
+            if ($record->{ringspell} && $record->{ringspell} > 0) {
+                my $spell = read_spell_record($record->{ringspell});
+                $ring_effect = $spell->{name} || "unknown magic";
+            }
+            writeline($config{'datacolor'}."Ring effect: $ring_effect".$config{'themecolor'}, 1);
+        }
+        
+        # Edible properties
+        if ($record->{edible} && $record->{edible} > 0) {
+            writeline($config{'datacolor'}."This item can be eaten or drunk.".$config{'themecolor'}, 1);
+        }
+        
+        # Light properties
+        if ($record->{lighttype} && $record->{lighttype} > 0) {
+            my $charges = $record->{lightcharges} || 0;
+            my $status = $charges > 0 ? "lit ($charges charges left)" : "unlit";
+            writeline($config{'datacolor'}."Light source: $status".$config{'themecolor'}, 1);
+        }
+        
+        # Vehicle properties
+        if ($record->{vehicle} && $record->{vehicle} > 0) {
+            my $type = "unknown";
+            if ($record->{vehicletype} == 1) {
+                $type = "land mount";
+            } elsif ($record->{vehicletype} == 2) {
+                $type = "water vessel";
+            } elsif ($record->{vehicletype} == 3) {
+                $type = "flying mount";
+            }
+            writeline($config{'datacolor'}."Vehicle type: $type".$config{'themecolor'}, 1);
+        }
+        
+    } elsif ($item_data->{type} eq 'object') {
+        # Show object-specific properties
+        if ($record->{gold} && $record->{gold} > 0) {
+            writeline($config{'datacolor'}."Value: $record->{gold} gold pieces".$config{'themecolor'}, 1);
+        }
+        
+        if ($record->{weight} && $record->{weight} > 0) {
+            writeline($config{'datacolor'}."Weight: $record->{weight}".$config{'themecolor'}, 1);
+        }
+        
+        # Object as container
+        if ($record->{container} && $record->{container} > 0) {
+            my $status = "";
+            if ($record->{closed} && $record->{closed} > 0) {
+                $status = " (closed)";
+                if ($record->{locked} && $record->{locked} > 0) {
+                    $status = " (locked)";
+                }
+            } else {
+                $status = " (open)";
+            }
+            writeline($config{'datacolor'}."This is a container$status.".$config{'themecolor'}, 1);
+        }
+        
+        # Object as weapon
+        if ($record->{is_weapon} && $record->{is_weapon} > 0) {
+            my $damage = $record->{damage} || "1d6";
+            writeline($config{'datacolor'}."Weapon damage: $damage".$config{'themecolor'}, 1);
+        }
+        
+        # Object as armor
+        if ($record->{is_armor} && $record->{is_armor} > 0) {
+            my $ac = $record->{ac} || 1;
+            writeline($config{'datacolor'}."Armor class: $ac".$config{'themecolor'}, 1);
+        }
+        
+        # Key properties
+        if ($record->{is_key} && $record->{is_key} > 0) {
+            writeline($config{'datacolor'}."This appears to be a key.".$config{'themecolor'}, 1);
+        }
+    }
+    
+    # Show condition
+    if ($found_in_inventory && $item_data->{item}) {
+        if ($item_data->{item}->{condition}) {
+            my $condition = $item_data->{item}->{condition};
+            my $cond_desc = "Unknown";
+            
+            if ($condition > 90) {
+                $cond_desc = "Excellent";
+            } elsif ($condition > 75) {
+                $cond_desc = "Good";
+            } elsif ($condition > 50) {
+                $cond_desc = "Fair";
+            } elsif ($condition > 25) {
+                $cond_desc = "Poor";
+            } else {
+                $cond_desc = "Terrible";
+            }
+            
+            writeline($config{'datacolor'}."Condition: $cond_desc".$config{'themecolor'}, 1);
+        }
+        
+        # Show if equipped
+        my $equipped = 0;
+        if ($player->{equipped}) {
+            if ($item_data->{type} eq 'object' && $player->{equipped}{weapon} && 
+                $player->{equipped}{weapon} == $item_data->{item}->{idx}) {
+                writeline($config{'datacolor'}."Status: Equipped as weapon".$config{'themecolor'}, 1);
+                $equipped = 1;
+            } elsif ($item_data->{type} eq 'object' && $player->{equipped}{armor} && 
+                     $player->{equipped}{armor} == $item_data->{item}->{idx}) {
+                writeline($config{'datacolor'}."Status: Equipped as armor".$config{'themecolor'}, 1);
+                $equipped = 1;
+            } elsif ($item_data->{type} eq 'object' && $player->{equipped}{shield} && 
+                     $player->{equipped}{shield} == $item_data->{item}->{idx}) {
+                writeline($config{'datacolor'}."Status: Equipped as shield".$config{'themecolor'}, 1);
+                $equipped = 1;
+            }
+        }
+    }
+    
+    return 1;
+}
+
+sub show_inventory {
+    my ($player) = @_;
+    
+    if (!$player->{inventory} || @{$player->{inventory}} == 0) {
+        writeline($config{'datacolor'}."You are not carrying anything.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    writeline($config{'datacolor'}."You are carrying:".$config{'themecolor'}, 1);
+    
+    my $item_count = 0;
+    foreach my $item (@{$player->{inventory}}) {
+        my $object;
+        my $type_str = "";
+        
+        if ($item->{type} eq 'treasure') {
+            $object = read_treasure_record($item->{idx});
+            $type_str = $item->{charges} > 1 ? " (x$item->{charges})" : "";
+        } elsif ($item->{type} eq 'object') {
+            $object = read_object_record($item->{idx});
+            if ($object->{is_weapon}) {
+                $type_str = " [weapon]";
+            } elsif ($object->{is_armor}) {
+                $type_str = " [armor]";
+            }
+        } else {
+            next;
+        }
+        
+        next unless $object && $object->{name};
+        
+        my $equipped = $player->{equipped} && 
+                       (($player->{equipped}{weapon} && $player->{equipped}{weapon} == $item->{idx}) ||
+                        ($player->{equipped}{armor} && $player->{equipped}{armor} == $item->{idx}));
+        
+        my $eq_marker = $equipped ? " (equipped)" : "";
+        
+        writeline($config{'datacolor'}."  $object->{name}$type_str$eq_marker".$config{'themecolor'}, 1);
+        $item_count++;
+    }
+    
+    if ($item_count == 0) {
+        writeline($config{'datacolor'}."You are not carrying anything.".$config{'themecolor'}, 1);
+    }
+    
+    # Show gold
+    my $gold = $player->{gold} || 0;
+    writeline($config{'datacolor'}."Gold: $gold".$config{'themecolor'}, 1);
+}
+
+return 1;

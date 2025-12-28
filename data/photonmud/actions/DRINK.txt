@@ -1,0 +1,44 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR DRINK Command - Consume Potions or Liquids @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  DRINK <item>
+
+@DATACLR What it does:@THEMECLR
+  DRINK allows you to consume a potion or liquid from your inventory or
+  a container. Drinking potions can heal, cure, or grant magical effects.
+  Some liquids may be harmful or have unknown effects.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only drinkable items (potions, water, elixirs) can be used.
+  - Potions may restore HP, cure poison, grant buffs, or cause side effects.
+  - Drinking is an instant action and does not use a combat turn.
+  - Some potions require a saving throw to resist negative effects.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None for beneficial potions.
+  - Harmful or cursed potions may require a saving throw (d20 + CON mod).
+
+@DATACLR Outcome:@THEMECLR
+  - You gain the potion's effect (heal, buff, cure, etc.).
+  - The item is removed from your inventory.
+  - If the potion is cursed, you may suffer a penalty.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes can drink potions.
+  - Clerics and Druids may identify potions more easily.
+
+@DATACLR Tips:@THEMECLR
+  - Save healing potions for emergencies.
+  - Use IDENTIFY to check unknown potions.
+  - Some potions have delayed or hidden effects.
+
+@DATACLR Example:@THEMECLR
+  DRINK POTION
+    You drink the potion and heal 10 HP.
+
+@DATACLR See also:@THEMECLR
+  EAT, INVENTORY, STATUS, IDENTIFY
+-------------------------------------------------------------------------------

@@ -1,0 +1,161 @@
+#!/usr/bin/perl
+# Import tool for PhotonMUD spells
+use strict;
+use warnings;
+use Encode qw(encode);
+use Getopt::Long;
+
+# CSV FORMAT:
+# name|chant|level|type|teleport|psionic|psionicmode|classtype|desc|ingred|spellflag
+# Each record is exactly 216 bytes.
+
+my $csvfile = '';
+my $outfile = '';
+my $help = 0;
+
+GetOptions(
+    "csv=s"      => \$csvfile,
+    "output=s"   => \$outfile,
+    "help"       => \$help
+) or die("Error in command line arguments\n");
+
+if ($help || !$csvfile) {
+    print "Usage: $0 --csv=FILE [options]\n";
+    print "Options:\n";
+    print "  --csv=FILE      CSV file to import (required)\n";
+    print "  --output=FILE   Output file (default: spells.dat)\n";
+    print "  --help          Show this help message\n";
+    exit(0);
+}
+
+$csvfile ||= 'spells.csv';
+$outfile ||= 'spells.dat';
+my $reclen = 216; # SpellType record length
+
+open(my $infh, "<:encoding(utf8)", $csvfile) or die "Cannot open $csvfile: $!";
+open(my $outfh, ">:raw", $outfile) or die "Cannot open $outfile: $!";
+
+my $header = <$infh>;
+chomp $header;
+my $record_count = 0;
+
+while (my $line = <$infh>) {
+    chomp $line;
+    next if $line =~ /^\s*$/ || $line =~ /^\/\//; # skip blank or comment lines
+    my @row = parse_csv_line($line);
+
+    # Debug: print line number and field count if not 11
+    if (@row != 11) {
+        warn "Line $.: Expected 11 fields, got " . scalar(@row) . " [$line]\n";
+    }
+
+    # Defensive: pad missing fields
+    $row[$_] //= 0 for (0..10);
+    
+    # Unescape special characters
+    foreach my $i (0, 1, 8, 9) { # String fields: name, chant, desc, ingred
+        $row[$i] =~ s/\\n/\n/g if defined $row[$i];
+        $row[$i] =~ s/\\\|/|/g if defined $row[$i];
+    }
+
+    # --- String fields ---
+    my $name      = pack_str($row[0], 30);
+    my $chant     = pack_str($row[1], 80);
+    # --- Numeric fields ---
+    my $level     = pack("s", $row[2]);
+    my $type      = pack("s", $row[3]);
+    my $teleport  = pack("f<", $row[4]);
+    my $psionic   = pack("s", $row[5]);
+    my $psionicmode = pack("s", $row[6]);
+    my $classtype = pack("s", $row[7]);
+    # --- More string fields ---
+    my $desc      = pack_str($row[8], 80);
+    my $ingred    = pack_str($row[9], 10);
+    # --- Last numeric field ---
+    my $spellflag = pack("s", $row[10]);
+
+    # --- Compose record ---
+    my $record = $name . $chant . $level . $type . $teleport . $psionic . 
+                 $psionicmode . $classtype . $desc . $ingred . $spellflag;
+
+    # Verify record length
+    my $record_len = length($record);
+    if ($record_len != $reclen) {
+        warn "Record for '$row[0]' has incorrect length: $record_len bytes (expected $reclen)\n";
+        
+        # Fix the record length if needed
+        if ($record_len < $reclen) {
+            $record .= "\0" x ($reclen - $record_len);
+        } else {
+            $record = substr($record, 0, $reclen);
+        }
+    }
+
+    print $outfh $record;
+    $record_count++;
+}
+
+close $infh;
+close $outfh;
+print "Import complete: $record_count records written to $outfile\n";
+
+# Helper function to pack strings with null padding
+sub pack_str {
+    my ($str, $len) = @_;
+    $str //= '';
+    
+    # Remove control characters except newlines
+    $str =~ s/[\x00-\x08\x0B-\x1F]/ /g;
+    
+    # Convert to ASCII, replacing non-ASCII with spaces
+    $str = encode('ascii', $str, sub { ' ' });
+    
+    # Ensure string doesn't exceed maximum length
+    $str = substr($str, 0, $len);
+    
+    # Pad with nulls to ensure fixed length
+    return $str . ("\0" x ($len - length($str)));
+}
+
+# Improved CSV parser that handles quoted fields and escaped pipes
+sub parse_csv_line {
+    my ($line) = @_;
+    my @fields;
+    my $field = '';
+    my $in_quotes = 0;
+    
+    # Handle simple case first (no quotes, no escaped pipes)
+    if ($line !~ /"/ && $line !~ /\\\|/) {
+        return split(/\|/, $line);
+    }
+    
+    # Handle quoted fields and escaped pipes
+    my @chars = split(//, $line);
+    my $escape = 0;
+    
+    while (@chars) {
+        my $c = shift @chars;
+        
+        if ($escape) {
+            $field .= $c;
+            $escape = 0;
+        } elsif ($c eq '\\') {
+            $escape = 1;
+        } elsif ($c eq '"') {
+            # Check for escaped quotes
+            if (@chars && $chars[0] eq '"') {
+                $field .= '"';
+                shift @chars;  # Skip the second quote
+            } else {
+                $in_quotes = !$in_quotes;
+            }
+        } elsif ($c eq '|' && !$in_quotes) {
+            push @fields, $field;
+            $field = '';
+        } else {
+            $field .= $c;
+        }
+    }
+    push @fields, $field;
+    return @fields;
+}

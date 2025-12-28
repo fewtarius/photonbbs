@@ -1,0 +1,41 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR LIGHT Command - Illuminate Dark Areas @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  LIGHT <item>
+
+@DATACLR What it does:@THEMECLR
+  LIGHT allows you to ignite a torch, lantern, or other light source in
+  your inventory. Lighting a source is required to see in dark rooms,
+  caves, or dungeons.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only lightable items (torches, lanterns, candles) can be lit.
+  - Some items require fuel before they can be lit.
+  - LIGHT is an instant action and does not use a combat turn.
+  - Light sources may burn out after a set time.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - The area is illuminated, revealing hidden exits or items.
+  - The light source will eventually burn out.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes can use LIGHT.
+  - Rangers and Thieves may light sources more quietly.
+
+@DATACLR Tips:@THEMECLR
+  - Always carry a backup light source.
+  - Use FUEL to refill lanterns before lighting.
+
+@DATACLR Example:@THEMECLR
+  LIGHT TORCH
+    You light the torch. The room is now illuminated.
+
+@DATACLR See also:@THEMECLR
+  FUEL, INVENTORY, SEARCH
+-------------------------------------------------------------------------------

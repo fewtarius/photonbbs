@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@MOUNT <object>@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Mounts a rideable object, such as a horse or wagon.
+Syntax: MOUNT <object>
+Example: MOUNT HORSE
+
+- Only works if the object is mountable.
+- Some mounts may require a skill check or special item.
+- Being mounted may provide movement or combat bonuses.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

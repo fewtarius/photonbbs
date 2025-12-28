@@ -1,0 +1,45 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR EQUIP Command - Ready a Weapon or Item @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  EQUIP <item>
+  EQUIP <item> FROM <container>
+
+@DATACLR What it does:@THEMECLR
+  EQUIP readies a weapon or item from your inventory (or a container you
+  carry), making it your active weapon for combat. Only one weapon can be
+  equipped at a time.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - EQUIP replaces your currently equipped weapon with the chosen item.
+  - Only weapons or usable items can be equipped.
+  - Equipping a weapon grants its attack and damage bonuses in combat.
+  - Some items require proficiency for full bonuses.
+  - You can equip from a container by specifying its name.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None for equipping. Combat rolls use equipped weapon stats.
+
+@DATACLR Outcome:@THEMECLR
+  - Your chosen weapon is now active for attacks.
+  - Previous weapon is returned to your inventory.
+
+@DATACLR Class Features:@THEMECLR
+  - Fighters, Paladins, and Rangers gain extra bonuses with certain weapons.
+  - Thieves may equip light weapons for special attacks.
+  - MagicUsers and Clerics can equip staves, maces, or class-allowed weapons.
+
+@DATACLR Tips:@THEMECLR
+  - Equip the best weapon for your class and situation.
+  - Use EQUIP before combat to maximize your effectiveness.
+  - Check your proficiency for extra bonuses.
+
+@DATACLR Example:@THEMECLR
+  EQUIP SWORD
+    Sword is now your active weapon.
+
+@DATACLR See also:@THEMECLR
+  WEAR, RETURN, INVENTORY, STATUS
+-------------------------------------------------------------------------------

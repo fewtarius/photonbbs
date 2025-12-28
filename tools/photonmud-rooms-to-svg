@@ -1,0 +1,212 @@
+#!/usr/bin/perl
+# photonmud-rooms-svg: Dump rooms.dat and generate a 2D SVG map by region/feature
+use strict;
+use warnings;
+
+my $file = shift || 'data/photonmud/rooms.dat';
+my $svgfile = shift || 'rooms.svg';
+my $reclen = 1096;  # Updated for new format (1084 + 4 elevation + 8 biome)
+
+# Color mapping for regions/features
+my %region_color = (
+    Grass      => '#88cc66',
+    Forest     => '#228B22',
+    Hill       => '#bdb76b',
+    Swamp      => '#556b2f',
+    Lake       => '#3399ff',
+    River      => '#1e90ff',
+    Mountain   => '#888888',
+    Road       => '#ffffff',
+    Town       => '#ffcc66',
+    Castle     => '#cccccc',
+    Moat       => '#3399ff',
+    Bridge     => '#ff9900',
+    Cave       => '#444444',
+    Dungeon    => '#222222',
+    # Special-case features (optional, for visual pop)
+    CaveMouth        => '#666666',
+    DungeonEntrance  => '#333333',
+    Drawbridge       => '#ff6600',
+    # If you want to highlight these, uncomment:
+    # Shop     => '#ff66cc',
+    # Inn      => '#ffb366',
+    # Temple   => '#ccccff',
+    # Tavern   => '#cc6699',
+    # Plaza    => '#ffff99',
+    # House    => '#fff0e1',
+    # Yard     => '#e1ffe1',
+);
+
+# Parse all rooms
+my %rooms;
+my ($minx, $miny, $maxx, $maxy) = (1e9, 1e9, -1e9, -1e9);
+my ($min_elevation, $max_elevation) = (1e9, -1e9);
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+my $record_num = 1;
+while (1) {
+    seek($fh, ($record_num - 1) * $reclen, 0);
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    if ($buf =~ /^\0+$/) {
+        $record_num++;
+        next;
+    }
+
+    my $idx = unpack("S<", substr($buf, 0, 2));
+    my $region = substr($buf, 980, 16); $region =~ s/[\0 ]+$//;
+    my $feature = substr($buf, 996, 16); $feature =~ s/[\0 ]+$//;
+    my $shortdesc = substr($buf, 572, 80); $shortdesc =~ s/[\0 ]+$//;
+    
+    # Read new elevation and biome data
+    my $elevation = unpack("f<", substr($buf, 1084, 4));
+    my $biome = substr($buf, 1088, 8); $biome =~ s/[\0 ]+$//;
+    
+    my ($x, $y, $z) = (-1, -1, 0);
+
+    if ($shortdesc =~ /\((\d+),\s*(\d+),\s*(\d+)\)/) {
+        ($x, $y, $z) = ($1, $2, $3);
+    } elsif ($shortdesc =~ /\((\d+),\s*(\d+)\)/) {
+        ($x, $y) = ($1, $2);
+    } else {
+        my $WIDTH = 100;
+        $x = ($idx - 1) % $WIDTH;
+        $y = int(($idx - 1) / $WIDTH);
+    }
+
+    $minx = $x if $x < $minx;
+    $miny = $y if $y < $miny;
+    $maxx = $x if $x > $maxx;
+    $maxy = $y if $y > $maxy;
+    
+    if (defined $elevation) {
+        $min_elevation = $elevation if $elevation < $min_elevation;
+        $max_elevation = $elevation if $elevation > $max_elevation;
+    }
+
+    $rooms{"$x,$y,$z"} = {
+        idx       => $idx,
+        x         => $x,
+        y         => $y,
+        z         => $z,
+        region    => $region,
+        feature   => $feature,
+        shortdesc => $shortdesc,
+        elevation => $elevation,
+        biome     => $biome,
+    };
+
+    $record_num++;
+}
+close($fh);
+
+# SVG parameters
+my $cell = 8;
+my $pad = 20;
+my $legend_cell = 12;
+my $legend_gap = 6;
+my @legend_keys = sort keys %region_color;
+my $legend_height = @legend_keys * ($legend_cell + $legend_gap) + 60; # Extra space for elevation scale
+my $legend_width = 120;
+my $width = ($maxx - $minx + 1) * $cell + 2*$pad + $legend_width + $pad;
+my $height = ($maxy - $miny + 1) * $cell + 2*$pad;
+
+open(my $svg, ">", $svgfile) or die "Can't write $svgfile: $!";
+
+# SVG header with gradient definition for elevation
+print $svg <<"SVG";
+<svg xmlns="http://www.w3.org/2000/svg" width="$width" height="$height" viewBox="0 0 $width $height">
+  <defs>
+    <linearGradient id="elevationScale" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff"/>
+      <stop offset="50%" style="stop-color:#808080"/>
+      <stop offset="100%" style="stop-color:#000000"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="$width" height="$height" fill="#222"/>
+SVG
+
+# Draw rooms with elevation shading
+for my $key (keys %rooms) {
+    my $r = $rooms{$key};
+    my $x = $r->{x} - $minx;
+    my $y = $r->{y} - $miny;
+    my $base_color = $region_color{$r->{feature}} || $region_color{$r->{region}} || '#888';
+    
+    # Apply elevation shading
+    my $color = $base_color;
+    if (defined $r->{elevation} && defined $min_elevation && defined $max_elevation) {
+        my $elevation_range = $max_elevation - $min_elevation;
+        if ($elevation_range > 0) {
+            my $shade = int(255 * ($r->{elevation} - $min_elevation) / $elevation_range);
+            $color = adjust_color($base_color, $shade);
+        }
+    }
+    
+    print $svg qq{  <rect x="} . ($pad + $x*$cell) . qq{" y="} . ($pad + $y*$cell) . 
+                qq{" width="$cell" height="$cell" fill="$color" stroke="#111" stroke-width="0.5"};
+    
+    # Add tooltip with room info
+    print $svg qq{ data-room="Room $r->{idx}: $r->{region}};
+    print $svg qq{ ($r->{feature})} if $r->{feature};
+    print $svg qq{ - Elevation: } . sprintf("%.2f", $r->{elevation}) if defined $r->{elevation};
+    print $svg qq{"/>\n};
+}
+
+# Add legend with biome colors and elevation scale
+my $legend_x = $width - $legend_width - $pad;
+my $legend_y = $pad;
+print $svg qq{  <g id="legend">\n};
+print $svg qq{    <rect x="$legend_x" y="$legend_y" width="$legend_width" height="$legend_height" fill="#222" opacity="0.85" rx="6"/>\n};
+
+my $legend_i = 0;
+for my $label (@legend_keys) {
+    my $color = $region_color{$label};
+    my $ly = $legend_y + $legend_i * ($legend_cell + $legend_gap);
+    print $svg qq{    <rect x="} . ($legend_x + 8) . qq{" y="$ly" width="$legend_cell" height="$legend_cell" fill="$color" stroke="#111"/>\n};
+    print $svg qq{    <text x="} . ($legend_x + 8 + $legend_cell + 6) . qq{" y="} . ($ly + $legend_cell - 2) . qq{" font-size="11" fill="#fff">$label</text>\n};
+    $legend_i++;
+}
+
+# Add elevation scale
+if ($min_elevation < $max_elevation) {
+    my $scale_y = $legend_y + $legend_i * ($legend_cell + $legend_gap) + 10;
+    my $scale_height = 40;
+    print $svg qq{    <rect x="} . ($legend_x + 8) . qq{" y="$scale_y" width="$legend_cell" height="$scale_height" fill="url(#elevationScale)" stroke="#111"/>\n};
+    print $svg qq{    <text x="} . ($legend_x + 8 + $legend_cell + 6) . qq{" y="} . ($scale_y + 8) . qq{" font-size="9" fill="#fff">Max: } . sprintf("%.2f", $max_elevation) . qq{</text>\n};
+    print $svg qq{    <text x="} . ($legend_x + 8 + $legend_cell + 6) . qq{" y="} . ($scale_y + $scale_height) . qq{" font-size="9" fill="#fff">Min: } . sprintf("%.2f", $min_elevation) . qq{</text>\n};
+}
+
+print $svg qq{  </g>\n};
+print $svg "</svg>\n";
+close($svg);
+
+print "SVG map written to $svgfile ($width x $height)\n";
+
+# Helper function to adjust color based on elevation
+sub adjust_color {
+    my ($color, $shade) = @_;
+    return $color unless defined $color && defined $shade && $shade >= 0 && $shade <= 255;
+    
+    $color =~ s/^#//;
+    return $color unless length($color) == 6;
+    
+    my @rgb = (
+        hex(substr($color, 0, 2)),
+        hex(substr($color, 2, 2)),
+        hex(substr($color, 4, 2))
+    );
+    
+    my $factor = ($shade - 128) / 255;
+    @rgb = map { 
+        my $val = int($_ * (1 + $factor));
+        $val = 0 if $val < 0;
+        $val = 255 if $val > 255;
+        $val
+    } @rgb;
+    
+    return sprintf("#%02x%02x%02x", @rgb);
+}

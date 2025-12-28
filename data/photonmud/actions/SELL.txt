@@ -1,0 +1,38 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR SELL Command - List Items on the Market @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  SELL <item> <price>
+
+@DATACLR What it does:@THEMECLR
+  SELL lets you list an item from your inventory for sale on the market.
+  Other players can buy your item for the price you set.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must be in a shop to use SELL.
+  - Specify the item and the price in gold.
+  - Item is removed from your inventory until sold or cancelled.
+  - You can view your listings with MYMARKET.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - Item is listed for sale; you receive gold when another player buys it.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use SELL the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Set fair prices to sell items quickly.
+  - Use MYMARKET to manage your listings.
+
+@DATACLR Example:@THEMECLR
+  SELL SWORD 100
+    Sword is now listed for 100 gold.
+
+@DATACLR See also:@THEMECLR
+  MARKET, BUY, MYMARKET, SHOP SELL
+-------------------------------------------------------------------------------

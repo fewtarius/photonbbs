@@ -1,0 +1,44 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR MAP Command - View the World Map @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  MAP
+
+@DATACLR What it does:@THEMECLR
+  MAP displays a top-down view of the current region, showing your location,
+  nearby towns, castles, rivers, mountains, and other landmarks. The map helps
+  you navigate the world and plan your journey.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - The map shows a limited area around your current position.
+  - Your position is marked with a special symbol (e.g., @).
+  - Major features (towns, castles, lakes, rivers, mountains) are shown with
+    unique symbols or colors.
+  - Some hidden or secret areas may not appear on the map until discovered.
+  - The map does not reveal monsters, objects, or treasures in rooms.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You see a visual representation of your surroundings.
+  - Use the map to find routes, avoid obstacles, and locate points of interest.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use MAP the same way.
+  - Rangers and Druids may receive extra information about natural features.
+
+@DATACLR Tips:@THEMECLR
+  - Use MAP after moving to a new area to orient yourself.
+  - Look for roads, bridges, and paths to navigate efficiently.
+  - Towns and castles are good places to rest, trade, or find quests.
+
+@DATACLR Example:@THEMECLR
+  MAP
+    [You see a grid with @ marking your position, T for towns, C for castles.]
+
+@DATACLR See also:@THEMECLR
+  LOOK, HERE, STATUS, NEWS
+-------------------------------------------------------------------------------

@@ -1,0 +1,15 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@TAKE <item> [FROM <container>]@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Picks up an item from the room or a container.
+Syntax: TAKE <item>
+       TAKE <item> FROM <container>
+Example: TAKE GOLD
+         TAKE SWORD FROM CHEST
+
+- You must have space in your inventory.
+- Some containers may be locked or require a key.
+- No roll is required unless the item is trapped.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

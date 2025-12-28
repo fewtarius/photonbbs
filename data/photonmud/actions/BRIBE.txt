@@ -1,0 +1,42 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR BRIBE/OFFER Command - Pay Off Monsters @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  BRIBE <monster> <amount>
+  OFFER <monster> <amount>
+
+@DATACLR What it does:@THEMECLR
+  BRIBE or OFFER lets you attempt to pay gold to a monster in hopes it
+  will leave you alone. The chance of success depends on your Charisma
+  and a random roll.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must have enough gold to offer.
+  - Roll: d20 + CHA modifier; must exceed 15 to succeed.
+  - If successful, the monster leaves you alone.
+  - If you fail, the monster may become enraged.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - d20 + CHA mod vs. DC 15
+
+@DATACLR Outcome:@THEMECLR
+  - Success: Monster ignores you and leaves.
+  - Failure: Monster may attack or become hostile.
+
+@DATACLR Class Features:@THEMECLR
+  - High-CHA classes have better odds.
+  - All classes can attempt to bribe.
+
+@DATACLR Tips:@THEMECLR
+  - Use BRIBE if you want to avoid combat.
+  - Not all monsters accept bribes.
+
+@DATACLR Example:@THEMECLR
+  BRIBE GOBLIN 20
+    Rolls d20 + CHA mod. If >15, goblin leaves.
+
+@DATACLR See also:@THEMECLR
+  ATTACK, TALK, CHARM, BEGUILE
+-------------------------------------------------------------------------------

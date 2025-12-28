@@ -1,0 +1,37 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR PUT Command - Place Items in Containers @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  PUT <item> IN <container>
+
+@DATACLR What it does:@THEMECLR
+  PUT moves an item from your inventory into a container you carry or
+  that is present in the room (such as a chest, bag, or box).
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must specify both the item and the container.
+  - Locked or closed containers must be opened first.
+  - Some containers have limited capacity.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - The item is now inside the specified container.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes can use PUT.
+
+@DATACLR Tips:@THEMECLR
+  - Use containers to organize your inventory.
+  - Hide valuables in containers for safety.
+
+@DATACLR Example:@THEMECLR
+  PUT GOLD IN CHEST
+    Gold is now in the chest.
+
+@DATACLR See also:@THEMECLR
+  GET, DROP, INVENTORY, LOOKIN
+-------------------------------------------------------------------------------

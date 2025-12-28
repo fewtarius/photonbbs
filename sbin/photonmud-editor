@@ -1,0 +1,1903 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use FindBin;
+use lib "$FindBin::Bin/../modules";
+use Fcntl qw(:seek);
+
+# --- Load config and modules ---
+our %config;
+our %info;
+
+require "$FindBin::Bin/../modules/pm-defaults";
+require "$config{'home'}/modules/pb-framework";
+require "$config{'home'}/modules/pb-usertools";
+require "$config{'home'}/modules/pm-monsters";
+require "$config{'home'}/modules/pm-combat";
+require "$config{'home'}/modules/pm-spells";
+require "$config{'home'}/modules/pm-containers";
+require "$config{'home'}/modules/pm-market";
+require "$config{'home'}/modules/pm-npcs";
+require "$config{'home'}/modules/pm-rooms";
+require "$config{'home'}/modules/pm-player";
+require "$config{'home'}/modules/pm-objects";
+require "$config{'home'}/modules/pm-utils";
+require "$config{'home'}/modules/pm-messaging";
+
+our $datadir = $config{'home'}.$config{'data'}."/";
+chomp(my $os = `uname`);
+our $BSD_STYLE = ($os =~ /HP-UX/) ? 0 : 1;
+our $mytty;
+chomp($mytty = `tty`);
+$mytty = "/dev/tty" unless $mytty && $mytty =~ m|^/dev/|;
+$| = 1;
+our $ppid = getppid;
+$info{'ext'}="ans";
+my $noevents=1;
+applytheme($config{'deftheme'});
+colorize();
+
+our @dirs = qw(N S E W NE SE SW NW UP DOWN IN OUT);
+our $LOCKED_FILE;
+
+# --- Datafile Definitions ---
+our %datafiles = (
+    rooms     => { file => "rooms.dat",     recsize => 1084,  loader => \&read_room_record },
+    objects   => { file => "objects.dat",   recsize => 256,   loader => \&read_object_record },
+    treasure  => { file => "treasure.dat",  recsize => 140,   loader => \&editor_read_treasure_record },
+    monsters  => { file => "monsters.dat",  recsize => 160,   loader => \&editor_read_monster_record },
+    npcs      => { file => "nonplyrs.dat",  recsize => 144,   loader => \&editor_read_npc_record },
+    market    => { file => "market.dat",    recsize => 200,   loader => \&read_market_record },
+    actions   => { file => "actions.dat",   recsize => 60,    loader => \&read_action_record },
+    spells    => { file => "spells.dat",    recsize => 216,   loader => \&read_spell_record },
+    ranklist  => { file => "ranklist.dat",  recsize => 128,   loader => \&read_rank_record },
+);
+
+sub lockfile {
+    my ($file) = @_;
+    return unless $file;
+    my $lockfile = "$file.lock";
+    # Try to create the lock file, retry if it already exists
+    for (1..10) {
+        unless (-e $lockfile) {
+            if (open(my $lfh, ">", $lockfile)) {
+                print $lfh "$$\n";
+                close($lfh);
+                $LOCKED_FILE = $file;
+                return 1;
+            }
+        }
+        # Wait a bit and retry if lock exists
+        select(undef, undef, undef, 0.2);
+    }
+    die "Could not acquire lock on $file after multiple attempts.\n";
+}
+
+# --- Lockfile cleanup on exit ---
+sub unlockfile {
+    my ($file) = @_;
+    unlink("$file.lock") if $file;
+    $LOCKED_FILE = undef;
+}
+
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = sub {
+    unlockfile($LOCKED_FILE) if $LOCKED_FILE;
+    exit 1;
+};
+$SIG{__DIE__} = sub {
+    unlockfile($LOCKED_FILE) if $LOCKED_FILE;
+    die @_ if $^S; # in eval
+    exit 1;
+};
+$SIG{__WARN__} = sub {
+    unlockfile($LOCKED_FILE) if $LOCKED_FILE;
+    warn @_;
+};
+END {
+    unlockfile($LOCKED_FILE) if $LOCKED_FILE;
+}
+
+# --- Loader subs for each data type ---
+sub read_room_record {
+    my ($roomnum) = @_;
+    return { desc => "You see nothing special.", exits => {} } if !$roomnum || $roomnum < 1;
+    my $file = "$config{'home'}/$config{'data'}/rooms.dat";
+    my $roomrec_len = 1084;
+
+    # Check for missing map data
+    unless (-e $file) {
+        writeline($config{'errorcolor'}."There is no map data available for the game, please contact your administrator and ask them to generate game data.".$config{'themecolor'}, 1);
+        exit;
+    }
+
+    my %room;
+    open(my $fh, "<:raw", $file) or do {
+        return { desc => "You see nothing special.", exits => {} };
+    };
+    my $seekpos = ($roomnum - 1) * $roomrec_len;
+    seek($fh, $seekpos, SEEK_SET);
+    read($fh, my $buf, $roomrec_len);
+    close($fh);
+
+    $room{action}      = unpack("s", substr($buf, 0, 2));
+    $room{direct}      = substr($buf, 2, 48);
+    $room{flags}       = substr($buf, 50, 40);
+    $room{longdesc}    = substr($buf, 90, 400);
+    $room{monsterclass}= unpack("s", substr($buf, 490, 2));
+    $room{object}      = substr($buf, 492, 40);
+    $room{hiddenobj}   = substr($buf, 532, 40);
+    $room{shortdesc}   = substr($buf, 572, 80);
+    $room{treasure}    = substr($buf, 652, 40);
+    $room{trecharges}  = substr($buf, 692, 40);
+    $room{container}   = substr($buf, 732, 246);
+    $room{container_permanent} = unpack("s", substr($buf, 978, 2));
+    $room{region}      = substr($buf, 980, 16);
+    $room{feature}     = substr($buf, 996, 16);
+    $room{town_name}   = substr($buf, 1012, 24);
+    $room{castle_name} = substr($buf, 1036, 24);
+    $room{river_name}  = substr($buf, 1060, 24);
+
+    for my $f (qw(region feature town_name castle_name river_name)) {
+        $room{$f} =~ s/[\0 ]+$// if defined $room{$f};
+    }
+
+    my %exits;
+    my @added_exits;
+    for my $i (0..11) {
+        my $dir = $dirs[$i];
+        my $bytes = substr($room{direct}, $i*4, 4);
+        my $val = unpack("f<", $bytes);
+        my $ival = int($val + 0.0001);
+        if ($ival > 0) {
+            $exits{$dir} = $ival;
+            push @added_exits, "$dir=>$ival";
+        }
+    }
+    $room{exits} = { %exits };
+
+    $room{longdesc} =~ s/\s+$//mg;     
+    $room{longdesc} =~ s/^\s+//mg;     
+    $room{longdesc} =~ s/\0+$//;       
+    $room{longdesc} =~ s/[ \t]+$//mg;  
+
+    $room{shortdesc} =~ s/\0+$//;
+    $room{shortdesc} =~ s/^\s+//mg;
+    $room{shortdesc} =~ s/[ \t]+$//mg;
+
+    return \%room;
+}
+
+
+sub read_object_record {
+    my ($buf) = @_;
+    my %obj;
+    $obj{name}        = substr($buf, 0, 30); $obj{name} =~ s/[\0 ]+$//;
+    $obj{shortname}   = substr($buf, 30, 30); $obj{shortname} =~ s/[\0 ]+$//;
+    $obj{roomlink}    = unpack("f<", substr($buf, 60, 4));
+    $obj{invisible}   = unpack("s", substr($buf, 64, 2));
+    $obj{jailtrap}    = unpack("s", substr($buf, 66, 2));
+    $obj{doorlock}    = unpack("s", substr($buf, 68, 2));
+    $obj{destination} = unpack("s", substr($buf, 70, 2));
+    $obj{permanent}   = unpack("s", substr($buf, 72, 2));
+    $obj{hidden}      = unpack("s", substr($buf, 74, 2));
+    $obj{closed}      = unpack("s", substr($buf, 76, 2));
+    $obj{keyed}       = unpack("s", substr($buf, 78, 2));
+    $obj{relocks}     = unpack("s", substr($buf, 80, 2));
+    $obj{longdesc}    = substr($buf, 82, 80); $obj{longdesc} =~ s/[\0 ]+$//;
+    $obj{fromhour}    = unpack("s", substr($buf, 162, 2));
+    $obj{frommin}     = unpack("s", substr($buf, 164, 2));
+    $obj{tohour}      = unpack("s", substr($buf, 166, 2));
+    $obj{tomin}       = unpack("s", substr($buf, 168, 2));
+    $obj{lightroom}   = unpack("s", substr($buf, 170, 2));
+    $obj{lighttime}   = unpack("s", substr($buf, 172, 2));
+    $obj{shortdesc}   = substr($buf, 174, 80); $obj{shortdesc} =~ s/[\0 ]+$//;
+    $obj{teleport}    = unpack("f<", substr($buf, 252, 4));
+    $obj{trap}        = unpack("s", substr($buf, 254, 2));
+    return \%obj;
+}
+
+sub editor_read_treasure_record {
+    my ($buf) = @_;
+    my $rec_offset = 0;
+    if (substr($buf, 0, 2) eq "\0\0" && substr($buf, 2, 1) =~ /[ -~]/) {
+        $rec_offset = 2;
+    }
+    my %treas;
+    $treas{name}         = substr($buf, $rec_offset + 0, 30);   $treas{name}      =~ s/[\0 ]+$//;
+    $treas{shortname}    = substr($buf, $rec_offset + 30, 30);  $treas{shortname} =~ s/[\0 ]+$//;
+    $treas{weight}       = unpack("s", substr($buf, $rec_offset + 60, 2));
+    $treas{gold}         = unpack("s", substr($buf, $rec_offset + 62, 2));
+    $treas{spell}        = unpack("s", substr($buf, $rec_offset + 64, 2));
+    $treas{plus}         = unpack("s", substr($buf, $rec_offset + 66, 2));
+    $treas{coin}         = unpack("s", substr($buf, $rec_offset + 68, 2));
+    $treas{keyed}        = unpack("s", substr($buf, $rec_offset + 70, 2));
+    $treas{scroll}       = unpack("s", substr($buf, $rec_offset + 72, 2));
+    $treas{charges}      = unpack("s", substr($buf, $rec_offset + 74, 2));
+    $treas{potion}       = unpack("s", substr($buf, $rec_offset + 76, 2));
+    $treas{armor}        = unpack("s", substr($buf, $rec_offset + 78, 2));
+    $treas{shield}       = unpack("s", substr($buf, $rec_offset + 80, 2));
+    $treas{weapon}       = unpack("s", substr($buf, $rec_offset + 82, 2));
+    $treas{container}    = unpack("s", substr($buf, $rec_offset + 84, 2));
+    $treas{type}         = unpack("s", substr($buf, $rec_offset + 86, 2));
+    $treas{locked}       = unpack("s", substr($buf, $rec_offset + 88, 2));
+    $treas{closed}       = unpack("s", substr($buf, $rec_offset + 90, 2));
+    $treas{loadable}     = unpack("s", substr($buf, $rec_offset + 92, 2));
+    $treas{ammunition}   = unpack("s", substr($buf, $rec_offset + 94, 2));
+    $treas{ammoloads}    = unpack("s", substr($buf, $rec_offset + 96, 2));
+    $treas{invisible}    = unpack("s", substr($buf, $rec_offset + 98, 2));
+    $treas{permanent}    = unpack("s", substr($buf, $rec_offset + 100, 2));
+    $treas{proficiency}  = unpack("s", substr($buf, $rec_offset + 102, 2));
+    $treas{ringtype}     = unpack("s", substr($buf, $rec_offset + 104, 2));
+    $treas{ringspell}    = unpack("s", substr($buf, $rec_offset + 106, 2));
+    $treas{edible}       = unpack("s", substr($buf, $rec_offset + 108, 2));
+    $treas{rustable}     = unpack("s", substr($buf, $rec_offset + 110, 2));
+    $treas{rustpercent}  = unpack("s", substr($buf, $rec_offset + 112, 2));
+    $treas{stealable}    = unpack("s", substr($buf, $rec_offset + 114, 2));
+    $treas{stealpercent} = unpack("s", substr($buf, $rec_offset + 116, 2));
+    $treas{launchable}   = unpack("s", substr($buf, $rec_offset + 118, 2));
+    $treas{launchloads}  = unpack("s", substr($buf, $rec_offset + 120, 2));
+    $treas{launchammo}   = unpack("s", substr($buf, $rec_offset + 122, 2));
+    $treas{movable}      = unpack("s", substr($buf, $rec_offset + 124, 2));
+    $treas{vehicle}      = unpack("s", substr($buf, $rec_offset + 126, 2));
+    $treas{vehiclehits}  = unpack("s", substr($buf, $rec_offset + 128, 2));
+    $treas{vehicletype}  = unpack("s", substr($buf, $rec_offset + 130, 2));
+    $treas{lighttype}    = unpack("s", substr($buf, $rec_offset + 132, 2));
+    $treas{lightcharges} = unpack("s", substr($buf, $rec_offset + 134, 2));
+    $treas{fueltype}     = unpack("s", substr($buf, $rec_offset + 136, 2));
+    $treas{fuelcharges}  = unpack("s", substr($buf, $rec_offset + 138, 2));
+    return \%treas;
+}
+
+sub read_market_record {
+    my ($buf) = @_;
+    my %rec;
+    $rec{name}      = substr($buf, 0, 40);   $rec{name}      =~ s/[\0 ]+$//;  # Increased from 30
+    $rec{item}      = substr($buf, 40, 40);  $rec{item}      =~ s/[\0 ]+$//;  # Increased from 16
+    $rec{seller}    = substr($buf, 80, 40);  $rec{seller}    =~ s/[\0 ]+$//;  # Increased from 16
+    $rec{price}     = unpack("l", substr($buf, 120, 4));
+    $rec{idx}       = unpack("l", substr($buf, 124, 4));
+    $rec{type}      = unpack("s", substr($buf, 128, 2));
+    $rec{charges}   = unpack("s", substr($buf, 130, 2));
+    $rec{date}      = substr($buf, 132, 24);  $rec{date}      =~ s/[\0 ]+$//;  # Increased from 16
+    return \%rec;
+}
+
+sub read_action_record {
+    my ($buf) = @_;
+    my %rec;
+    $rec{attr1} = unpack("s", substr($buf, 0, 2));
+    $rec{attr2} = unpack("s", substr($buf, 2, 2));
+    $rec{encounter_rate} = unpack("s", substr($buf, 4, 2));
+    $rec{fumble} = unpack("s", substr($buf, 6, 2));
+    $rec{health_rate} = unpack("s", substr($buf, 8, 2));
+    $rec{hitpoints} = unpack("s", substr($buf, 10, 2));
+    $rec{inventory} = unpack("s", substr($buf, 12, 2));
+    $rec{level} = unpack("s", substr($buf, 14, 2));
+    $rec{monster_talk} = unpack("s", substr($buf, 16, 2));
+    $rec{monster_trigger} = unpack("s", substr($buf, 18, 2));
+    $rec{restrictions} = unpack("s", substr($buf, 20, 2));
+    $rec{rust_rate} = unpack("s", substr($buf, 22, 2));
+    $rec{spell_trigger} = unpack("s", substr($buf, 24, 2));
+    $rec{steal_rate} = unpack("s", substr($buf, 26, 2));
+    $rec{teleport} = unpack("s", substr($buf, 28, 2));
+    return \%rec;
+}
+
+sub read_rank_record {
+    my ($buf) = @_;
+    my %rec;
+    $rec{name}  = substr($buf, 0, 30); $rec{name} =~ s/[\0 ]+$//;
+    $rec{score} = unpack("l", substr($buf, 30, 4));
+    $rec{class} = substr($buf, 34, 16); $rec{class} =~ s/[\0 ]+$//;
+    $rec{level} = unpack("s", substr($buf, 50, 2));
+    $rec{date}  = substr($buf, 52, 16); $rec{date} =~ s/[\0 ]+$//;
+    return \%rec;
+}
+
+sub read_spell_record {
+    my ($buf) = @_;
+    my %spell;
+    $spell{name}         = substr($buf, 0, 30);    $spell{name}      =~ s/[\0 ]+$//;
+    $spell{chant}        = substr($buf, 30, 80);   $spell{chant}     =~ s/[\0 ]+$//;
+    $spell{level}        = unpack("s", substr($buf, 110, 2));
+    $spell{type}         = unpack("s", substr($buf, 112, 2));
+    $spell{teleport}     = unpack("f<", substr($buf, 114, 4));
+    $spell{psionic}      = unpack("s", substr($buf, 118, 2));
+    $spell{psionicmode}  = unpack("s", substr($buf, 120, 2));
+    $spell{classtype}    = unpack("s", substr($buf, 122, 2));
+    $spell{desc}         = substr($buf, 124, 80);  $spell{desc}      =~ s/[\0 ]+$//;
+    $spell{ingred}       = substr($buf, 204, 10);  $spell{ingred}    =~ s/[\0 ]+$//;
+    $spell{spellflag}    = unpack("s", substr($buf, 214, 2));
+    return \%spell;
+}
+
+sub editor_read_monster_record {
+    my ($buf) = @_;
+    my %mon;
+    $mon{name}      = substr($buf, 0, 30); $mon{name} =~ s/[\0 ]+$//;
+    $mon{plural}    = substr($buf, 30, 30); $mon{plural} =~ s/[\0 ]+$//;
+    $mon{treasure}  = unpack("H*", substr($buf, 60, 10)); $mon{treasure} =~ s/00+$//; $mon{treasure} = uc($mon{treasure});  # Changed to hex
+    $mon{exp}       = unpack("d", substr($buf, 70, 8));  # Changed from "l" to "d"
+    $mon{gold}      = unpack("d", substr($buf, 78, 8));  # Changed from "l" to "d"
+    $mon{number}    = unpack("s", substr($buf, 86, 2));
+    $mon{level}     = unpack("s", substr($buf, 88, 2));
+    $mon{hits}      = unpack("s", substr($buf, 90, 2));
+    $mon{poison}    = unpack("s", substr($buf, 92, 2));
+    $mon{leveldrain}= unpack("s", substr($buf, 94, 2));
+    $mon{spell}     = unpack("s", substr($buf, 96, 2));
+    $mon{block}     = unpack("s", substr($buf, 98, 2));
+    $mon{prevent}   = unpack("s", substr($buf,100, 2));
+    $mon{follow}    = unpack("s", substr($buf,102, 2));
+    $mon{magic}     = unpack("s", substr($buf,104, 2));
+    $mon{jail}      = unpack("s", substr($buf,106, 2));
+    $mon{teleport}  = unpack("f<", substr($buf,108, 4));
+    $mon{follow_percent}  = unpack("s", substr($buf,112, 2));
+    $mon{block_percent}   = unpack("s", substr($buf,114, 2));
+    $mon{prevent_percent} = unpack("s", substr($buf,116, 2));
+    $mon{spell_percent}   = unpack("s", substr($buf,118, 2));
+    $mon{poison_percent}  = unpack("s", substr($buf,120, 2));
+    $mon{drain_percent}   = unpack("s", substr($buf,122, 2));
+    $mon{rate}            = unpack("s", substr($buf,124, 2));
+    $mon{rate_percent}    = unpack("s", substr($buf,126, 2));
+    $mon{permanent}       = unpack("s", substr($buf,128, 2));
+    $mon{talk}            = unpack("H*", substr($buf,130, 10)); $mon{talk} =~ s/00+$//; $mon{talk} = uc($mon{talk});  # Changed to hex
+    $mon{psionic}         = unpack("s", substr($buf,140, 2));
+    $mon{psionic_spell}   = unpack("s", substr($buf,142, 2));
+    $mon{region}          = substr($buf,144, 16); $mon{region} =~ s/[\0 ]+$//;
+    $mon{behaviors}       = substr($buf,160, 20); $mon{behaviors} =~ s/[\0 ]+$//;
+    return \%mon;
+}
+
+sub editor_read_npc_record {
+    my ($buf) = @_;
+    my %npc;
+    $npc{name}        = substr($buf, 0, 30);   $npc{name}        =~ s/[\0 ]+$//;
+    $npc{plural}      = substr($buf, 30, 30);  $npc{plural}      =~ s/[\0 ]+$//;
+    $npc{treasure}    = substr($buf, 60, 10);  $npc{treasure}    =~ s/[\0 ]+$//;
+    $npc{exp}         = unpack("d", substr($buf, 70, 8));
+    $npc{gold}        = unpack("d", substr($buf, 78, 8));
+    $npc{number}      = unpack("s", substr($buf, 86, 2));
+    $npc{level}       = unpack("s", substr($buf, 88, 2));
+    $npc{hits}        = unpack("s", substr($buf, 90, 2));
+    $npc{poison}      = unpack("s", substr($buf, 92, 2));
+    $npc{leveldrain}  = unpack("s", substr($buf, 94, 2));
+    $npc{spell}       = unpack("s", substr($buf, 96, 2));
+    $npc{block}       = unpack("s", substr($buf, 98, 2));
+    $npc{prevent}     = unpack("s", substr($buf,100, 2));
+    $npc{follow}      = unpack("s", substr($buf,102, 2));
+    $npc{magic}       = unpack("s", substr($buf,104, 2));
+    $npc{jail}        = unpack("s", substr($buf,106, 2));
+    $npc{teleport}    = unpack("f<", substr($buf,108, 4));
+    $npc{follow_percent}  = unpack("s", substr($buf,112, 2));
+    $npc{block_percent}   = unpack("s", substr($buf,114, 2));
+    $npc{prevent_percent} = unpack("s", substr($buf,116, 2));
+    $npc{spell_percent}   = unpack("s", substr($buf,118, 2));
+    $npc{poison_percent}  = unpack("s", substr($buf,120, 2));
+    $npc{drain_percent}   = unpack("s", substr($buf,122, 2));
+    $npc{rate}        = unpack("s", substr($buf,124, 2));
+    $npc{rate_percent}= unpack("s", substr($buf,126, 2));
+    $npc{permanent}   = unpack("s", substr($buf,128, 2));
+    $npc{talk}        = substr($buf,130, 10);  $npc{talk}        =~ s/[\0 ]+$//;
+    $npc{psionic}     = unpack("s", substr($buf,140, 2));
+    $npc{psionic_spell}=unpack("s", substr($buf,142, 2));
+    return \%npc;
+}
+
+sub player_editor_menu {
+    my $player_dir = $datadir;
+    opendir(my $dh, $player_dir) or do {
+        writeline($config{'errorcolor'}."Cannot open player data directory: $player_dir".$config{'themecolor'}, 1);
+        pause();
+        return;
+    };
+    my @files = grep { /^player_(.+)\.dat$/ } readdir($dh);
+    closedir($dh);
+
+    my @players = map { /^player_(.+)\.dat$/; $1 } @files;
+    @players = sort { lc($a) cmp lc($b) } @players;
+    unless (@players) {
+        writeline($config{'errorcolor'}."No player records found.".$config{'themecolor'}, 1);
+        pause();
+        return;
+    }
+
+    my @fields = qw(
+        name class race level experience gold bank hp max_hp alignment proficiency proficiency_exp
+        stats str int wis dex con pie cha luck
+        brief cursed blessed invisible hidden poisoned passdoor
+        room nodeid
+    );
+    my $fields_per_page = 20;
+    my $field_page = 0;
+    my $idx = 0;
+
+    my $mode = 'view'; # 'view' or 'edit'
+    my %edit;
+    my %changed_fields;
+    my $changed = 0;
+
+    my %bool_fields = map { $_ => 1 } qw(brief cursed blessed invisible hidden poisoned passdoor);
+
+    while ($idx >= 0 && $idx < @players) {
+        my $name = $players[$idx];
+        my $player = load_player($name);
+        unless ($player && $player->{name}) {
+            writeline($config{'errorcolor'}."Failed to load player: $name".$config{'themecolor'}, 1);
+            pause();
+            $idx++;
+            next;
+        }
+
+        my $total_pages = int((@fields + $fields_per_page - 1) / $fields_per_page);
+        $field_page = 0 if $field_page < 0;
+        $field_page = $total_pages - 1 if $field_page >= $total_pages;
+        my $start = $field_page * $fields_per_page;
+        my $end = $start + $fields_per_page - 1;
+        $end = $#fields if $end > $#fields;
+
+        print "\e[2J\e[0;0H";
+        if ($mode eq 'view') {
+            writeline($config{'systemcolor'}."Player Editor [".($idx+1)."/".scalar(@players)."]".$config{'themecolor'}, 1);
+            writeline($config{'datacolor'}."Name: $player->{name}".$config{'themecolor'}, 1);
+
+            # Show fields without numbers
+            for my $i ($start..$end) {
+                my $f = $fields[$i];
+                my $val;
+                if ($f eq 'stats') {
+                    $val = join(" ", map { "$_:".(exists $player->{stats}{$_} ? $player->{stats}{$_} : 0) } qw(str int wis dex con pie cha luck));
+                } elsif (exists $player->{stats} && grep { $_ eq $f } qw(str int wis dex con pie cha luck)) {
+                    $val = defined $player->{stats}{$f} ? $player->{stats}{$f} : 0;
+                } elsif ($f =~ /^(level|experience|gold|bank|hp|max_hp|proficiency_exp|room|nodeid)$/) {
+                    $val = (defined $player->{$f} && $player->{$f} ne '') ? $player->{$f} : 0;
+                } elsif ($f =~ /^(brief|cursed|blessed|invisible|hidden|poisoned|passdoor)$/) {
+                    $val = defined $player->{$f} ? ($player->{$f} ? 'Yes' : 'No') : 'No';
+                } else {
+                    $val = defined $player->{$f} && $player->{$f} ne '' ? $player->{$f} : '[n/a]';
+                }
+                writeline($config{'datacolor'}."  $f: $val".$config{'themecolor'}, 1);
+            }
+
+            my $page_info = "Fields ".($start+1)."-".($end+1)."/".scalar(@fields)." (Page ".($field_page+1)."/$total_pages)";
+            writeline($config{'datacolor'}."$page_info".$config{'themecolor'}, 1);
+            writeline($config{'datacolor'}."[. Previous  ]. Next  <. PrevPage  >. NextPage  [E] Edit  [H] Help  [!] Quit".$config{'themecolor'}, 1);
+            writeline($config{'promptcolor'}."Enter option (nav, E, H, !, Q): ".$config{'themecolor'}, 0);
+
+            my $opt = getline("text", 8, "", 1);
+            $opt = '' unless defined $opt;
+            $opt =~ s/^\s+|\s+$//g;
+            $opt = uc($opt);
+
+            if ($opt eq "[") { $idx-- if $idx > 0; }
+            elsif ($opt eq "]") { $idx++ if $idx < $#players; }
+            elsif ($opt eq "<") { $field_page-- if $field_page > 0; }
+            elsif ($opt eq ">") { $field_page++ if $field_page < $total_pages-1; }
+            elsif ($opt eq "E") {
+                # Enter edit mode
+                %edit = %$player;
+                %changed_fields = ();
+                $changed = 0;
+                $mode = 'edit';
+            }
+            elsif ($opt eq "H") { show_help("Player Editor"); }
+            elsif ($opt eq "!" || $opt eq "Q") { last; }
+        }
+        elsif ($mode eq 'edit') {
+            writeline($config{'systemcolor'}."Player Editor - Edit Mode".$config{'themecolor'}, 1);
+            writeline($config{'datacolor'}."Name: $edit{name}".$config{'themecolor'}, 1);
+
+            # Show fields with numbers for selection
+            for my $i ($start..$end) {
+                my $f = $fields[$i];
+                my $val;
+                if ($f eq 'stats') {
+                    $val = join(" ", map { "$_:".(exists $edit{stats}{$_} ? $edit{stats}{$_} : 0) } qw(str int wis dex con pie cha luck));
+                } elsif (exists $edit{stats} && grep { $_ eq $f } qw(str int wis dex con pie cha luck)) {
+                    $val = defined $edit{stats}{$f} ? $edit{stats}{$f} : 0;
+                } elsif ($f =~ /^(level|experience|gold|bank|hp|max_hp|proficiency_exp|room|nodeid)$/) {
+                    $val = (defined $edit{$f} && $edit{$f} ne '') ? $edit{$f} : 0;
+                } elsif ($bool_fields{$f}) {
+                    $val = defined $edit{$f} ? ($edit{$f} ? 'Yes' : 'No') : 'No';
+                } else {
+                    $val = defined $edit{$f} && $edit{$f} ne '' ? $edit{$f} : '[n/a]';
+                }
+                my $color = exists $changed_fields{$f} ? $config{'errorcolor'} : $config{'datacolor'};
+                writeline($color."  ".($i+1).". $f: $val".$config{'themecolor'}, 1);
+            }
+
+            my $page_info = "Fields ".($start+1)."-".($end+1)."/".scalar(@fields)." (Page ".($field_page+1)."/$total_pages)";
+            writeline($config{'datacolor'}."$page_info".$config{'themecolor'}, 1);
+            writeline($config{'datacolor'}."  S. Save changes  X. Cancel  <. PrevPage  >. NextPage  H. Help".$config{'themecolor'}, 1);
+            writeline($config{'promptcolor'}."Select field number to edit (".($start+1)."-".($end+1)."), S, X, <, >, H: ".$config{'themecolor'}, 0);
+
+            my $opt = getline("text", 8, "", 1);
+            $opt = '' unless defined $opt;
+            $opt =~ s/^\s+|\s+$//g;
+            $opt = uc($opt);
+
+            if ($opt eq 'S') {
+                if ($changed) {
+                    writeline($config{'systemcolor'}."You changed:".$config{'themecolor'}, 1);
+                    for my $i (0..$#fields) {
+                        my $f = $fields[$i];
+                        next unless exists $changed_fields{$f};
+                        my $old = $player->{$f};
+                        my $new = $edit{$f};
+                        if ($f eq 'stats') {
+                            $old = join(" ", map { "$_:".($player->{stats}{$_}//0) } qw(str int wis dex con pie cha luck));
+                            $new = join(" ", map { "$_:".($edit{stats}{$_}//0) } qw(str int wis dex con pie cha luck));
+                        } elsif (exists $edit{stats} && grep { $_ eq $f } qw(str int wis dex con pie cha luck)) {
+                            $old = $player->{stats}{$f} // 0;
+                            $new = $edit{stats}{$f} // 0;
+                        }
+                        writeline($config{'errorcolor'}."  $old -> $new".$config{'themecolor'}, 1);
+                    }
+                    writeline($config{'promptcolor'}."Save changes (Y/N)? ".$config{'themecolor'}, 0);
+                    my $ans = getline("text", 2, "", 1);
+                    $ans = uc($ans // '');
+                    if ($ans eq "Y") {
+                        %$player = %edit;
+                        writeline($config{'systemcolor'}."Player record saved.".$config{'themecolor'}, 1);
+                        pause();
+                        $mode = 'view';
+                    } elsif ($ans eq "N") {
+                        writeline($config{'errorcolor'}."Changes discarded.".$config{'themecolor'}, 1);
+                        pause();
+                        $mode = 'view';
+                    }
+                } else {
+                    writeline($config{'datacolor'}."No changes made.".$config{'themecolor'}, 1);
+                    pause();
+                    $mode = 'view';
+                }
+            } elsif ($opt eq 'X') {
+                if ($changed) {
+                    writeline($config{'errorcolor'}."You have unsaved changes. Discard (Y/N)? ".$config{'themecolor'}, 0);
+                    my $ans = getline("text", 2, "", 1);
+                    $ans = uc($ans // '');
+                    if ($ans eq "Y") {
+                        writeline($config{'errorcolor'}."Edit cancelled. Changes discarded.".$config{'themecolor'}, 1);
+                        pause();
+                        $mode = 'view';
+                    }
+                } else {
+                    writeline($config{'errorcolor'}."Edit cancelled.".$config{'themecolor'}, 1);
+                    pause();
+                    $mode = 'view';
+                }
+            } elsif ($opt eq 'H') {
+                show_help("Player Editor - Edit Mode");
+            } elsif ($opt eq "<") {
+                $field_page-- if $field_page > 0;
+            } elsif ($opt eq ">") {
+                $field_page++ if $field_page < $total_pages-1;
+            } elsif ($opt =~ /^\d+$/ && $opt >= $start+1 && $opt <= $end+1) {
+                my $field = $fields[$opt-1];
+                my $old;
+                if ($field eq 'stats') {
+                    $old = join(" ", map { "$_:".(exists $edit{stats}{$_} ? $edit{stats}{$_} : 0) } qw(str int wis dex con pie cha luck));
+                    writeline(""); # Blank line before field prompt
+                    writeline($config{'datacolor'}."stats: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+                    for my $stat (qw(str int wis dex con pie cha luck)) {
+                        writeline($config{'promptcolor'}."$stat (".(exists $edit{stats}{$stat} ? $edit{stats}{$stat} : 0)."): ".$config{'themecolor'}, 0);
+                        my $val = getline("text", 4, $edit{stats}{$stat}, 1);
+                        $val =~ s/^\s+|\s+$//g;
+                        if ($val ne "" && $val =~ /^-?\d+$/) {
+                            $edit{stats}{$stat} = int($val);
+                            $changed = 1;
+                            $changed_fields{'stats'} = 1;
+                        }
+                    }
+                } elsif (exists $edit{stats} && grep { $_ eq $field } qw(str int wis dex con pie cha luck)) {
+                    $old = exists $edit{stats}{$field} ? $edit{stats}{$field} : 0;
+                    writeline(""); # Blank line before field prompt
+                    writeline($config{'datacolor'}."$field: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+                    writeline($config{'promptcolor'}."(Enter to keep, or type new value): ".$config{'themecolor'}, 0);
+                    my $val = getline("text", 4, $old, 1);
+                    $val =~ s/^\s+|\s+$//g;
+                    if ($val ne "" && $val =~ /^-?\d+$/ && $val ne $old) {
+                        $edit{stats}{$field} = int($val);
+                        $changed = 1;
+                        $changed_fields{$field} = 1;
+                    }
+                } elsif ($field =~ /^(level|experience|gold|bank|hp|max_hp|proficiency_exp|room|nodeid)$/) {
+                    $old = (defined $edit{$field} && $edit{$field} ne '') ? $edit{$field} : 0;
+                    writeline(""); # Blank line before field prompt
+                    writeline($config{'datacolor'}."$field: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+                    writeline($config{'promptcolor'}."(Enter to keep, or type new value): ".$config{'themecolor'}, 0);
+                    my $val = getline("text", 12, $old, 1);
+                    $val =~ s/^\s+|\s+$//g;
+                    if ($val ne "" && $val =~ /^-?\d+$/ && $val ne $old) {
+                        $edit{$field} = int($val);
+                        $changed = 1;
+                        $changed_fields{$field} = 1;
+                    }
+                } elsif ($bool_fields{$field}) {
+                    $edit{$field} = $edit{$field} ? 0 : 1;
+                    $changed = 1;
+                    $changed_fields{$field} = 1;
+                } else {
+                    $old = defined $edit{$field} && $edit{$field} ne '' ? $edit{$field} : '';
+                    writeline(""); # Blank line before field prompt
+                    writeline($config{'datacolor'}."$field: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+                    writeline($config{'promptcolor'}."(Enter to keep, or type new value): ".$config{'themecolor'}, 0);
+                    my $val = getline("text", 80, $old, 1);
+                    $val =~ s/^\s+|\s+$//g;
+                    if ($val ne "" && $val ne $old) {
+                        $edit{$field} = $val;
+                        $changed = 1;
+                        $changed_fields{$field} = 1;
+                    }
+                }
+                # After editing, immediately redraw the edit menu for further edits or save/cancel
+            }
+        }
+    }
+}
+
+sub edit_player_record {
+    my ($player, $fields, $field_page, $fields_per_page) = @_;
+    my %edit = %$player;
+    my $changed = 0;
+    my %changed_fields;
+
+    my %bool_fields = map { $_ => 1 } qw(brief cursed blessed invisible hidden poisoned passdoor);
+
+    my $total_pages = int((@$fields + $fields_per_page - 1) / $fields_per_page);
+    $field_page //= 0;
+    $fields_per_page //= 20;
+
+    while (1) {
+        my $start = $field_page * $fields_per_page;
+        my $end = $start + $fields_per_page - 1;
+        $end = $#$fields if $end > $#$fields;
+
+        print "\e[2J\e[0;0H";
+        writeline($config{'systemcolor'}."Player Editor - Edit Mode".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."Name: $edit{name}".$config{'themecolor'}, 1);
+
+        for my $i ($start..$end) {
+            my $f = $fields->[$i];
+            my $val;
+            if ($f eq 'stats') {
+                $val = join(" ", map { "$_:".(exists $edit{stats}{$_} ? $edit{stats}{$_} : 0) } qw(str int wis dex con pie cha luck));
+            } elsif (exists $edit{stats} && grep { $_ eq $f } qw(str int wis dex con pie cha luck)) {
+                $val = defined $edit{stats}{$f} ? $edit{stats}{$f} : 0;
+            } elsif ($f =~ /^(level|experience|gold|bank|hp|max_hp|proficiency_exp|room|nodeid)$/) {
+                $val = (defined $edit{$f} && $edit{$f} ne '') ? $edit{$f} : 0;
+            } elsif ($bool_fields{$f}) {
+                $val = defined $edit{$f} ? ($edit{$f} ? 'Yes' : 'No') : 'No';
+            } else {
+                $val = defined $edit{$f} && $edit{$f} ne '' ? $edit{$f} : '[n/a]';
+            }
+            my $color = exists $changed_fields{$f} ? $config{'errorcolor'} : $config{'datacolor'};
+            writeline($color."  ".($i+1).". $f: $val".$config{'themecolor'}, 1);
+        }
+
+        my $page_info = "Fields ".($start+1)."-".($end+1)."/".scalar(@$fields)." (Page ".($field_page+1)."/$total_pages)";
+        writeline($config{'datacolor'}."$page_info".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  S. Save changes  X. Cancel  <. PrevPage  >. NextPage  H. Help".$config{'themecolor'}, 1);
+        writeline($config{'promptcolor'}."Select field number to edit (".($start+1)."-".($end+1)."), S, X, <, >, H: ".$config{'themecolor'}, 0);
+
+        my $opt = getline("text", 8, "", 1);
+        $opt = '' unless defined $opt;
+        $opt =~ s/^\s+|\s+$//g;
+        $opt = uc($opt);
+
+        if ($opt eq 'S') {
+            if ($changed) {
+                writeline($config{'systemcolor'}."You changed:".$config{'themecolor'}, 1);
+                for my $i (0..$#$fields) {
+                    my $f = $fields->[$i];
+                    next unless exists $changed_fields{$f};
+                    my $old = $player->{$f};
+                    my $new = $edit{$f};
+                    if ($f eq 'stats') {
+                        $old = join(" ", map { "$_:".($player->{stats}{$_}//0) } qw(str int wis dex con pie cha luck));
+                        $new = join(" ", map { "$_:".($edit{stats}{$_}//0) } qw(str int wis dex con pie cha luck));
+                    } elsif (exists $edit{stats} && grep { $_ eq $f } qw(str int wis dex con pie cha luck)) {
+                        $old = $player->{stats}{$f} // 0;
+                        $new = $edit{stats}{$f} // 0;
+                    }
+                    writeline($config{'errorcolor'}."  $old -> $new".$config{'themecolor'}, 1);
+                }
+                writeline($config{'promptcolor'}."Save changes (Y/N)? ".$config{'themecolor'}, 0);
+                my $ans = getline("text", 2, "", 1);
+                $ans = uc($ans // '');
+                if ($ans eq "Y") {
+                    %$player = %edit;
+                    writeline($config{'systemcolor'}."Player record saved.".$config{'themecolor'}, 1);
+                    pause();
+                    last;
+                } elsif ($ans eq "N") {
+                    writeline($config{'errorcolor'}."Changes discarded.".$config{'themecolor'}, 1);
+                    pause();
+                    last;
+                }
+            } else {
+                writeline($config{'datacolor'}."No changes made.".$config{'themecolor'}, 1);
+                pause();
+                last;
+            }
+        } elsif ($opt eq 'X') {
+            if ($changed) {
+                writeline($config{'errorcolor'}."You have unsaved changes. Discard (Y/N)? ".$config{'themecolor'}, 0);
+                my $ans = getline("text", 2, "", 1);
+                $ans = uc($ans // '');
+                if ($ans eq "Y") {
+                    writeline($config{'errorcolor'}."Edit cancelled. Changes discarded.".$config{'themecolor'}, 1);
+                    pause();
+                    last;
+                }
+            } else {
+                writeline($config{'errorcolor'}."Edit cancelled.".$config{'themecolor'}, 1);
+                pause();
+                last;
+            }
+        } elsif ($opt eq 'H') {
+            show_help("Player Editor - Edit Mode");
+        } elsif ($opt eq "<") {
+            $field_page-- if $field_page > 0;
+        } elsif ($opt eq ">") {
+            $field_page++ if $field_page < $total_pages-1;
+        } elsif ($opt =~ /^\d+$/ && $opt >= $start+1 && $opt <= $end+1) {
+            my $field = $fields->[$opt-1];
+            my $old;
+            if ($field eq 'stats') {
+                $old = join(" ", map { "$_:".(exists $edit{stats}{$_} ? $edit{stats}{$_} : 0) } qw(str int wis dex con pie cha luck));
+                writeline(""); # Blank line before field prompt
+                writeline($config{'datacolor'}."stats: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+                for my $stat (qw(str int wis dex con pie cha luck)) {
+                    writeline($config{'promptcolor'}."$stat (".(exists $edit{stats}{$stat} ? $edit{stats}{$stat} : 0)."): ".$config{'themecolor'}, 0);
+                    my $val = getline("text", 4, $edit{stats}{$stat}, 1);
+                    $val =~ s/^\s+|\s+$//g;
+                    if ($val ne "" && $val =~ /^-?\d+$/) {
+                        $edit{stats}{$stat} = int($val);
+                        $changed = 1;
+                        $changed_fields{'stats'} = 1;
+                    }
+                }
+            } elsif (exists $edit{stats} && grep { $_ eq $field } qw(str int wis dex con pie cha luck)) {
+                $old = exists $edit{stats}{$field} ? $edit{stats}{$field} : 0;
+                writeline(""); # Blank line before field prompt
+                writeline($config{'datacolor'}."$field: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+                writeline($config{'promptcolor'}."(Enter to keep, or type new value): ".$config{'themecolor'}, 0);
+                my $val = getline("text", 4, $old, 1);
+                $val =~ s/^\s+|\s+$//g;
+                if ($val ne "" && $val =~ /^-?\d+$/ && $val ne $old) {
+                    $edit{stats}{$field} = int($val);
+                    $changed = 1;
+                    $changed_fields{$field} = 1;
+                }
+            } elsif ($field =~ /^(level|experience|gold|bank|hp|max_hp|proficiency_exp|room|nodeid)$/) {
+                $old = (defined $edit{$field} && $edit{$field} ne '') ? $edit{$field} : 0;
+                writeline(""); # Blank line before field prompt
+                writeline($config{'datacolor'}."$field: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+                writeline($config{'promptcolor'}."(Enter to keep, or type new value): ".$config{'themecolor'}, 0);
+                my $val = getline("text", 12, $old, 1);
+                $val =~ s/^\s+|\s+$//g;
+                if ($val ne "" && $val =~ /^-?\d+$/ && $val ne $old) {
+                    $edit{$field} = int($val);
+                    $changed = 1;
+                    $changed_fields{$field} = 1;
+                }
+            } elsif ($bool_fields{$field}) {
+                $edit{$field} = $edit{$field} ? 0 : 1;
+                $changed = 1;
+                $changed_fields{$field} = 1;
+            } else {
+                $old = defined $edit{$field} && $edit{$field} ne '' ? $edit{$field} : '';
+                writeline(""); # Blank line before field prompt
+                writeline($config{'datacolor'}."$field: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+                writeline($config{'promptcolor'}."(Enter to keep, or type new value): ".$config{'themecolor'}, 0);
+                my $val = getline("text", 80, $old, 1);
+                $val =~ s/^\s+|\s+$//g;
+                if ($val ne "" && $val ne $old) {
+                    $edit{$field} = $val;
+                    $changed = 1;
+                    $changed_fields{$field} = 1;
+                }
+            }
+            # After editing, immediately redraw the edit menu for further edits or save/cancel
+            # (do NOT re-enter the field selection menu)
+        }
+    }
+}
+
+sub data_editor_menu {
+    my ($key, $records, $fields, $title) = @_;
+    my $idx = 0;
+    my $fields_per_page = 20;
+    my $field_page = 0;
+    my $mode = 'view'; # 'view' or 'edit'
+    my %edit;
+    my %changed_fields;
+    my $changed = 0;
+
+    while ($idx >= 0 && $idx < @$records) {
+        my $rec = $records->[$idx];
+        my $total_pages = int((@$fields + $fields_per_page - 1) / $fields_per_page);
+        $field_page = 0 if $field_page < 0;
+        $field_page = $total_pages - 1 if $field_page >= $total_pages;
+        my $start = $field_page * $fields_per_page;
+        my $end = $start + $fields_per_page - 1;
+        $end = $#$fields if $end > $#$fields;
+
+        print "\e[2J\e[0;0H";
+        if ($mode eq 'view') {
+            writeline($config{'systemcolor'}."$title Editor [Record ".($idx+1)."/".scalar(@$records)."]".$config{'themecolor'}, 1);
+            writeline($config{'datacolor'}."Index: ".($rec->{_idx} // $idx+1).$config{'themecolor'}, 1);
+
+            # Show fields without numbers/letters
+            for my $i ($start..$end) {
+                my $f = $fields->[$i];
+                my $val = defined $rec->{$f} && $rec->{$f} ne '' ? $rec->{$f} : '[n/a]';
+                writeline($config{'datacolor'}."  $f: $val".$config{'themecolor'}, 1);
+            }
+
+            my $page_info = "Fields ".($start+1)."-".($end+1)."/".scalar(@$fields)." (Page ".($field_page+1)."/$total_pages)";
+            writeline($config{'datacolor'}."$page_info".$config{'themecolor'}, 1);
+            writeline($config{'datacolor'}."[. Previous  ]. Next  <. PrevPage  >. NextPage  [E] Edit  [H] Help  [!] Quit".$config{'themecolor'}, 1);
+            writeline($config{'promptcolor'}."Enter option (nav, E, H, !, Q): ".$config{'themecolor'}, 0);
+
+            my $opt = getline("text", 8, "", 1);
+            $opt = '' unless defined $opt;
+            $opt =~ s/^\s+|\s+$//g;
+            $opt = uc($opt);
+
+            if ($opt eq "[") { $idx-- if $idx > 0; }
+            elsif ($opt eq "]") { $idx++ if $idx < $#$records; }
+            elsif ($opt eq "<") { $field_page-- if $field_page > 0; }
+            elsif ($opt eq ">") { $field_page++ if $field_page < $total_pages-1; }
+            elsif ($opt eq "E") {
+                %edit = %$rec;
+                %changed_fields = ();
+                $changed = 0;
+                $mode = 'edit';
+            }
+            elsif ($opt eq "H") { show_help($title); }
+            elsif ($opt eq "!" || $opt eq "Q") { last; }
+            # In view mode, field numbers do nothing
+        }
+        elsif ($mode eq 'edit') {
+            writeline($config{'systemcolor'}."$title Editor - Edit Mode".$config{'themecolor'}, 1);
+            writeline($config{'datacolor'}."Index: ".($rec->{_idx} // $idx+1).$config{'themecolor'}, 1);
+
+            # Show fields with numbers for selection
+            for my $i ($start..$end) {
+                my $f = $fields->[$i];
+                my $val = defined $edit{$f} && $edit{$f} ne '' ? $edit{$f} : '[n/a]';
+                my $color = exists $changed_fields{$f} ? $config{'errorcolor'} : $config{'datacolor'};
+                writeline($color."  ".($i+1).". $f: $val".$config{'themecolor'}, 1);
+            }
+
+            my $page_info = "Fields ".($start+1)."-".($end+1)."/".scalar(@$fields)." (Page ".($field_page+1)."/$total_pages)";
+            writeline($config{'datacolor'}."$page_info".$config{'themecolor'}, 1);
+            writeline($config{'datacolor'}."  S. Save changes  X. Cancel  <. PrevPage  >. NextPage  H. Help".$config{'themecolor'}, 1);
+            writeline($config{'promptcolor'}."Select field number to edit (".($start+1)."-".($end+1)."), S, X, <, >, H: ".$config{'themecolor'}, 0);
+
+            my $opt = getline("text", 8, "", 1);
+            $opt = '' unless defined $opt;
+            $opt =~ s/^\s+|\s+$//g;
+            $opt = uc($opt);
+
+            if ($opt eq 'S') {
+                if ($changed) {
+                    writeline($config{'systemcolor'}."You changed:".$config{'themecolor'}, 1);
+                    for my $i (0..$#$fields) {
+                        my $f = $fields->[$i];
+                        next unless exists $changed_fields{$f};
+                        my $old = $rec->{$f};
+                        my $new = $edit{$f};
+                        writeline($config{'errorcolor'}."  $old -> $new".$config{'themecolor'}, 1);
+                    }
+                    writeline($config{'promptcolor'}."Save changes (Y/N)? ".$config{'themecolor'}, 0);
+                    my $ans = getline("text", 2, "", 1);
+                    $ans = uc($ans // '');
+                    if ($ans eq "Y") {
+                        $records->[$idx] = { %edit };
+                        save_records($key, $records);
+                        writeline($config{'systemcolor'}."Record saved.".$config{'themecolor'}, 1);
+                        pause();
+                        $mode = 'view';
+                    } elsif ($ans eq "N") {
+                        writeline($config{'errorcolor'}."Changes discarded.".$config{'themecolor'}, 1);
+                        pause();
+                        $mode = 'view';
+                    }
+                } else {
+                    writeline($config{'datacolor'}."No changes made.".$config{'themecolor'}, 1);
+                    pause();
+                    $mode = 'view';
+                }
+            } elsif ($opt eq 'X') {
+                if ($changed) {
+                    writeline($config{'errorcolor'}."You have unsaved changes. Discard (Y/N)? ".$config{'themecolor'}, 0);
+                    my $ans = getline("text", 2, "", 1);
+                    $ans = uc($ans // '');
+                    if ($ans eq "Y") {
+                        writeline($config{'errorcolor'}."Edit cancelled. Changes discarded.".$config{'themecolor'}, 1);
+                        pause();
+                        $mode = 'view';
+                    }
+                } else {
+                    writeline($config{'errorcolor'}."Edit cancelled.".$config{'themecolor'}, 1);
+                    pause();
+                    $mode = 'view';
+                }
+            } elsif ($opt eq 'H') {
+                show_help("$title Editor - Edit Mode");
+            } elsif ($opt eq "<") {
+                $field_page-- if $field_page > 0;
+            } elsif ($opt eq ">") {
+                $field_page++ if $field_page < $total_pages-1;
+            } elsif ($opt =~ /^\d+$/ && $opt >= $start+1 && $opt <= $end+1) {
+                # Only prompt for value if a valid field number is selected
+                my $field = $fields->[$opt-1];
+                my $old = defined $edit{$field} ? $edit{$field} : '';
+                writeline(""); # Blank line before field prompt
+                writeline($config{'datacolor'}."$field: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+                writeline($config{'promptcolor'}."(Enter to keep, or type new value): ".$config{'themecolor'}, 0);
+                my $val = getline("text", 80, $old, 1);
+                $val =~ s/^\s+|\s+$//g;
+                if ($val ne "" && $val ne $old) {
+                    $edit{$field} = $val;
+                    $changed = 1;
+                    $changed_fields{$field} = 1;
+                }
+                # After editing, immediately redraw the edit menu for further edits or save/cancel
+            }
+        }
+    }
+}
+
+sub edit_record {
+    # This is now only called by data_editor_menu for direct field edit, so just call data_editor_menu in edit mode
+    my ($key, $records, $idx, $fields, $title, $field_page, $fields_per_page, $direct_field) = @_;
+    # Start in edit mode and jump to the requested field if provided
+    my $mode = 'edit';
+    my %edit = %{ $records->[$idx] };
+    my %changed_fields;
+    my $changed = 0;
+    $fields_per_page //= 20;
+    $field_page //= 0;
+    my $total_pages = int((@$fields + $fields_per_page - 1) / $fields_per_page);
+
+    while (1) {
+        my $start = $field_page * $fields_per_page;
+        my $end = $start + $fields_per_page - 1;
+        $end = $#$fields if $end > $#$fields;
+
+        print "\e[2J\e[0;0H";
+        writeline($config{'systemcolor'}."$title Editor - Edit Mode".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."Index: ".($records->[$idx]{_idx} // $idx+1).$config{'themecolor'}, 1);
+
+        for my $i ($start..$end) {
+            my $f = $fields->[$i];
+            my $val = defined $edit{$f} && $edit{$f} ne '' ? $edit{$f} : '[n/a]';
+            my $color = exists $changed_fields{$f} ? $config{'errorcolor'} : $config{'datacolor'};
+            writeline($color."  ".($i+1).". $f: $val".$config{'themecolor'}, 1);
+        }
+
+        my $page_info = "Fields ".($start+1)."-".($end+1)."/".scalar(@$fields)." (Page ".($field_page+1)."/$total_pages)";
+        writeline($config{'datacolor'}."$page_info".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  S. Save changes  X. Cancel  <. PrevPage  >. NextPage  H. Help".$config{'themecolor'}, 1);
+
+        my $opt;
+        if (defined $direct_field && $direct_field >= $start && $direct_field <= $end) {
+            $opt = $direct_field + 1;
+            undef $direct_field;
+        } else {
+            writeline($config{'promptcolor'}."Select field number to edit (".($start+1)."-".($end+1)."), S, X, <, >, H: ".$config{'themecolor'}, 0);
+            $opt = getline("text", 8, "", 1);
+            $opt = '' unless defined $opt;
+            $opt =~ s/^\s+|\s+$//g;
+            $opt = uc($opt);
+        }
+
+        if ($opt eq 'S') {
+            if ($changed) {
+                writeline($config{'systemcolor'}."You changed:".$config{'themecolor'}, 1);
+                for my $i (0..$#$fields) {
+                    my $f = $fields->[$i];
+                    next unless exists $changed_fields{$f};
+                    my $old = $records->[$idx]{$f};
+                    my $new = $edit{$f};
+                    writeline($config{'errorcolor'}."  $old -> $new".$config{'themecolor'}, 1);
+                }
+                writeline($config{'promptcolor'}."Save changes (Y/N)? ".$config{'themecolor'}, 0);
+                my $ans = getline("text", 2, "", 1);
+                $ans = uc($ans // '');
+                if ($ans eq "Y") {
+                    $records->[$idx] = { %edit };
+                    save_records($key, $records);
+                    writeline($config{'systemcolor'}."Record saved.".$config{'themecolor'}, 1);
+                    pause();
+                    last;
+                } elsif ($ans eq "N") {
+                    writeline($config{'errorcolor'}."Changes discarded.".$config{'themecolor'}, 1);
+                    pause();
+                    last;
+                }
+            } else {
+                writeline($config{'datacolor'}."No changes made.".$config{'themecolor'}, 1);
+                pause();
+                last;
+            }
+        } elsif ($opt eq 'X') {
+            if ($changed) {
+                writeline($config{'errorcolor'}."You have unsaved changes. Discard (Y/N)? ".$config{'themecolor'}, 0);
+                my $ans = getline("text", 2, "", 1);
+                $ans = uc($ans // '');
+                if ($ans eq "Y") {
+                    writeline($config{'errorcolor'}."Edit cancelled. Changes discarded.".$config{'themecolor'}, 1);
+                    pause();
+                    last;
+                }
+            } else {
+                writeline($config{'errorcolor'}."Edit cancelled.".$config{'themecolor'}, 1);
+                pause();
+                last;
+            }
+        } elsif ($opt eq 'H') {
+            show_help("$title Editor - Edit Mode");
+        } elsif ($opt eq "<") {
+            $field_page-- if $field_page > 0;
+        } elsif ($opt eq ">") {
+            $field_page++ if $field_page < $total_pages-1;
+        } elsif ($opt =~ /^\d+$/ && $opt >= $start+1 && $opt <= $end+1) {
+            my $field = $fields->[$opt-1];
+            my $old = defined $edit{$field} ? $edit{$field} : '';
+            writeline(""); # Blank line before field prompt
+            writeline($config{'datacolor'}."$field: ".$config{'themecolor'}."$old".$config{'themecolor'}, 1);
+            writeline($config{'promptcolor'}."(Enter to keep, or type new value): ".$config{'themecolor'}, 0);
+            my $val = getline("text", 80, $old, 1);
+            $val =~ s/^\s+|\s+$//g;
+            if ($val ne "" && $val ne $old) {
+                $edit{$field} = $val;
+                $changed = 1;
+                $changed_fields{$field} = 1;
+            }
+        }
+    }
+}
+
+sub show_help {
+    my ($context) = @_;
+    print "\e[2J\e[0;0H";
+    writeline($config{'systemcolor'}."$context Help".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."[. Previous.  ]. Next  [E] Edit  [H] Help  [!] Quit".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."Navigate records with [ and ]. Edit with E. Quit with ! or Q.".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."While editing, select a field letter to change its value.".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."Press any key to return.".$config{'themecolor'}, 1);
+    waitkey();
+}
+
+# --- Save Records Subroutine ---
+
+sub save_records {
+    my ($key, $records) = @_;
+    my $file = $datadir.$datafiles{$key}{file};
+    my $recsize = $datafiles{$key}{recsize};
+    my $loader = $datafiles{$key}{loader};
+    lockfile($file);
+    open(my $fh, ">:raw", $file) or do {
+        unlockfile($file);
+        writeline($config{'errorcolor'}."Failed to save $file".$config{'themecolor'}, 1);
+        return;
+    };
+    foreach my $rec (@$records) {
+        my $buf = pack_record($key, $rec);
+        print $fh $buf;
+    }
+    close($fh);
+    unlockfile($file);
+}
+
+# --- Pack Record (for saving) ---
+
+sub pack_record {
+    my ($key, $rec) = @_;
+
+    if ($key eq 'market') {
+        my $buf = '';
+        $buf .= pack("a40",  $rec->{name}    // '');  # Increased from 30
+        $buf .= pack("a40",  $rec->{item}    // '');  # Increased from 16
+        $buf .= pack("a40",  $rec->{seller}  // '');  # Increased from 16
+        $buf .= pack("l",    $rec->{price}   // 0);
+        $buf .= pack("l",    $rec->{idx}     // 0);
+        $buf .= pack("s",    $rec->{type}    // 0);
+        $buf .= pack("s",    $rec->{charges} // 1);
+        $buf .= pack("a24",  $rec->{date}    // '');  # Increased from 16
+        $buf .= pack("a44",  ''); # reserved/padding - increased from 38
+        return $buf;
+    }
+    if ($key eq 'treasure') {
+        my $buf = '';
+        $buf .= pack("a30", $rec->{name}      // '');
+        $buf .= pack("a30", $rec->{shortname} // '');
+        $buf .= pack("s",   $rec->{weight}    // 0);
+        $buf .= pack("s",   $rec->{gold}      // 0);
+        $buf .= pack("s",   $rec->{spell}     // 0);
+        $buf .= pack("s",   $rec->{plus}      // 0);
+        $buf .= pack("s",   $rec->{coin}      // 0);
+        $buf .= pack("s",   $rec->{keyed}     // 0);
+        $buf .= pack("s",   $rec->{scroll}    // 0);
+        $buf .= pack("s",   $rec->{charges}   // 0);
+        $buf .= pack("s",   $rec->{potion}    // 0);
+        $buf .= pack("s",   $rec->{armor}     // 0);
+        $buf .= pack("s",   $rec->{shield}    // 0);
+        $buf .= pack("s",   $rec->{weapon}    // 0);
+        $buf .= pack("s",   $rec->{container} // 0);
+        $buf .= pack("s",   $rec->{type}      // 0);
+        $buf .= pack("s",   $rec->{locked}    // 0);
+        $buf .= pack("s",   $rec->{closed}    // 0);
+        $buf .= pack("s",   $rec->{loadable}  // 0);
+        $buf .= pack("s",   $rec->{ammunition}// 0);
+        $buf .= pack("s",   $rec->{ammoloads} // 0);
+        $buf .= pack("s",   $rec->{invisible} // 0);
+        $buf .= pack("s",   $rec->{permanent} // 0);
+        $buf .= pack("s",   $rec->{proficiency}//0);
+        $buf .= pack("s",   $rec->{ringtype}  // 0);
+        $buf .= pack("s",   $rec->{ringspell} // 0);
+        $buf .= pack("s",   $rec->{edible}    // 0);
+        $buf .= pack("s",   $rec->{rustable}  // 0);
+        $buf .= pack("s",   $rec->{rustpercent}//0);
+        $buf .= pack("s",   $rec->{stealable} // 0);
+        $buf .= pack("s",   $rec->{stealpercent}//0);
+        $buf .= pack("s",   $rec->{launchable}// 0);
+        $buf .= pack("s",   $rec->{launchloads}//0);
+        $buf .= pack("s",   $rec->{launchammo}// 0);
+        $buf .= pack("s",   $rec->{movable}   // 0);
+        $buf .= pack("s",   $rec->{vehicle}   // 0);
+        $buf .= pack("s",   $rec->{vehiclehits}//0);
+        $buf .= pack("s",   $rec->{vehicletype}//0);
+        $buf .= pack("s",   $rec->{lighttype} // 0);
+        $buf .= pack("s",   $rec->{lightcharges}//0);
+        $buf .= pack("s",   $rec->{fueltype}  // 0);
+        $buf .= pack("s",   $rec->{fuelcharges}//0);
+        return $buf;
+    }
+    if ($key eq 'objects') {
+        my $buf = '';
+        $buf .= pack("a30", $rec->{name}        // '');
+        $buf .= pack("a30", $rec->{shortname}   // '');
+        $buf .= pack("f<",  $rec->{roomlink}    // 0);
+        $buf .= pack("s",   $rec->{invisible}   // 0);
+        $buf .= pack("s",   $rec->{jailtrap}    // 0);
+        $buf .= pack("s",   $rec->{doorlock}    // 0);
+        $buf .= pack("s",   $rec->{destination} // 0);
+        $buf .= pack("s",   $rec->{permanent}   // 0);
+        $buf .= pack("s",   $rec->{hidden}      // 0);
+        $buf .= pack("s",   $rec->{closed}      // 0);
+        $buf .= pack("s",   $rec->{keyed}       // 0);
+        $buf .= pack("s",   $rec->{relocks}     // 0);
+        $buf .= pack("a80", $rec->{longdesc}    // '');
+        $buf .= pack("s",   $rec->{fromhour}    // 0);
+        $buf .= pack("s",   $rec->{frommin}     // 0);
+        $buf .= pack("s",   $rec->{tohour}      // 0);
+        $buf .= pack("s",   $rec->{tomin}       // 0);
+        $buf .= pack("s",   $rec->{lightroom}   // 0);
+        $buf .= pack("s",   $rec->{lighttime}   // 0);
+        $buf .= pack("a80", $rec->{shortdesc}   // '');
+        $buf .= pack("f<",  $rec->{teleport}    // 0);
+        $buf .= pack("s",   $rec->{trap}        // 0);
+        return $buf;
+    }
+    if ($key eq 'monsters') {
+        my $buf = '';
+        $buf .= pack("a30", $rec->{name}      // '');
+        $buf .= pack("a30", $rec->{plural}    // '');
+        $buf .= pack("a10", pack("H*", $rec->{treasure} // ''));  # Pack hex string back to binary
+        $buf .= pack("d",   $rec->{exp}       // 0);  # Changed from "l" to "d"
+        $buf .= pack("d",   $rec->{gold}      // 0);  # Changed from "l" to "d" 
+        $buf .= pack("s",   $rec->{number}    // 0);
+        $buf .= pack("s",   $rec->{level}     // 0);
+        $buf .= pack("s",   $rec->{hits}      // 0);
+        $buf .= pack("s",   $rec->{poison}    // 0);
+        $buf .= pack("s",   $rec->{leveldrain}// 0);
+        $buf .= pack("s",   $rec->{spell}     // 0);
+        $buf .= pack("s",   $rec->{block}     // 0);
+        $buf .= pack("s",   $rec->{prevent}   // 0);
+        $buf .= pack("s",   $rec->{follow}    // 0);
+        $buf .= pack("s",   $rec->{magic}     // 0);
+        $buf .= pack("s",   $rec->{jail}      // 0);
+        $buf .= pack("f<",  $rec->{teleport}  // 0);
+        $buf .= pack("s",   $rec->{follow_percent}  // 0);
+        $buf .= pack("s",   $rec->{block_percent}   // 0);
+        $buf .= pack("s",   $rec->{prevent_percent} // 0);
+        $buf .= pack("s",   $rec->{spell_percent}   // 0);
+        $buf .= pack("s",   $rec->{poison_percent}  // 0);
+        $buf .= pack("s",   $rec->{drain_percent}   // 0);
+        $buf .= pack("s",   $rec->{rate}            // 0);
+        $buf .= pack("s",   $rec->{rate_percent}    // 0);
+        $buf .= pack("s",   $rec->{permanent}       // 0);
+        $buf .= pack("a10", pack("H*", $rec->{talk} // ''));  # Pack hex string back to binary
+        $buf .= pack("s",   $rec->{psionic}         // 0);
+        $buf .= pack("s",   $rec->{psionic_spell}   // 0);
+        $buf .= pack("a16", $rec->{region}          // '');  # Changed from 12 to 16 bytes
+        $buf .= pack("a20", $rec->{behaviors}       // '');
+        return $buf;
+    }
+    if ($key eq 'npcs') {
+        my $buf = '';
+        $buf .= pack("a30", $rec->{name}        // '');
+        $buf .= pack("a30", $rec->{plural}      // '');
+        $buf .= pack("a10", $rec->{treasure}    // '');
+        $buf .= pack("d",   $rec->{exp}         // 0);
+        $buf .= pack("d",   $rec->{gold}        // 0);
+        $buf .= pack("s",   $rec->{number}      // 0);
+        $buf .= pack("s",   $rec->{level}       // 0);
+        $buf .= pack("s",   $rec->{hits}        // 0);
+        $buf .= pack("s",   $rec->{poison}      // 0);
+        $buf .= pack("s",   $rec->{leveldrain}  // 0);
+        $buf .= pack("s",   $rec->{spell}       // 0);
+        $buf .= pack("s",   $rec->{block}       // 0);
+        $buf .= pack("s",   $rec->{prevent}     // 0);
+        $buf .= pack("s",   $rec->{follow}      // 0);
+        $buf .= pack("s",   $rec->{magic}       // 0);
+        $buf .= pack("s",   $rec->{jail}        // 0);
+        $buf .= pack("f<",  $rec->{teleport}    // 0);
+        $buf .= pack("s",   $rec->{follow_percent}  // 0);
+        $buf .= pack("s",   $rec->{block_percent}   // 0);
+        $buf .= pack("s",   $rec->{prevent_percent} // 0);
+        $buf .= pack("s",   $rec->{spell_percent}   // 0);
+        $buf .= pack("s",   $rec->{poison_percent}  // 0);
+        $buf .= pack("s",   $rec->{drain_percent}   // 0);
+        $buf .= pack("s",   $rec->{rate}            // 0);
+        $buf .= pack("s",   $rec->{rate_percent}    // 0);
+        $buf .= pack("s",   $rec->{permanent}       // 0);
+        $buf .= pack("a10", $rec->{talk}            // '');
+        $buf .= pack("s",   $rec->{psionic}         // 0);
+        $buf .= pack("s",   $rec->{psionic_spell}   // 0);
+        return $buf;
+    }
+    if ($key eq 'actions') {
+        my $buf = '';
+        $buf .= pack("s", $rec->{attr1}           // 0);
+        $buf .= pack("s", $rec->{attr2}           // 0);
+        $buf .= pack("s", $rec->{encounter_rate}  // 0);
+        $buf .= pack("s", $rec->{fumble}          // 0);
+        $buf .= pack("s", $rec->{health_rate}     // 0);
+        $buf .= pack("s", $rec->{hitpoints}       // 0);
+        $buf .= pack("s", $rec->{inventory}       // 0);
+        $buf .= pack("s", $rec->{level}           // 0);
+        $buf .= pack("s", $rec->{monster_talk}    // 0);
+        $buf .= pack("s", $rec->{monster_trigger} // 0);
+        $buf .= pack("s", $rec->{restrictions}    // 0);
+        $buf .= pack("s", $rec->{rust_rate}       // 0);
+        $buf .= pack("s", $rec->{spell_trigger}   // 0);
+        $buf .= pack("s", $rec->{steal_rate}      // 0);
+        $buf .= pack("s", $rec->{teleport}        // 0);
+        $buf .= pack("a30", ''); # reserved/padding
+        return $buf;
+    }
+    if ($key eq 'spells') {
+        my $buf = '';
+        $buf .= pack("a30", $rec->{name}         // '');
+        $buf .= pack("a80", $rec->{chant}        // '');
+        $buf .= pack("s",   $rec->{level}        // 0);
+        $buf .= pack("s",   $rec->{type}         // 0);
+        $buf .= pack("f<",  $rec->{teleport}     // 0);
+        $buf .= pack("s",   $rec->{psionic}      // 0);
+        $buf .= pack("s",   $rec->{psionicmode}  // 0);
+        $buf .= pack("s",   $rec->{classtype}    // 0);
+        $buf .= pack("a80", $rec->{desc}         // '');
+        $buf .= pack("a10", $rec->{ingred}       // '');
+        $buf .= pack("s",   $rec->{spellflag}    // 0);
+        return $buf;
+    }
+    if ($key eq 'ranklist') {
+        my $buf = '';
+        $buf .= pack("a30", $rec->{name}  // '');
+        $buf .= pack("l",   $rec->{score} // 0);
+        $buf .= pack("a16", $rec->{class} // '');
+        $buf .= pack("s",   $rec->{level} // 0);
+        $buf .= pack("a16", $rec->{date}  // '');
+        $buf .= pack("a60", ''); # reserved/padding
+        return $buf;
+    }
+    return '';
+}
+
+# --- Service Control Menu ---
+
+sub service_control_menu {
+    while (1) {
+        print "\e[2J\e[0;0H";
+        writeline($config{'systemcolor'}."PhotonMUD Service Control".$config{'themecolor'}, 1);
+        writeline("", 1);
+        
+        # Check service status
+        my $monsterai_running = check_service_running('photonmud-monsterai');
+        my $broker_running = check_service_running('photonmud-broker');
+        my $data_running = check_service_running('photonmud-data');
+        
+        my $mon_status = $monsterai_running ? $config{'usercolor'}."RUNNING".$config{'themecolor'} : $config{'errorcolor'}."STOPPED".$config{'themecolor'};
+        my $brk_status = $broker_running ? $config{'usercolor'}."RUNNING".$config{'themecolor'} : $config{'errorcolor'}."STOPPED".$config{'themecolor'};
+        my $dat_status = $data_running ? $config{'usercolor'}."RUNNING".$config{'themecolor'} : $config{'errorcolor'}."STOPPED".$config{'themecolor'};
+        
+        writeline($config{'datacolor'}."Service Status:".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  Monster AI:     $mon_status".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  Message Broker: $brk_status".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  Data Service:   $dat_status".$config{'themecolor'}, 1);
+        writeline("", 1);
+        
+        writeline($config{'datacolor'}."Commands:".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  1. Stop Monster AI".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  2. Start Monster AI".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  3. Stop Message Broker".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  4. Start Message Broker".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  5. Stop ALL Services (for maintenance)".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  6. Start ALL Services".$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."  !. Return to Main Menu".$config{'themecolor'}, 1);
+        
+        writeline($config{'promptcolor'}."Enter command: ".$config{'themecolor'}, 0);
+        my $cmd = getline("text", 8, "", 1);
+        $cmd = '' unless defined $cmd;
+        $cmd =~ s/^\s+|\s+$//g;
+        
+        if ($cmd eq '!' || $cmd eq '') {
+            return;
+        }
+        elsif ($cmd eq '1') {
+            stop_service('photonmud-monsterai');
+        }
+        elsif ($cmd eq '2') {
+            start_service('photonmud-monsterai');
+        }
+        elsif ($cmd eq '3') {
+            stop_service('photonmud-broker');
+        }
+        elsif ($cmd eq '4') {
+            start_service('photonmud-broker');
+        }
+        elsif ($cmd eq '5') {
+            writeline($config{'systemcolor'}."Stopping all services...".$config{'themecolor'}, 1);
+            stop_service('photonmud-monsterai');
+            stop_service('photonmud-broker');
+            stop_service('photonmud-data');
+            writeline($config{'systemcolor'}."All services stopped. Safe to run generator.".$config{'themecolor'}, 1);
+            pause();
+        }
+        elsif ($cmd eq '6') {
+            writeline($config{'systemcolor'}."Starting all services...".$config{'themecolor'}, 1);
+            start_service('photonmud-data');
+            start_service('photonmud-broker');
+            start_service('photonmud-monsterai');
+            writeline($config{'systemcolor'}."All services started.".$config{'themecolor'}, 1);
+            pause();
+        }
+    }
+}
+
+sub check_service_running {
+    my ($service_name) = @_;
+    my $check = `pgrep -fl '$service_name' 2>/dev/null`;
+    return ($check && $check =~ /\S/);
+}
+
+sub stop_service {
+    my ($service_name) = @_;
+    writeline($config{'systemcolor'}."Stopping $service_name...".$config{'themecolor'}, 1);
+    
+    # Find and kill the service
+    my $output = `pkill -f '$service_name' 2>&1`;
+    sleep(1);  # Give it time to stop
+    
+    # Verify it stopped
+    if (check_service_running($service_name)) {
+        writeline($config{'errorcolor'}."$service_name may still be running. Try killing manually.".$config{'themecolor'}, 1);
+    } else {
+        writeline($config{'usercolor'}."$service_name stopped.".$config{'themecolor'}, 1);
+    }
+}
+
+sub start_service {
+    my ($service_name) = @_;
+    writeline($config{'systemcolor'}."Starting $service_name...".$config{'themecolor'}, 1);
+    
+    # Check if already running
+    if (check_service_running($service_name)) {
+        writeline($config{'usercolor'}."$service_name is already running.".$config{'themecolor'}, 1);
+        return;
+    }
+    
+    # Map service names to scripts
+    my %scripts = (
+        'photonmud-monsterai' => "$config{'home'}/services.d/photonmud-monsterai",
+        'photonmud-broker'    => "$config{'home'}/services.d/photonmud-broker",
+        'photonmud-data'      => "$config{'home'}/services.d/photonmud-data",
+    );
+    
+    my $script = $scripts{$service_name};
+    if ($script && -x $script) {
+        # Start in background
+        system("$script &");
+        sleep(2);  # Give it time to start
+        
+        if (check_service_running($service_name)) {
+            writeline($config{'usercolor'}."$service_name started.".$config{'themecolor'}, 1);
+        } else {
+            writeline($config{'errorcolor'}."$service_name failed to start. Check logs.".$config{'themecolor'}, 1);
+        }
+    } else {
+        writeline($config{'errorcolor'}."Service script not found: $script".$config{'themecolor'}, 1);
+    }
+}
+
+# --- Main Menu and Browsers ---
+
+sub main_menu {
+    print "\e[2J\e[0;0H";
+    writeline($config{'systemcolor'}."PhotonMUD Data Editor - SysOp Tool".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."Select data file to browse:".$config{'themecolor'}, 1);
+
+    my @keys = qw(actions market monsters npcs objects ranklist rooms spells treasure);
+    my @letters = map { chr(65 + $_) } (0..$#keys); # A, B, C, ...
+    my %letter_for;
+    @letter_for{@letters} = @keys;
+
+    for my $i (0..$#keys) {
+        writeline($config{'datacolor'}."  $letters[$i]. $keys[$i] ($datafiles{$keys[$i]}{file})".$config{'themecolor'}, 1);
+    }
+    my $player_letter = chr(65 + @keys);
+    my $gen_letter = chr(65 + @keys + 1);
+
+    writeline($config{'datacolor'}."  $player_letter. Player Editor".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."  $gen_letter. Run photonmud-generator".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."  S. Service Control (stop/start monsterai, broker)".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."  R. Reset System (Danger!)".$config{'errorcolor'}, 1);
+    writeline($config{'datacolor'}."  !. Quit".$config{'themecolor'}, 1);
+
+    writeline($config{'promptcolor'}."Make your selection (A-$gen_letter, R, ! to quit): ".$config{'themecolor'}, 0);
+
+    my $sel = getline("text", 8, "", 1);
+    $sel = '' unless defined $sel;
+    $sel =~ s/^\s+|\s+$//g;
+    $sel = uc($sel);
+    print "\n";
+
+    return ($sel, \%letter_for, $gen_letter, $player_letter);
+}
+
+sub load_records {
+    my ($key) = @_;
+
+    my $file = $datadir.$datafiles{$key}{file};
+    my $recsize = $datafiles{$key}{recsize};
+    my $loader = $datafiles{$key}{loader};
+    my @records;
+
+    if ($key eq 'rooms' && defined &read_room_record) {
+        my $size = -s $file;
+        my $count = int($size / $recsize);
+        for my $idx (1..$count) {
+            my $rec = read_room_record($idx);
+            next unless $rec && ref($rec) eq 'HASH';
+            ensure_room_exits($rec) if defined &ensure_room_exits;
+            $rec->{_idx} = $idx;
+            push @records, $rec;
+        }
+        return \@records;
+    }
+
+    if ($key eq 'spells' && defined &read_spell_record) {
+        lockfile($file);
+        my $fh;
+        unless (open($fh, "<:raw", $file)) {
+            unlockfile($file);
+            return [];
+        }
+        my $spell_count = $config{'spellcount'};
+        unless ($spell_count) {
+            # Fallback: scan for nonzero records up to first big gap
+            my $max = -s $file;
+            $spell_count = int($max / $recsize);
+            my $found = 0;
+            seek($fh, 0, 0);
+            for my $idx (1..$spell_count) {
+                my $buf;
+                my $read = read($fh, $buf, $recsize);
+                last unless $read && $read == $recsize;
+                last if $buf =~ /^\0+$/;
+                $found++;
+            }
+            $spell_count = $found;
+            seek($fh, 0, 0);
+        }
+        my @records;
+        for my $idx (1..$spell_count) {
+            my $buf;
+            my $read = read($fh, $buf, $recsize);
+            last unless $read && $read == $recsize;
+            last if $buf =~ /^\0+$/;
+            my $rec = $loader->($buf);
+            $rec->{_idx} = $idx;
+            push @records, $rec;
+        }
+        close($fh);
+        unlockfile($file);
+        return \@records;
+    }
+
+    # Fallback: buffer-based for other types
+    lockfile($file);
+    my $fh;
+    unless (open($fh, "<:raw", $file)) {
+        unlockfile($file);
+        return [];
+    }
+    my $idx = 1;
+    while (1) {
+        my $buf = '';
+        my $read = read($fh, $buf, $recsize);
+        last unless $read;
+        next if $read != $recsize;
+        next if $buf =~ /^\0+$/;
+        my $rec = $loader->($buf);
+        $rec->{_idx} = $idx;
+        push @records, $rec;
+        $idx++;
+    }
+    close($fh);
+    unlockfile($file);
+    return \@records;
+}
+
+sub roominfo_browser {
+    my ($records) = @_;
+    my $idx = 0;
+    while ($idx >= 0 && $idx < @$records) {
+        my $room = $records->[$idx];
+        print "\e[2J\e[0;0H";
+        writeline($config{'systemcolor'}."Room #".($idx+1)."/".scalar(@$records).$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."Index: ".($room->{_idx} // $idx+1).$config{'themecolor'}, 1);
+
+        writeline("action: ".($room->{action}//'[n/a]'), 1);
+        writeline("monsterclass: ".($room->{monsterclass}//'[n/a]'), 1);
+        writeline("flags: ".(defined $room->{flags} ? $room->{flags} : '[n/a]'), 1);
+        writeline("shortdesc: ".($room->{shortdesc}//'[n/a]'), 1);
+
+        my @treasure = unpack("s*", $room->{treasure});
+        writeline("treasure: ".(join(" ", @treasure)), 1);
+        my @trecharges = unpack("s*", $room->{trecharges});
+        writeline("trecharges: ".(join(" ", @trecharges)), 1);
+
+        # Exits: show all, even zero
+        my $out = "exits:";
+        for my $dir (qw(N S E W NE NW SE SW UP DOWN IN OUT)) {
+            my $dest = $room->{exits}{$dir} || 0;
+            $out .= " $dir=$dest";
+        }
+        writeline($out, 1);
+
+        writeline("longdesc: ".($room->{longdesc}//'[n/a]'), 1);
+
+        my @objects = unpack("s*", $room->{object});
+        writeline("objects: ".(join(" ", @objects)), 1);
+        my @hiddenobj = unpack("s*", $room->{hiddenobj});
+        writeline("hiddenobj: ".(join(" ", @hiddenobj)), 1);
+
+        writeline("container.permanent: ".($room->{container_permanent}//'[n/a]'), 1);
+
+        writeline("region:     ".($room->{region}//'[n/a]'), 1);
+        writeline("feature:    ".($room->{feature}//'[n/a]'), 1);
+        writeline("town_name:  ".($room->{town_name}//''), 1);
+        writeline("castle_name:".($room->{castle_name}//''), 1);
+        writeline("river_name: ".($room->{river_name}//''), 1);
+
+        writeline($config{'datacolor'}."[. Previous.  ]. Next  Q. Quit".$config{'themecolor'}, 1);
+        writeline($config{'promptcolor'}."Enter option: ".$config{'themecolor'}, 0);
+        cbreak("on");
+        my $opt = waitkey();
+        cbreak("off");
+        $opt =~ s/^\s+|\s+$//g;
+        if ($opt eq "[") { $idx-- if $idx > 0; }
+        elsif ($opt eq "]") { $idx++ if $idx < $#$records; }
+        elsif ($opt =~ /^[Qq]$/) { last; }
+    }
+}
+
+sub browser_template {
+    my ($records, $fields, $title) = @_;
+    my $idx = 0;
+    while ($idx >= 0 && $idx < @$records) {
+        my $rec = $records->[$idx];
+        print "\e[2J\e[0;0H";
+        writeline($config{'systemcolor'}."$title #".($idx+1)."/".scalar(@$records).$config{'themecolor'}, 1);
+        writeline($config{'datacolor'}."Index: ".($rec->{_idx} // $idx+1).$config{'themecolor'}, 1);
+        for my $f (@$fields) {
+            if ($f eq 'exits' && exists $rec->{exits}) {
+                my $out = "exits:";
+                for my $dir (qw(N E S W NE SE SW NW UP DOWN IN OUT)) {
+                    my $dest = $rec->{exits}{$dir};
+                    $out .= " $dir=$dest" if defined $dest && $dest > 0;
+                }
+                $out .= " (none)" if $out eq "exits:";
+                writeline($out, 1);
+            } elsif (ref($f) eq 'ARRAY') {
+                my ($fname, $count) = @$f;
+                my $out = "$fname:";
+                my $raw = $rec->{$fname} // ("\0" x ($count*2));
+                my @vals;
+                for my $i (0..$count-1) {
+                    my $val = unpack("s", substr($raw, $i*2, 2));
+                    push @vals, $val;
+                }
+                if (grep { $_ != 0 } @vals) {
+                    $out .= " $_" for @vals;
+                } else {
+                    $out .= " 0" x $count;
+                }
+                writeline($out, 1);
+            } else {
+                my $val = defined $rec->{$f} && $rec->{$f} ne '' ? $rec->{$f} : '[n/a]';
+                writeline("$f: $val", 1);
+            }
+        }
+        writeline($config{'datacolor'}."[. Previous.  ]. Next  !. Quit".$config{'themecolor'}, 1);
+        writeline($config{'promptcolor'}."Enter option: ".$config{'themecolor'}, 0);
+        cbreak("on");
+        my $opt = waitkey();
+        cbreak("off");
+        $opt =~ s/^\s+|\s+$//g;
+        if ($opt eq "[") { $idx-- if $idx > 0; }
+        elsif ($opt eq "]") { $idx++ if $idx < $#$records; }
+        elsif ($opt =~ /^[!]$/) { last; }
+    }
+}
+
+sub object_browser {
+    my ($records) = @_;
+    my @fields = qw(name shortname roomlink invisible jailtrap doorlock destination permanent hidden closed keyed relocks longdesc fromhour frommin tohour tomin lightroom lighttime shortdesc teleport trap);
+    browser_template($records, \@fields, "Object");
+}
+
+sub treasure_browser {
+    my ($records) = @_;
+    my @fields = qw(
+        name shortname weight gold spell plus coin keyed scroll charges potion armor shield weapon
+        container type locked closed loadable ammunition ammoloads invisible permanent proficiency
+        ringtype ringspell edible rustable rustpercent stealable stealpercent launchable launchloads
+        launchammo movable vehicle vehiclehits vehicletype lighttype lightcharges fueltype fuelcharges
+    );
+    browser_template($records, \@fields, "Treasure");
+}
+
+sub monster_browser {
+    my ($records) = @_;
+    my @fields = qw(name plural treasure exp gold number level hits poison leveldrain spell block prevent follow magic jail teleport follow_percent block_percent prevent_percent spell_percent poison_percent drain_percent rate rate_percent permanent talk psionic psionic_spell region);
+    browser_template($records, \@fields, "Monster");
+}
+
+sub npc_browser {
+    my ($records) = @_;
+    my @fields = qw(name dialog level hp ac attack damage special gold exp flags);
+    browser_template($records, \@fields, "NPC");
+}
+
+sub market_browser {
+    my ($records) = @_;
+    my @fields = qw(name item seller price idx type charges date);
+    browser_template($records, \@fields, "Market");
+}
+
+sub action_browser {
+    my ($records) = @_;
+    my @fields = qw(attr1 attr2 encounter_rate fumble health_rate hitpoints inventory level monster_talk monster_trigger restrictions rust_rate spell_trigger steal_rate teleport);
+    browser_template($records, \@fields, "Action");
+}
+
+sub spell_browser {
+    my ($records) = @_;
+    my @fields = qw(name chant level type teleport psionic psionicmode classtype cost desc ingred spellflag);
+    browser_template($records, \@fields, "Spell");
+}
+
+sub rank_browser {
+    my ($records) = @_;
+    my @fields = qw(name score class level date);
+    browser_template($records, \@fields, "Rank");
+}
+
+# --- Lockfile cleanup and terminal reset on exit ---
+sub cleanup_and_exit {
+    cbreak("off");
+    unlockfile($LOCKED_FILE) if $LOCKED_FILE;
+    exit 1;
+}
+
+END {
+    cbreak("off");
+    unlockfile($LOCKED_FILE) if $LOCKED_FILE;
+}
+
+$SIG{INT}  = \&cleanup_and_exit;
+$SIG{TERM} = \&cleanup_and_exit;
+$SIG{HUP}  = \&cleanup_and_exit;
+$SIG{__DIE__} = sub {
+    cbreak("off");
+    unlockfile($LOCKED_FILE) if $LOCKED_FILE;
+    die @_ if $^S; # in eval
+    exit 1;
+};
+$SIG{__WARN__} = sub {
+    cbreak("off");
+    unlockfile($LOCKED_FILE) if $LOCKED_FILE;
+    warn @_;
+};
+END {
+    cbreak("off");
+    unlockfile($LOCKED_FILE) if $LOCKED_FILE;
+}
+
+# --- Main ---
+sub main {
+    while (1) {
+        my ($sel, $letter_for, $gen_letter, $player_letter) = main_menu();
+
+        # Accept ! or Q (upper/lower) as quit, ignore empty input
+        if (!defined $sel || $sel eq '' || $sel eq '!') {
+            writeline($config{'systemcolor'}."Exiting PhotonMUD Data Editor.".$config{'themecolor'}, 1);
+            last;
+        }
+        if (exists $letter_for->{$sel}) {
+            my $key = $letter_for->{$sel};
+            my $records = load_records($key);
+            if (@$records) {
+                # Define editable fields for each type
+                my %edit_fields = (
+                    treasure => [qw(
+                        name shortname weight gold spell plus coin keyed scroll charges potion armor shield weapon
+                        container type locked closed loadable ammunition ammoloads invisible permanent proficiency
+                        ringtype ringspell edible rustable rustpercent stealable stealpercent launchable launchloads
+                        launchammo movable vehicle vehiclehits vehicletype lighttype lightcharges fueltype fuelcharges
+                    )],
+                    objects => [qw(
+                        name shortname roomlink invisible jailtrap doorlock destination permanent hidden closed keyed relocks longdesc fromhour frommin tohour tomin lightroom lighttime shortdesc teleport trap
+                    )],
+                    monsters => [qw(
+                        name plural treasure exp gold number level hits poison leveldrain spell block prevent follow magic jail teleport follow_percent block_percent prevent_percent spell_percent poison_percent drain_percent rate rate_percent permanent talk psionic psionic_spell region
+                    )],
+                    npcs => [qw(
+                        name plural treasure exp gold number level hits poison leveldrain spell block prevent follow magic jail teleport follow_percent block_percent prevent_percent spell_percent poison_percent drain_percent rate rate_percent permanent talk psionic psionic_spell
+                    )],
+                    market => [qw(
+                        name item seller price idx type charges date
+                    )],
+                    actions => [qw(
+                        attr1 attr2 encounter_rate fumble health_rate hitpoints inventory level monster_talk monster_trigger restrictions rust_rate spell_trigger steal_rate teleport
+                    )],
+                    spells => [qw(
+                        name chant level type teleport psionic psionicmode classtype desc ingred spellflag
+                    )],
+                    ranklist => [qw(
+                        name score class level date
+                    )],
+                );
+                # Use data editor for editable types, browser for others
+                if (exists $edit_fields{$key}) {
+                    data_editor_menu($key, $records, $edit_fields{$key}, ucfirst($key));
+                } elsif ($key eq 'rooms') {
+                    roominfo_browser($records);
+                } else {
+                    writeline($config{'errorcolor'}."No browser/editor for $key".$config{'themecolor'}, 1);
+                    pause();
+                }
+            } else {
+                writeline($config{'errorcolor'}."No records found or failed to load for $key.".$config{'themecolor'}, 1);
+                pause();
+            }
+        }
+        elsif ($sel eq $player_letter) {
+            player_editor_menu();
+        }
+        elsif ($sel eq 'S') {
+            service_control_menu();
+        }
+        elsif ($sel eq 'R') {
+            writeline($config{'errorcolor'}."SYSTEM RESET: This will DELETE all player, market, realm, and boss files!". $config{'themecolor'}, 1);
+            writeline($config{'errorcolor'}."Are you ABSOLUTELY SURE? Type RESET (all caps) to continue: ".$config{'themecolor'}, 0);
+            my $confirm = getline("text", 16, "", 1);
+            $confirm = '' unless defined $confirm;
+            $confirm =~ s/^\s+|\s+$//g;
+            $confirm = uc($confirm);
+            if ($confirm ne 'RESET') {
+                writeline($config{'systemcolor'}."System reset cancelled. Press Enter to continue.".$config{'themecolor'}, 1);
+                getline("text", 1, "", 1);
+                next;
+            }
+
+            # Check for running photonbbs or photonmud-monsterai
+            my $bbs_running = `pgrep -fl photonbbs | grep -v $$`;
+            my $ai_running  = `pgrep -fl photonmud-monsterai | grep -v $$`;
+
+            if ($bbs_running) {
+                writeline($config{'errorcolor'}."photonbbs is running. Please stop it before resetting the system.".$config{'themecolor'}, 1);
+                pause();
+                next;
+            }
+            if ($ai_running) {
+                writeline($config{'errorcolor'}."photonmud-monsterai is running. Please stop it before resetting the system.".$config{'themecolor'}, 1);
+                pause();
+                next;
+            }
+
+            # Remove files
+            my @patterns = (
+                $datadir . "boss_landmarks.txt",
+                $datadir . "player_*",
+                $datadir . "permmon*",
+                $datadir . "realm.txt",
+                $datadir . "rooms.dat",
+                $datadir . "market.dat",
+            );
+            my @deleted;
+            my @failed;
+            for my $pat (@patterns) {
+                my @files = glob($pat);
+                for my $file (@files) {
+                    if (-e $file) {
+                        if (unlink $file) {
+                            push @deleted, $file;
+                        } else {
+                            push @failed, $file;
+                        }
+                    }
+                }
+            }
+            writeline($config{'systemcolor'}."System reset complete. Deleted:". $config{'themecolor'}, 1);
+            for my $f (@deleted) {
+                writeline($config{'datacolor'}."  $f".$config{'themecolor'}, 1);
+            }
+            if (@failed) {
+                writeline($config{'errorcolor'}."Failed to delete:". $config{'themecolor'}, 1);
+                for my $f (@failed) {
+                    writeline($config{'errorcolor'}."  $f".$config{'themecolor'}, 1);
+                }
+            }
+            writeline($config{'systemcolor'}."Press any key to continue.".$config{'themecolor'}, 1);
+            pause();
+        }
+        elsif ($sel eq $gen_letter) {
+            # Guard: Don't allow generator if photonbbs or monsterai is running
+            my $bbs_running = `pgrep -fl photonbbs | grep -v $$`;
+            my $ai_running  = `pgrep -fl photonmud-monsterai | grep -v $$`;
+            if ($bbs_running) {
+                writeline($config{'errorcolor'}."photonbbs is running. Please stop it before running the generator.".$config{'themecolor'}, 1);
+                pause();
+                next;
+            }
+            if ($ai_running) {
+                writeline($config{'errorcolor'}."photonmud-monsterai is running. Please stop it before running the generator.".$config{'themecolor'}, 1);
+                pause();
+                next;
+            }
+            writeline($config{'errorcolor'}."Are you sure? This will REPLACE the current realm and all generated data! (Y/N): ".$config{'themecolor'}, 0);
+            cbreak("on");
+            my $confirm = waitkey();
+            cbreak("off");
+            $confirm = '' unless defined $confirm;
+            $confirm =~ s/^\s+|\s+$//g;
+            $confirm = uc($confirm);
+            print "\n";
+            if ($confirm eq 'Y') {
+                writeline($config{'systemcolor'}."Running photonmud-generator...".$config{'themecolor'}, 1);
+                system("$FindBin::Bin/photonmud-generator");
+                writeline($config{'systemcolor'}."photonmud-generator finished. Press any key to continue.".$config{'themecolor'}, 1);
+                pause();
+            } else {
+                writeline($config{'systemcolor'}."Generator cancelled. Press any key to continue.".$config{'themecolor'}, 1);
+                pause();
+            }
+        }
+        else {
+            writeline($config{'errorcolor'}."Invalid selection. Please enter a valid letter or ! or ! to quit.".$config{'themecolor'}, 1);
+            pause();
+        }
+    }
+}
+
+main();

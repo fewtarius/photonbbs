@@ -1,0 +1,14 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@HELP [command]@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays a list of commands or detailed help for a specific command.
+Syntax: HELP
+       HELP <command>
+Aliases: ?, H
+
+- Use HELP alone for a summary of all commands.
+- Use HELP <command> for detailed info.
+- All help is colorized and formatted for easy reading.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

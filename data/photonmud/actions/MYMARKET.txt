@@ -1,0 +1,39 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR MYMARKET/MM Command - Manage Your Market Listings @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  MYMARKET
+  MM
+
+@DATACLR What it does:@THEMECLR
+  MYMARKET (or MM) shows all items you currently have listed for sale
+  on the market. You can review, cancel, or adjust your listings.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must be in a shop to use MYMARKET.
+  - Lists all your active market items and their prices.
+  - You may cancel listings to retrieve items.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You see and manage your market listings.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use MYMARKET the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Use MYMARKET to track sales and adjust prices.
+  - Cancel listings if you want your item back.
+
+@DATACLR Example:@THEMECLR
+  MYMARKET
+    1. Potion - 20 gold (active)
+    2. Dagger - 50 gold (sold)
+
+@DATACLR See also:@THEMECLR
+  MARKET, SELL, BUY
+-------------------------------------------------------------------------------

@@ -1,0 +1,37 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR GUARD Command - Reduce Damage by 2 @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  GUARD
+
+@DATACLR What it does:@THEMECLR
+  GUARD is a defensive action you can take during combat. When you
+  GUARD, you reduce the damage from the next attack against you by 2.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - GUARD is used on your turn in combat instead of attacking.
+  - When attacked, subtract 2 from the damage (minimum 1).
+  - Works against both melee and ranged attacks.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - No dice roll required; always reduces damage by 2.
+
+@DATACLR Outcome:@THEMECLR
+  - You take 2 less damage from the next attack (minimum 1).
+
+@DATACLR Class Features:@THEMECLR
+  - All classes can use GUARD.
+
+@DATACLR Tips:@THEMECLR
+  - Use GUARD when expecting moderate damage.
+  - Combine with armor or buffs for better protection.
+
+@DATACLR Example:@THEMECLR
+  GUARD
+    On the next attack, you take 2 less damage (minimum 1).
+
+@DATACLR See also:@THEMECLR
+  DODGE, PARRY, SHIELD, COUNTER
+-------------------------------------------------------------------------------

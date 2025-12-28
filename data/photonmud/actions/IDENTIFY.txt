@@ -1,0 +1,43 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR IDENTIFY/ID Command - Reveal Item Properties @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  IDENTIFY <item>
+  ID <item>
+
+@DATACLR What it does:@THEMECLR
+  IDENTIFY reveals the properties of an item in your inventory, such as
+  magical bonuses, curses, charges, or special effects. Useful for
+  determining if an item is safe or valuable.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only items in your inventory can be identified.
+  - Some items may resist identification or require higher level.
+  - MagicUsers and Clerics may identify items more easily.
+  - IDENTIFY is an instant action and does not use a combat turn.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None for common items.
+  - Rare or powerful items may require a roll (d20 + INT/WIS mod).
+
+@DATACLR Outcome:@THEMECLR
+  - You learn the item's bonuses, curses, or effects.
+  - If the item is cursed, you may be warned.
+
+@DATACLR Class Features:@THEMECLR
+  - MagicUsers: +2 bonus to identify magical items.
+  - Clerics: +2 bonus to identify holy or cursed items.
+
+@DATACLR Tips:@THEMECLR
+  - Identify items before equipping or selling them.
+  - Use in shops to check item value.
+
+@DATACLR Example:@THEMECLR
+  IDENTIFY SWORD
+    Sword: +1 to hit, +1 damage, not cursed.
+
+@DATACLR See also:@THEMECLR
+  INVENTORY, EQUIP, WEAR, STATUS
+-------------------------------------------------------------------------------

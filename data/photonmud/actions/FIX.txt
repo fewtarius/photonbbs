@@ -1,0 +1,41 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR FIX Command - Repair Damaged Items @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  FIX <item>
+
+@DATACLR What it does:@THEMECLR
+  FIX allows you to repair a damaged or broken item in your inventory.
+  Weapons, armor, and tools may become damaged in combat or by traps.
+  Some repairs require special tools or a visit to a shop.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only repairable items (weapons, armor, tools) can be fixed.
+  - Some items require a repair kit or gold to fix.
+  - FIX is an instant action outside combat.
+  - Blacksmiths or shops may offer better repairs.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - d20 + INT mod (+class bonus) vs. DC 12 for self-repair.
+
+@DATACLR Outcome:@THEMECLR
+  - Success: Item is restored to full function.
+  - Failure: No effect, or item may break further.
+
+@DATACLR Class Features:@THEMECLR
+  - Fighters: +1 to fix weapons/armor.
+  - All classes can attempt repairs with a kit.
+
+@DATACLR Tips:@THEMECLR
+  - Repair items before major battles.
+  - Shops offer guaranteed repairs for a fee.
+
+@DATACLR Example:@THEMECLR
+  FIX SWORD
+    Sword is now fully repaired.
+
+@DATACLR See also:@THEMECLR
+  INVENTORY, EQUIP, STATUS
+-------------------------------------------------------------------------------

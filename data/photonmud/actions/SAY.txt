@@ -1,0 +1,44 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR SAY Command - Speak to Everyone in the Room @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  SAY <message>
+  .<message>
+
+@DATACLR What it does:@THEMECLR
+  SAY lets you speak aloud to all players currently in your room. 
+  You can use either the SAY command or start your message with a dot (.)
+  to broadcast a message. Everyone present will see your message instantly.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - SAY is visible to all players in the same room.
+  - Messages are not private; use TALK for private or directed messages.
+  - There is no limit to how often you can use SAY.
+  - System automatically tags your handle to the message.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None. SAY is always successful.
+
+@DATACLR Outcome:@THEMECLR
+  - All players in the room see your message in real time.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use SAY the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Use SAY to coordinate, roleplay, or chat with others.
+  - Use .<message> as a shortcut for SAY.
+  - Avoid spamming to keep the chat readable.
+
+@DATACLR Example:@THEMECLR
+  SAY Hello, anyone here?
+    Bob says: Hello, anyone here?
+
+  .Let's team up!
+    Bob says: Let's team up!
+
+@DATACLR See also:@THEMECLR
+  TALK, HERE, USERS, HELP
+-------------------------------------------------------------------------------

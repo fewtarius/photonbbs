@@ -1,0 +1,741 @@
+#!/usr/bin/perl
+# PhotonMUD Message Broker Service
+# Central real-time messaging and coordination for PhotonMUD
+#
+# Features:
+# - Player registry (online status, room tracking)
+# - Room messaging (pub/sub for room broadcasts)
+# - Direct messaging (player-to-player)
+# - Combat coordination (handshake, state sync)
+# - Monster AI coordination
+#
+# Socket: /dev/shm/photonmud/broker.sock
+
+use strict;
+use warnings;
+use IO::Socket::UNIX;
+use IO::Select;
+use JSON::PP;
+use Time::HiRes qw(time sleep);
+use POSIX qw(strftime);
+use Fcntl qw(:flock);
+use File::Path qw(make_path);
+
+$| = 1;
+
+# Configuration
+my $SOCKET_PATH = "/dev/shm/photonmud/broker.sock";
+my $TRANSIENT_DIR = "/dev/shm/photonmud";
+my $MAX_CLIENTS = 100;
+my $BUFFER_SIZE = 65536;
+my $HEARTBEAT_INTERVAL = 30;
+my $CLIENT_TIMEOUT = 120;
+
+# State tracking
+my %clients;           # fd -> { type, id, player, room, last_activity, buffer }
+my %players_online;    # player_name -> fd
+my %rooms;             # room_id -> { players => [player_names], monsters => [monster_ids] }
+my %monsters;          # monster_id -> { name, room, fd }
+my %combat_sessions;   # combat_id -> { participants => [], state, start_time }
+my %pending_attacks;   # combat_id -> { attacker info }
+
+# Initialize
+sub init {
+    log_info("PhotonMUD Message Broker starting...");
+    
+    # Ensure transient directory exists with proper permissions
+    unless (-d $TRANSIENT_DIR) {
+        make_path($TRANSIENT_DIR, { mode => 0777 });
+    }
+    chmod 0777, $TRANSIENT_DIR;
+    
+    # Clean up stale socket
+    unlink $SOCKET_PATH if -e $SOCKET_PATH;
+    
+    # Create listening socket
+    my $server = IO::Socket::UNIX->new(
+        Type   => SOCK_STREAM,
+        Local  => $SOCKET_PATH,
+        Listen => $MAX_CLIENTS,
+    ) or die "Cannot create socket at $SOCKET_PATH: $!";
+    
+    # Make socket world-accessible
+    chmod 0777, $SOCKET_PATH;
+    
+    log_info("Broker listening on $SOCKET_PATH");
+    
+    return $server;
+}
+
+# Main event loop
+sub run {
+    my $server = init();
+    my $select = IO::Select->new($server);
+    my $last_maintenance = time();
+    
+    while (1) {
+        my @ready = $select->can_read(1);  # 1 second timeout for maintenance
+        
+        foreach my $fh (@ready) {
+            if ($fh == $server) {
+                # New connection
+                my $client = $server->accept();
+                if ($client) {
+                    $client->blocking(0);
+                    $select->add($client);
+                    my $fd = fileno($client);
+                    $clients{$fd} = {
+                        socket => $client,
+                        type => undef,
+                        id => undef,
+                        player => undef,
+                        room => undef,
+                        last_activity => time(),
+                        buffer => '',
+                    };
+                    log_debug("New connection: fd=$fd");
+                }
+            } else {
+                # Client data
+                handle_client_data($fh, $select);
+            }
+        }
+        
+        # Periodic maintenance
+        if (time() - $last_maintenance > 10) {
+            do_maintenance($select);
+            $last_maintenance = time();
+        }
+    }
+}
+
+# Handle incoming client data
+sub handle_client_data {
+    my ($client, $select) = @_;
+    my $fd = fileno($client);
+    
+    return unless exists $clients{$fd};
+    
+    my $data;
+    my $bytes = $client->sysread($data, $BUFFER_SIZE);
+    
+    if (!defined $bytes || $bytes == 0) {
+        # Client disconnected
+        handle_disconnect($fd, $select);
+        return;
+    }
+    
+    $clients{$fd}{buffer} .= $data;
+    $clients{$fd}{last_activity} = time();
+    
+    # Process complete messages (newline-delimited JSON)
+    while ($clients{$fd}{buffer} =~ s/^(.+?)\n//) {
+        my $line = $1;
+        eval {
+            my $msg = decode_json($line);
+            handle_message($fd, $msg, $select);
+        };
+        if ($@) {
+            log_warn("Invalid JSON from fd=$fd: $@");
+            send_error($fd, "Invalid JSON");
+        }
+    }
+}
+
+# Handle client disconnect
+sub handle_disconnect {
+    my ($fd, $select) = @_;
+    
+    return unless exists $clients{$fd};
+    
+    my $client_info = $clients{$fd};
+    
+    # Clean up player tracking
+    if ($client_info->{player}) {
+        my $player = $client_info->{player};
+        delete $players_online{$player};
+        
+        # Remove from room
+        if ($client_info->{room}) {
+            leave_room($player, $client_info->{room});
+        }
+        
+        log_info("Player disconnected: $player");
+    }
+    
+    # Clean up monster tracking
+    if ($client_info->{type} && $client_info->{type} eq 'monsterai') {
+        log_info("MonsterAI disconnected: " . ($client_info->{id} || 'unknown'));
+    }
+    
+    # Remove from select and close
+    $select->remove($client_info->{socket});
+    $client_info->{socket}->close();
+    delete $clients{$fd};
+}
+
+# Handle a complete message
+sub handle_message {
+    my ($fd, $msg, $select) = @_;
+    
+    my $type = $msg->{type} || 'unknown';
+    
+    if ($type eq 'register') {
+        handle_register($fd, $msg);
+    }
+    elsif ($type eq 'room_join') {
+        handle_room_join($fd, $msg);
+    }
+    elsif ($type eq 'room_leave') {
+        handle_room_leave($fd, $msg);
+    }
+    elsif ($type eq 'room_message') {
+        handle_room_message($fd, $msg);
+    }
+    elsif ($type eq 'direct_message') {
+        handle_direct_message($fd, $msg);
+    }
+    elsif ($type eq 'monster_attack') {
+        handle_monster_attack($fd, $msg);
+    }
+    elsif ($type eq 'combat_response') {
+        handle_combat_response($fd, $msg);
+    }
+    elsif ($type eq 'combat_update') {
+        handle_combat_update($fd, $msg);
+    }
+    elsif ($type eq 'heartbeat') {
+        handle_heartbeat($fd);
+    }
+    elsif ($type eq 'get_room_players') {
+        handle_get_room_players($fd, $msg);
+    }
+    elsif ($type eq 'get_online_players') {
+        handle_get_online_players($fd);
+    }
+    else {
+        send_error($fd, "Unknown message type: $type");
+    }
+}
+
+# ============================================================================
+# MESSAGE HANDLERS
+# ============================================================================
+
+sub handle_register {
+    my ($fd, $msg) = @_;
+    
+    my $client_type = $msg->{client_type} || 'player';
+    my $id = $msg->{id};
+    
+    unless ($id) {
+        send_error($fd, "Registration requires 'id'");
+        return;
+    }
+    
+    $clients{$fd}{type} = $client_type;
+    $clients{$fd}{id} = $id;
+    
+    if ($client_type eq 'player') {
+        $clients{$fd}{player} = $id;
+        $players_online{$id} = $fd;
+        log_info("Player registered: $id (fd=$fd)");
+    }
+    elsif ($client_type eq 'monsterai') {
+        log_info("MonsterAI registered: $id (fd=$fd)");
+    }
+    
+    send_message($fd, {
+        type => 'ack',
+        request_type => 'register',
+        success => JSON::PP::true,
+    });
+}
+
+sub handle_room_join {
+    my ($fd, $msg) = @_;
+    
+    my $player = $clients{$fd}{player};
+    unless ($player) {
+        send_error($fd, "Not registered as player");
+        return;
+    }
+    
+    my $room_id = $msg->{room_id};
+    unless (defined $room_id) {
+        send_error($fd, "room_join requires 'room_id'");
+        return;
+    }
+    
+    # Leave old room if any
+    if ($clients{$fd}{room}) {
+        leave_room($player, $clients{$fd}{room});
+    }
+    
+    # Join new room
+    $clients{$fd}{room} = $room_id;
+    $rooms{$room_id} //= { players => [], monsters => [] };
+    push @{$rooms{$room_id}{players}}, $player;
+    
+    log_debug("$player joined room $room_id");
+    
+    # Notify other players in the room
+    broadcast_to_room($room_id, $player, {
+        type => 'player_entered',
+        player => $player,
+        room_id => $room_id,
+    });
+    
+    send_message($fd, {
+        type => 'ack',
+        request_type => 'room_join',
+        room_id => $room_id,
+        players => $rooms{$room_id}{players},
+    });
+}
+
+sub handle_room_leave {
+    my ($fd, $msg) = @_;
+    
+    my $player = $clients{$fd}{player};
+    my $room_id = $clients{$fd}{room};
+    
+    if ($player && $room_id) {
+        leave_room($player, $room_id);
+        $clients{$fd}{room} = undef;
+    }
+    
+    send_message($fd, {
+        type => 'ack',
+        request_type => 'room_leave',
+    });
+}
+
+sub handle_room_message {
+    my ($fd, $msg) = @_;
+    
+    my $room_id = $msg->{room_id} || $clients{$fd}{room};
+    my $message = $msg->{message};
+    my $exclude = $msg->{exclude};  # Player name to exclude
+    
+    unless ($room_id && $message) {
+        send_error($fd, "room_message requires 'room_id' and 'message'");
+        return;
+    }
+    
+    broadcast_to_room($room_id, $exclude, {
+        type => 'room_message',
+        room_id => $room_id,
+        message => $message,
+        from => $clients{$fd}{player},
+    });
+    
+    send_message($fd, {
+        type => 'ack',
+        request_type => 'room_message',
+    });
+}
+
+sub handle_direct_message {
+    my ($fd, $msg) = @_;
+    
+    my $target = $msg->{target};
+    my $message = $msg->{message};
+    
+    unless ($target && $message) {
+        send_error($fd, "direct_message requires 'target' and 'message'");
+        return;
+    }
+    
+    my $target_fd = $players_online{$target};
+    unless ($target_fd && exists $clients{$target_fd}) {
+        send_error($fd, "Player '$target' not online");
+        return;
+    }
+    
+    send_message($target_fd, {
+        type => 'direct_message',
+        from => $clients{$fd}{player} || 'system',
+        message => $message,
+    });
+    
+    send_message($fd, {
+        type => 'ack',
+        request_type => 'direct_message',
+        target => $target,
+    });
+}
+
+sub handle_monster_attack {
+    my ($fd, $msg) = @_;
+    
+    my $monster_id = $msg->{monster_id};
+    my $monster_name = $msg->{monster_name};
+    my $target_player = $msg->{target};
+    my $room_id = $msg->{room_id};
+    
+    unless ($monster_id && $target_player && $room_id) {
+        send_error($fd, "monster_attack requires monster_id, target, room_id");
+        return;
+    }
+    
+    # Check if target player is online and in the room
+    my $target_fd = $players_online{$target_player};
+    unless ($target_fd && exists $clients{$target_fd}) {
+        send_error($fd, "Target player '$target_player' not online");
+        return;
+    }
+    
+    my $target_room = $clients{$target_fd}{room};
+    unless (defined $target_room && $target_room == $room_id) {
+        send_error($fd, "Target player not in room $room_id");
+        return;
+    }
+    
+    # Check if target is already in combat
+    if ($clients{$target_fd}{in_combat}) {
+        send_error($fd, "Target player already in combat");
+        return;
+    }
+    
+    # Generate combat ID
+    my $combat_id = "combat_${monster_id}_" . time() . "_" . int(rand(10000));
+    
+    # Store pending attack
+    $pending_attacks{$combat_id} = {
+        monster_id => $monster_id,
+        monster_name => $monster_name,
+        target => $target_player,
+        room_id => $room_id,
+        attacker_fd => $fd,
+        timestamp => time(),
+    };
+    
+    # Notify the target player
+    send_message($target_fd, {
+        type => 'attack_incoming',
+        combat_id => $combat_id,
+        attacker => $monster_name,
+        attacker_id => $monster_id,
+        attacker_type => 'monster',
+        room_id => $room_id,
+    });
+    
+    log_info("Monster attack: $monster_name ($monster_id) -> $target_player in room $room_id (combat_id=$combat_id)");
+    
+    # Acknowledge to the attacker
+    send_message($fd, {
+        type => 'ack',
+        request_type => 'monster_attack',
+        combat_id => $combat_id,
+        status => 'pending',
+    });
+}
+
+sub handle_combat_response {
+    my ($fd, $msg) = @_;
+    
+    my $combat_id = $msg->{combat_id};
+    my $response = $msg->{response};  # 'fight' or 'flee'
+    
+    unless ($combat_id && $response) {
+        send_error($fd, "combat_response requires 'combat_id' and 'response'");
+        return;
+    }
+    
+    my $attack = $pending_attacks{$combat_id};
+    unless ($attack) {
+        send_error($fd, "Unknown or expired combat_id");
+        return;
+    }
+    
+    my $player = $clients{$fd}{player};
+    unless ($player && lc($player) eq lc($attack->{target})) {
+        send_error($fd, "You are not the target of this combat");
+        return;
+    }
+    
+    if ($response eq 'fight') {
+        # Start combat
+        $combat_sessions{$combat_id} = {
+            monster_id => $attack->{monster_id},
+            monster_name => $attack->{monster_name},
+            player => $player,
+            room_id => $attack->{room_id},
+            state => 'active',
+            start_time => time(),
+        };
+        
+        $clients{$fd}{in_combat} = $combat_id;
+        
+        # Notify the monster AI that combat is starting
+        if (exists $clients{$attack->{attacker_fd}}) {
+            send_message($attack->{attacker_fd}, {
+                type => 'combat_accepted',
+                combat_id => $combat_id,
+                player => $player,
+                monster_id => $attack->{monster_id},
+            });
+        }
+        
+        log_info("Combat started: $attack->{monster_name} vs $player (combat_id=$combat_id)");
+        
+        send_message($fd, {
+            type => 'combat_start',
+            combat_id => $combat_id,
+            opponent => $attack->{monster_name},
+            opponent_id => $attack->{monster_id},
+        });
+    }
+    elsif ($response eq 'flee') {
+        # Player fled
+        if (exists $clients{$attack->{attacker_fd}}) {
+            send_message($attack->{attacker_fd}, {
+                type => 'combat_fled',
+                combat_id => $combat_id,
+                player => $player,
+                monster_id => $attack->{monster_id},
+            });
+        }
+        
+        log_info("Player fled: $player from $attack->{monster_name} (combat_id=$combat_id)");
+        
+        send_message($fd, {
+            type => 'combat_fled',
+            combat_id => $combat_id,
+        });
+    }
+    
+    # Remove pending attack
+    delete $pending_attacks{$combat_id};
+}
+
+sub handle_combat_update {
+    my ($fd, $msg) = @_;
+    
+    my $combat_id = $msg->{combat_id};
+    my $update_type = $msg->{update_type};  # 'damage', 'heal', 'spell', 'end'
+    
+    unless ($combat_id && $update_type) {
+        send_error($fd, "combat_update requires 'combat_id' and 'update_type'");
+        return;
+    }
+    
+    my $combat = $combat_sessions{$combat_id};
+    unless ($combat) {
+        send_error($fd, "Unknown combat_id");
+        return;
+    }
+    
+    if ($update_type eq 'end') {
+        my $winner = $msg->{winner};
+        my $player = $combat->{player};
+        
+        # Clear in_combat flag
+        if (my $player_fd = $players_online{$player}) {
+            $clients{$player_fd}{in_combat} = undef;
+        }
+        
+        log_info("Combat ended: $combat->{monster_name} vs $player (winner: $winner)");
+        
+        delete $combat_sessions{$combat_id};
+    }
+    
+    # Broadcast update to participants
+    if (my $player_fd = $players_online{$combat->{player}}) {
+        send_message($player_fd, {
+            type => 'combat_update',
+            combat_id => $combat_id,
+            update_type => $update_type,
+            data => $msg->{data} || {},
+        });
+    }
+    
+    send_message($fd, {
+        type => 'ack',
+        request_type => 'combat_update',
+    });
+}
+
+sub handle_heartbeat {
+    my ($fd) = @_;
+    $clients{$fd}{last_activity} = time();
+    send_message($fd, { type => 'heartbeat_ack' });
+}
+
+sub handle_get_room_players {
+    my ($fd, $msg) = @_;
+    
+    my $room_id = $msg->{room_id};
+    unless (defined $room_id) {
+        send_error($fd, "get_room_players requires 'room_id'");
+        return;
+    }
+    
+    my @players = ();
+    if (exists $rooms{$room_id}) {
+        @players = @{$rooms{$room_id}{players}};
+    }
+    
+    send_message($fd, {
+        type => 'room_players',
+        room_id => $room_id,
+        players => \@players,
+    });
+}
+
+sub handle_get_online_players {
+    my ($fd) = @_;
+    
+    my @players = keys %players_online;
+    
+    send_message($fd, {
+        type => 'online_players',
+        players => \@players,
+        count => scalar(@players),
+    });
+}
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+sub leave_room {
+    my ($player, $room_id) = @_;
+    
+    return unless exists $rooms{$room_id};
+    
+    @{$rooms{$room_id}{players}} = grep { $_ ne $player } @{$rooms{$room_id}{players}};
+    
+    # Notify others
+    broadcast_to_room($room_id, $player, {
+        type => 'player_left',
+        player => $player,
+        room_id => $room_id,
+    });
+    
+    # Clean up empty rooms
+    if (@{$rooms{$room_id}{players}} == 0 && @{$rooms{$room_id}{monsters}} == 0) {
+        delete $rooms{$room_id};
+    }
+    
+    log_debug("$player left room $room_id");
+}
+
+sub broadcast_to_room {
+    my ($room_id, $exclude, $msg) = @_;
+    
+    return unless exists $rooms{$room_id};
+    
+    foreach my $player (@{$rooms{$room_id}{players}}) {
+        next if defined $exclude && $player eq $exclude;
+        
+        my $fd = $players_online{$player};
+        next unless $fd && exists $clients{$fd};
+        
+        send_message($fd, $msg);
+    }
+}
+
+sub send_message {
+    my ($fd, $msg) = @_;
+    
+    return unless exists $clients{$fd};
+    
+    my $json = encode_json($msg) . "\n";
+    eval {
+        $clients{$fd}{socket}->syswrite($json);
+    };
+    if ($@) {
+        log_warn("Failed to send to fd=$fd: $@");
+    }
+}
+
+sub send_error {
+    my ($fd, $message) = @_;
+    
+    send_message($fd, {
+        type => 'error',
+        message => $message,
+    });
+}
+
+sub do_maintenance {
+    my ($select) = @_;
+    
+    my $now = time();
+    
+    # Clean up timed out clients
+    foreach my $fd (keys %clients) {
+        my $client = $clients{$fd};
+        
+        if ($now - $client->{last_activity} > $CLIENT_TIMEOUT) {
+            log_info("Client timed out: fd=$fd");
+            handle_disconnect($fd, $select);
+        }
+    }
+    
+    # Clean up stale pending attacks
+    foreach my $combat_id (keys %pending_attacks) {
+        my $attack = $pending_attacks{$combat_id};
+        
+        if ($now - $attack->{timestamp} > 30) {  # 30 second timeout
+            log_debug("Pending attack timed out: $combat_id");
+            
+            # Notify attacker
+            if (exists $clients{$attack->{attacker_fd}}) {
+                send_message($attack->{attacker_fd}, {
+                    type => 'combat_timeout',
+                    combat_id => $combat_id,
+                    monster_id => $attack->{monster_id},
+                });
+            }
+            
+            delete $pending_attacks{$combat_id};
+        }
+    }
+    
+    log_debug("Maintenance: " . scalar(keys %clients) . " clients, " . 
+              scalar(keys %players_online) . " players online");
+}
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+sub log_info {
+    my ($msg) = @_;
+    my $ts = strftime("%Y-%m-%d %H:%M:%S", localtime);
+    print "[$ts] [INFO] $msg\n";
+}
+
+sub log_warn {
+    my ($msg) = @_;
+    my $ts = strftime("%Y-%m-%d %H:%M:%S", localtime);
+    print STDERR "[$ts] [WARN] $msg\n";
+}
+
+sub log_debug {
+    my ($msg) = @_;
+    return unless $ENV{PHOTONMUD_BROKER_DEBUG};
+    my $ts = strftime("%Y-%m-%d %H:%M:%S", localtime);
+    print "[$ts] [DEBUG] $msg\n";
+}
+
+# ============================================================================
+# SIGNAL HANDLERS
+# ============================================================================
+
+$SIG{INT} = $SIG{TERM} = sub {
+    log_info("Shutting down broker...");
+    unlink $SOCKET_PATH if -e $SOCKET_PATH;
+    exit 0;
+};
+
+$SIG{PIPE} = 'IGNORE';
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+run();

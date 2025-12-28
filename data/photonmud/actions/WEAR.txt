@@ -1,0 +1,45 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR WEAR Command - Put On Armor or Rings @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  WEAR <item>
+  WEAR <item> FROM <container>
+
+@DATACLR What it does:@THEMECLR
+  WEAR allows you to put on armor, rings, amulets, or other wearable items
+  from your inventory or a container. Worn items provide defensive or magical
+  bonuses.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only one item per slot (armor, ring, amulet, etc.) can be worn at a time.
+  - Wearing new armor replaces your current armor.
+  - Worn items grant bonuses to Armor Class (AC), saves, or stats.
+  - Some items require a minimum level or class to wear.
+  - You can wear items directly from containers you carry.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None for wearing. Bonuses apply automatically in combat.
+
+@DATACLR Outcome:@THEMECLR
+  - The item is now worn and its bonuses are active.
+  - Previous item in that slot is returned to your inventory.
+
+@DATACLR Class Features:@THEMECLR
+  - Fighters and Paladins can wear heavy armor.
+  - Thieves and MagicUsers are limited to light armor or robes.
+  - Rings and amulets may have class-specific effects.
+
+@DATACLR Tips:@THEMECLR
+  - Wear the best armor and rings you find for maximum protection.
+  - Check item descriptions for special effects.
+  - Use STATUS to see your current bonuses.
+
+@DATACLR Example:@THEMECLR
+  WEAR LEATHER ARMOR
+    Leather Armor is now worn.
+
+@DATACLR See also:@THEMECLR
+  EQUIP, RETURN, INVENTORY, STATUS
+-------------------------------------------------------------------------------

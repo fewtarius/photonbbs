@@ -1,0 +1,43 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR CURSE Command - Inflict Curses on Items or Players @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  CURSE <item>
+  CURSE
+
+@DATACLR What it does:@THEMECLR
+  CURSE allows you to inflict a curse on an item or yourself. Cursed
+  items may have negative effects, and cursing yourself may be used to
+  break certain magical bonds. Only MagicUsers and evil Clerics can
+  curse items intentionally.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only items in your inventory can be cursed.
+  - Cursed items may reduce stats, cause bad luck, or be hard to remove.
+  - MagicUsers and evil Clerics have a higher chance of success.
+  - Cursing yourself may remove certain blessings.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - d20 + INT/WIS mod (+class bonus) vs. DC 15 for success.
+
+@DATACLR Outcome:@THEMECLR
+  - Success: Item or player is cursed.
+  - Failure: No effect, or minor backlash.
+
+@DATACLR Class Features:@THEMECLR
+  - MagicUsers/Evil Clerics: +2 to curse rolls.
+  - All classes may be affected by curses.
+
+@DATACLR Tips:@THEMECLR
+  - Use with caution; curses are hard to remove.
+  - Cursed items may be valuable to certain NPCs.
+
+@DATACLR Example:@THEMECLR
+  CURSE SWORD
+    Sword is now cursed (cannot be unequipped).
+
+@DATACLR See also:@THEMECLR
+  BLESS, IDENTIFY, STATUS
+-------------------------------------------------------------------------------

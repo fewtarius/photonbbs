@@ -18,8 +18,8 @@ sub oneliners {
           writeline("\n" . $theme{'oneltop'} . "\n\n");
         }
         lockfile("$config{'home'}$config{'text'}/oneliner");
-        open(onlin, "<$config{'home'}$config{'text'}/oneliner");
-        while (<onlin>) {
+        open(my $onlin_fh, '<', "$config{'home'}$config{'text'}/oneliner");
+        while (<$onlin_fh>) {
           $oneliner = $_;
           chomp $oneliner;
           ($olid, $oline) = split(/\|/, $oneliner);
@@ -31,7 +31,7 @@ sub oneliners {
           $oline = colorline("$oline");
           writeline("  " . $config{'systemcolor'} . $olname . " " . $config{'usercolor'} . "says" . $config{'promptcolor'} . ": " . $config{'themecolor'} . $oline, 1);
         }
-        close(onlin);
+        close($onlin_fh);
         unlockfile("$config{'home'}$config{'text'}/oneliner");
 
         $readit = 0;
@@ -68,9 +68,9 @@ sub oneliners {
         $oneliner{'sign'} = waitkey("Y");
         if (-e "$config{'home'}$config{'text'}/oneliner") {
           lockfile("$config{'home'}$config{'text'}/oneliner");
-          open(in, "<$config{'home'}$config{'text'}/oneliner");
-          @oneliners = <in>;
-          close(in);
+          open(my $in_fh, '<', "$config{'home'}$config{'text'}/oneliner");
+          @oneliners = <$in_fh>;
+          close($in_fh);
           unlockfile("$config{'home'}$config{'text'}/oneliner");
 
           $onlkeep = $config{'onelinerrows'};
@@ -87,12 +87,12 @@ sub oneliners {
           push(@oneliners, "|" . $oneliner{'blah'});
         }
         lockfile("$config{'home'}$config{'text'}/oneliner");
-        open(onlout, ">$config{'home'}$config{'text'}/oneliner");
+        open(my $onlout_fh, '>', "$config{'home'}$config{'text'}/oneliner");
         foreach $oneliner (@oneliners) {
           chomp($oneliner);
-          print onlout $oneliner . "\n";
+          print $onlout_fh $oneliner . "\n";
         }
-        close(onlout);
+        close($onlout_fh);
         unlockfile("$config{'home'}$config{'text'}/oneliner");
       }
       undef %oneliner;

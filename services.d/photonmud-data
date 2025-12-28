@@ -1,0 +1,27 @@
+#!/bin/bash
+# filepath: ./startup.d/generate_rooms.sh
+
+DATAFILE="/opt/photonbbs/data/photonmud/rooms.dat"
+GENERATOR="/opt/photonbbs/sbin/photonmud-generator"
+TRANSIENT_DIRECTORY="/dev/shm/photonmud"
+
+# Change to PhotonBBS directory since generator uses relative paths
+cd /opt/photonbbs
+
+if [ ! -f "$DATAFILE" ]; then
+    echo "[bbsd] [SERVICESD] rooms.dat not found at $DATAFILE. Generating new map..."
+    if [ -x "$GENERATOR" ]; then
+        "$GENERATOR" >/dev/null 2>&1
+        if [ -f "$DATAFILE" ]; then
+            echo "[bbsd] [SERVICESD] Map generation complete: $DATAFILE created."
+        else
+            echo "[bbsd] [ERROR] Map generation failed: $DATAFILE was not created."
+        fi
+    else
+        echo "[bbsd] [ERROR] Generator not found or not executable: $GENERATOR"
+    fi
+else
+    echo "[bbsd] [SERVICESD] Map file $DATAFILE already exists. Skipping generation."
+fi
+
+rm -rf ${TRANSIENT_DIRECTORY}

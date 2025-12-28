@@ -1,0 +1,10 @@
+.DS_Store
+**/rooms.dat
+**/market.dat
+**/boss_landmarks.txt
+**/realm.txt
+.aider*
+sbin/photonbbs-tty
+/*.txt
+/scratch
+/ai-assisted/202*

@@ -1,0 +1,114 @@
+use JSON::PP;
+
+
+sub write_json {
+    my ($data, $file) = @_;
+    
+    # Ensure directory exists
+    my $dir = $file;
+    $dir =~ s/\/[^\/]+$//;
+    make_path($dir) unless -d $dir;
+    
+    # Write JSON file
+    open(my $fh, ">", $file) or die "Can't write to $file: $!";
+    print $fh encode_json($data);
+    close($fh);
+}
+
+sub read_json {
+    my ($file) = @_;
+    
+    return unless -e $file;
+    
+    open(my $fh, "<", $file) or return;
+    local $/;
+    my $json = <$fh>;
+    close($fh);
+    
+    return eval { decode_json($json) } || {};
+}
+
+sub set_action_feature {
+    my ($feature, $onoff, $player) = @_;
+    return unless $player->{security} && $player->{security} > 500;
+    if (exists $action_features{$feature}) {
+        $action_features{$feature} = $onoff ? 1 : 0;
+        writeline($config{'systemcolor'}."Feature '$feature' set to ".($onoff ? "ENABLED" : "DISABLED").$config{'themecolor'});
+    } else {
+        writeline($config{'errorcolor'}."Unknown feature: $feature".$config{'themecolor'});
+    }
+}
+
+sub is_direction_restricted {
+    my ($player, $dir) = @_;
+    my $bit = {
+        N => 0, S => 1, E => 2, W => 3, NE => 4, SE => 5, SW => 6, NW => 7, UP => 8, DOWN => 9, IN => 10, OUT => 11
+    }->{$dir};
+    return 0 unless defined $bit;
+    my $flags = $player->{restricted_dirs} // 0;
+    return ($flags & (1 << $bit)) ? 1 : 0;
+}
+
+sub admin_action_feature {
+    my ($cmd, $player) = @_;
+    if ($cmd =~ /^ACTIONFEATURE\s+(\w+)\s+(ON|OFF)$/i) {
+        my ($feature, $onoff) = (lc($1), uc($2));
+        set_action_feature($feature, $onoff eq 'ON' ? 1 : 0, $player);
+        return 1;
+    }
+    return 0;
+}
+
+sub get_current_hour_min {
+    my @lt = localtime();
+    return ($lt[2], $lt[1]);
+}
+
+sub is_within_time_range {
+    my ($from_hour, $from_min, $to_hour, $to_min) = @_;
+    my ($cur_hour, $cur_min) = get_current_hour_min();
+    my $cur = $cur_hour * 60 + $cur_min;
+    my $from = $from_hour * 60 + $from_min;
+    my $to = $to_hour * 60 + $to_min;
+    if ($from < $to) {
+        return $cur >= $from && $cur <= $to;
+    } else {
+       
+        return $cur >= $from || $cur <= $to;
+    }
+}
+
+sub enforce_login_time_restriction {
+    my $player = shift;
+    my $from_hour = $player->{fromhour} // 0;
+    my $from_min  = $player->{frommin}  // 0;
+    my $to_hour   = $player->{tohour}   // 23;
+    my $to_min    = $player->{tomin}    // 59;
+    if (!is_within_time_range($from_hour, $from_min, $to_hour, $to_min)) {
+        writeline($config{'errorcolor'}."You may only log in between " .
+            sprintf("%02d:%02d and %02d:%02d.", $from_hour, $from_min, $to_hour, $to_min) .
+            $config{'themecolor'}, 1);
+        exit(0);
+    }
+}
+
+sub enforce_movement_time_restriction {
+    my $player = shift;
+    my $from_hour = $player->{fromhour} // 0;
+    my $from_min  = $player->{frommin}  // 0;
+    my $to_hour   = $player->{tohour}   // 23;
+    my $to_min    = $player->{tomin}    // 59;
+    if (!is_within_time_range($from_hour, $from_min, $to_hour, $to_min)) {
+        writeline($config{'errorcolor'}."You may not move at this time of day.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    return 1;
+}
+
+sub get_xp_table {
+    my $class = shift // 'Fighter';
+    my $table = $class_xp_table{$class};
+    return (ref($table) eq 'ARRAY' && @$table) ? $table : \@base_level_thresholds;
+}
+
+return 1;

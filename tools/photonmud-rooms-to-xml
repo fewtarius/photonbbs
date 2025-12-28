@@ -1,0 +1,114 @@
+#!/usr/bin/perl
+# PhotonBBS DND room.dat to draw.io XML graph exporter
+use strict;
+use warnings;
+
+my $file = shift || 'data/photonmud/rooms.dat';
+my $reclen = 1084;
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+# Read all rooms into memory
+my %rooms;
+my %coords;
+my $record_num = 1;
+while (1) {
+    seek($fh, ($record_num - 1) * $reclen, 0);
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+    if ($buf =~ /^\0+$/) {
+        $record_num++;
+        next;
+    }
+    my %room;
+    $room{idx}         = $record_num;
+    $room{direct}      = substr($buf, 2, 48);
+    $room{shortdesc}   = substr($buf, 572, 80);
+    $room{region}      = substr($buf, 980, 16);
+    $room{feature}     = substr($buf, 996, 16);
+
+    # Try to extract coordinates from shortdesc if present, else use idx
+    if ($room{shortdesc} =~ /\((\d+),\s*(\d+)\)/) {
+        $room{x} = $1;
+        $room{y} = $2;
+    } else {
+        $room{x} = $record_num % 200; # fallback: guess
+        $room{y} = int($record_num / 200);
+    }
+
+    $room{shortdesc} =~ s/[^[:print:]]/./g;
+    $room{shortdesc} =~ s/\s+$//;
+    $room{region} =~ s/[^[:print:]]/./g;
+    $room{region} =~ s/\s+$//;
+    $room{feature} =~ s/[^[:print:]]/./g;
+    $room{feature} =~ s/\s+$//;
+
+    $rooms{$record_num} = \%room;
+    $coords{"$room{x},$room{y}"} = $record_num;
+    $record_num++;
+}
+close($fh);
+
+# Prepare draw.io XML
+open(my $xml, ">", "rooms.drawio.xml") or die "Can't write rooms.drawio.xml: $!";
+
+print $xml <<'XMLHEAD';
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+  <diagram id="map" name="Map">
+    <mxGraphModel dx="1000" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="2000">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+XMLHEAD
+
+my $cell_id = 2;
+my %roomid_to_cell;
+my $scale = 20;
+
+# Output nodes
+for my $rid (sort { $a <=> $b } keys %rooms) {
+    my $room = $rooms{$rid};
+    my $label = $room->{shortdesc} || $room->{feature} || $room->{region} || "Room $rid";
+    $label =~ s/&/&amp;/g; $label =~ s/</&lt;/g; $label =~ s/>/&gt;/g;
+    my $x = $room->{x} * $scale;
+    my $y = $room->{y} * $scale;
+    my $color = $room->{region} eq 'Town' ? '#d5e8d4' :
+                $room->{region} eq 'Castle' ? '#ffe6cc' :
+                $room->{region} eq 'Lake' ? '#dae8fc' :
+                $room->{region} eq 'Mountain' ? '#e1d5e7' :
+                $room->{region} eq 'Forest' ? '#b7e1cd' :
+                $room->{region} eq 'Road' ? '#fff2cc' :
+                '#ffffff';
+    print $xml qq|        <mxCell id="$cell_id" value="$label" style="rounded=1;whiteSpace=wrap;html=1;fillColor=$color;" vertex="1" parent="1">\n|;
+    print $xml qq|          <mxGeometry x="$x" y="$y" width="60" height="30" as="geometry"/>\n|;
+    print $xml qq|        </mxCell>\n|;
+    $roomid_to_cell{$rid} = $cell_id;
+    $cell_id++;
+}
+
+# Output edges (exits)
+for my $rid (sort { $a <=> $b } keys %rooms) {
+    my $room = $rooms{$rid};
+    my @dirs = qw(N E S W NE SE SW NW UP DOWN IN OUT);
+    for my $i (0..11) {
+        my $val = unpack("f<", substr($room->{direct}, $i*4, 4));
+        my $ival = int($val + 0.0001);
+        next if $ival <= 0 || !$roomid_to_cell{$ival};
+        print $xml qq|        <mxCell id="$cell_id" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;" edge="1" parent="1" source="$roomid_to_cell{$rid}" target="$roomid_to_cell{$ival}">\n|;
+        print $xml qq|          <mxGeometry relative="1" as="geometry"/>\n|;
+        print $xml qq|        </mxCell>\n|;
+        $cell_id++;
+    }
+}
+
+print $xml <<'XMLTAIL';
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
+XMLTAIL
+
+close $xml;
+print "Draw.io XML exported as rooms.drawio.xml\n";

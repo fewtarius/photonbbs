@@ -1,0 +1,653 @@
+use Fcntl qw(:flock);
+
+# --- Lock helpers for room and player containers ---
+sub room_container_file {
+    my ($room) = @_;
+    return "$config{transient}/room_container_$room->{roomnum}.dat";
+}
+
+sub player_container_file {
+    my ($player, $n) = @_;
+    return "$config{transient}/player_container_$player->{name}_$n.dat";
+}
+
+sub read_room_container {
+    my ($room) = @_;
+    my $file = room_container_file($room);
+    return unless -e $file;
+    open(my $fh, "<", $file) or return;
+    flock($fh, LOCK_SH);
+    read($fh, my $buf, 300);
+    flock($fh, LOCK_UN);
+    close($fh);
+    return parse_container_struct($buf);
+}
+
+sub write_room_container {
+    my ($room, $cont) = @_;
+    my $file = room_container_file($room);
+    open(my $fh, "+>", $file) or open($fh, ">", $file) or return;
+    flock($fh, LOCK_EX);
+    my $buf = pack_container_struct($cont);
+    seek($fh, 0, 0);
+    print $fh $buf;
+    truncate($fh, length($buf));
+    flock($fh, LOCK_UN);
+    close($fh);
+}
+
+sub read_player_container {
+    my ($player, $n) = @_;
+    my $file = player_container_file($player, $n);
+    return unless -e $file;
+    open(my $fh, "<", $file) or return;
+    flock($fh, LOCK_SH);
+    read($fh, my $buf, 300);
+    flock($fh, LOCK_UN);
+    close($fh);
+    return parse_container_struct($buf);
+}
+
+sub write_player_container {
+    my ($player, $n, $cont) = @_;
+    my $file = player_container_file($player, $n);
+    open(my $fh, "+>", $file) or open($fh, ">", $file) or return;
+    flock($fh, LOCK_EX);
+    my $buf = pack_container_struct($cont);
+    seek($fh, 0, 0);
+    print $fh $buf;
+    truncate($fh, length($buf));
+    flock($fh, LOCK_UN);
+    close($fh);
+}
+
+# --- Existing logic for finding and manipulating containers ---
+
+sub find_inventory_containers {
+    my ($player) = @_;
+    my @containers;
+    for my $i (0..$#{$player->{inventory}}) {
+        my $inv = $player->{inventory}[$i];
+        if ($inv->{type} eq 'container') {
+            push @containers, [$i, $inv];
+        }
+    }
+    return @containers;
+}
+
+sub find_container_in_inventory {
+    my ($player, $name) = @_;
+    my $try_name = normalize_item_name($name);
+    for my $i (0..$#{$player->{inventory}}) {
+        my $inv = $player->{inventory}[$i];
+        next unless $inv->{type} eq 'container';
+        my $cont = read_treasure_record($inv->{idx});
+        next unless $cont->{name} && normalize_item_name($cont->{name}) eq $try_name;
+        return ($i, $inv);
+    }
+    return;
+}
+
+sub find_item_in_container {
+    my ($container, $itemname) = @_;
+    my $try_name = normalize_item_name($itemname);
+    for my $i (0..$#{$container->{contents}}) {
+        my $inv = $container->{contents}[$i];
+        next unless $inv;
+        my $rec = $inv->{type} eq 'treasure'
+            ? read_treasure_record($inv->{idx})
+            : read_object_record($inv->{idx});
+        next unless $rec->{name} && normalize_item_name($rec->{name}) eq $try_name;
+        return ($i, $inv);
+    }
+    return;
+}
+
+sub find_container_by_name {
+    my ($name, $player, $room) = @_;
+    my $try_name = normalize_item_name($name);
+
+    my $room_cont = read_room_container($room);
+    if ($room_cont && $room_cont->{ContainerName} && normalize_item_name($room_cont->{ContainerName}) eq $try_name) {
+        return { scope => 'room', id => $player->{room}, rec => $room_cont };
+    }
+
+    for my $n (1..3) {
+        my $inv_cont = read_player_container($player, $n);
+        if ($inv_cont && $inv_cont->{ContainerName} && normalize_item_name($inv_cont->{ContainerName}) eq $try_name) {
+            return { scope => 'player', id => $player->{name} . "_$n", rec => $inv_cont, slot => $n };
+        }
+    }
+    return undef;
+}
+
+sub parse_container_struct {
+    my ($buf) = @_;
+    return undef unless $buf && length($buf) >= 300;
+    my %cont;
+    $cont{Closed}        = unpack("s", substr($buf, 0, 2));
+    $cont{ContainerName} = substr($buf, 2, 30);   $cont{ContainerName} =~ s/[\0 ]+$//;
+    $cont{Locked}        = unpack("s", substr($buf, 32, 2));
+    $cont{Keyed}         = unpack("s", substr($buf, 34, 2));
+    $cont{ShortName}     = substr($buf, 36, 30);  $cont{ShortName} =~ s/[\0 ]+$//;
+    $cont{Charges}       = substr($buf, 66, 10);
+    $cont{Inventory}     = substr($buf, 76, 10);
+    $cont{Invisible}     = substr($buf, 86, 10);
+    $cont{Unused}        = substr($buf, 96, 150);
+    $cont{Permanent}     = unpack("s", substr($buf, 246, 2));
+    return \%cont;
+}
+
+sub pack_container_struct {
+    my ($cont) = @_;
+    my $buf = '';
+    $buf .= pack("s", $cont->{Closed} // 0);
+    $buf .= pack("a30", $cont->{ContainerName} // '');
+    $buf .= pack("s", $cont->{Locked} // 0);
+    $buf .= pack("s", $cont->{Keyed} // 0);
+    $buf .= pack("a30", $cont->{ShortName} // '');
+    $buf .= pack("a10", $cont->{Charges} // '');
+    $buf .= pack("a10", $cont->{Inventory} // '');
+    $buf .= pack("a10", $cont->{Invisible} // '');
+    $buf .= pack("a150", $cont->{Unused} // '');
+    $buf .= pack("s", $cont->{Permanent} // 0);
+    $buf .= "\0" x (300 - length($buf));
+    return $buf;
+}
+
+# --- All container actions now use file-backed, locked containers ---
+
+sub lookin_container {
+    my ($scope, $id, $player, $room) = @_;
+    my $cont;
+    if ($scope eq 'room') {
+        $cont = read_room_container($room);
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        $cont = read_player_container($player, $n);
+    }
+    unless ($cont) {
+        writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Invisible} && $cont->{Invisible} =~ /-1/) {
+        writeline($config{'systemcolor'}."You can't see any container here.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Closed} == 1) {
+        writeline($config{'systemcolor'}."The container is closed.".$config{'themecolor'});
+        return;
+    }
+    my @items;
+    for my $i (1..5) {
+        my $idx = unpack("s", substr($cont->{Inventory}, ($i-1)*2, 2));
+        next unless $idx > 0;
+        my $treas = read_treasure_record($idx);
+        push @items, $treas->{name} if $treas->{name};
+    }
+    if (@items) {
+        writeline($config{'systemcolor'}."Contents of container:".$config{'themecolor'});
+        foreach my $item (@items) {
+            writeline($config{'datacolor'}." - $item".$config{'themecolor'});
+        }
+    } else {
+        writeline($config{'systemcolor'}."The container is empty.".$config{'themecolor'});
+    }
+}
+
+sub get_from_container {
+    my ($item, $scope, $id, $player, $room) = @_;
+    my $cont;
+    if ($scope eq 'room') {
+        $cont = read_room_container($room);
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        $cont = read_player_container($player, $n);
+    }
+    unless ($cont) {
+        writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+        return 0;
+    }
+    if ($cont->{Closed} == 1) {
+        writeline($config{'systemcolor'}."The container is closed.".$config{'themecolor'});
+        return 0;
+    }
+    my $try_name = normalize_item_name($item);
+    for my $i (0..4) {
+        my $idx = unpack("s", substr($cont->{Inventory}, $i*2, 2));
+        next unless $idx > 0;
+        my $treas = read_treasure_record($idx);
+        next unless $treas->{name} && normalize_item_name($treas->{name}) eq $try_name;
+
+        substr($cont->{Inventory}, $i*2, 2, pack("s", 0));
+
+        push @{$player->{inventory}}, { type => 'treasure', idx => $idx, charges => 1 };
+        writeline($config{'systemcolor'}."You take $treas->{name} from the container.".$config{'themecolor'});
+        if ($scope eq 'room') {
+            write_room_container($room, $cont);
+            save_room_record($player->{room}, $room);
+        } else {
+            my ($n) = $id =~ /_(\d+)$/;
+            write_player_container($player, $n, $cont);
+            save_player($player);
+        }
+        return 1;
+    }
+    writeline($config{'systemcolor'}."That item is not in the container.".$config{'themecolor'});
+    return 0;
+}
+
+sub open_container {
+    my ($scope, $id, $player, $room) = @_;
+    my $cont;
+    if ($scope eq 'room') {
+        $cont = read_room_container($room);
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        $cont = read_player_container($player, $n);
+    }
+    unless ($cont) {
+        writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Permanent}) {
+        writeline($config{'systemcolor'}."This container cannot be opened.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Closed} == 0) {
+        writeline($config{'systemcolor'}."It's already open.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Locked} == 1) {
+        writeline($config{'systemcolor'}."It's locked.".$config{'themecolor'});
+        return;
+    }
+    $cont->{Closed} = 0;
+    if ($scope eq 'room') {
+        write_room_container($room, $cont);
+        save_room_record($player->{room}, $room);
+        broadcast_room_message($player->{room}, $player->{name},
+            $config{'usercolor'}."$player->{name} opens the $cont->{ContainerName}.".$config{'themecolor'});
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        write_player_container($player, $n, $cont);
+        save_player($player);
+    }
+    writeline($config{'systemcolor'}."You open the container.".$config{'themecolor'});
+}
+
+sub close_container {
+    my ($scope, $id, $player, $room) = @_;
+    my $cont;
+    if ($scope eq 'room') {
+        $cont = read_room_container($room);
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        $cont = read_player_container($player, $n);
+    }
+    unless ($cont) {
+        writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Permanent}) {
+        writeline($config{'systemcolor'}."This container cannot be closed.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Closed} == 1) {
+        writeline($config{'systemcolor'}."It's already closed.".$config{'themecolor'});
+        return;
+    }
+    $cont->{Closed} = 1;
+    if ($scope eq 'room') {
+        write_room_container($room, $cont);
+        save_room_record($player->{room}, $room);
+        broadcast_room_message($player->{room}, $player->{name},
+            $config{'usercolor'}."$player->{name} closes the $cont->{ContainerName}.".$config{'themecolor'});
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        write_player_container($player, $n, $cont);
+        save_player($player);
+    }
+    writeline($config{'systemcolor'}."You close the container.".$config{'themecolor'});
+}
+
+sub lock_container {
+    my ($scope, $id, $key, $player, $room) = @_;
+    my $cont;
+    if ($scope eq 'room') {
+        $cont = read_room_container($room);
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        $cont = read_player_container($player, $n);
+    }
+    unless ($cont) {
+        writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Permanent}) {
+        writeline($config{'systemcolor'}."This container cannot be locked.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Locked} == 1) {
+        writeline($config{'systemcolor'}."It's already locked.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Keyed} && $key != $cont->{Keyed}) {
+        writeline($config{'systemcolor'}."That key doesn't fit.".$config{'themecolor'});
+        return;
+    }
+    $cont->{Locked} = 1;
+    $cont->{Closed} = 1;
+    if ($scope eq 'room') {
+        write_room_container($room, $cont);
+        save_room_record($player->{room}, $room);
+        broadcast_room_message($player->{room}, $player->{name},
+            $config{'usercolor'}."$player->{name} locks the $cont->{ContainerName}.".$config{'themecolor'});
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        write_player_container($player, $n, $cont);
+        save_player($player);
+    }
+    writeline($config{'systemcolor'}."You lock the container.".$config{'themecolor'});
+}
+
+sub unlock_container {
+    my ($scope, $id, $key, $player, $room) = @_;
+    my $cont;
+    if ($scope eq 'room') {
+        $cont = read_room_container($room);
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        $cont = read_player_container($player, $n);
+    }
+    unless ($cont) {
+        writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Permanent}) {
+        writeline($config{'systemcolor'}."This container cannot be unlocked.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Locked} == 0) {
+        writeline($config{'systemcolor'}."It's not locked.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Keyed} && $key != $cont->{Keyed}) {
+        writeline($config{'systemcolor'}."That key doesn't fit.".$config{'themecolor'});
+        return;
+    }
+    $cont->{Locked} = 0;
+    if ($scope eq 'room') {
+        write_room_container($room, $cont);
+        save_room_record($player->{room}, $room);
+        broadcast_room_message($player->{room}, $player->{name},
+            $config{'usercolor'}."$player->{name} unlocks the $cont->{ContainerName}.".$config{'themecolor'});
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        write_player_container($player, $n, $cont);
+        save_player($player);
+    }
+    writeline($config{'systemcolor'}."You unlock the container.".$config{'themecolor'});
+}
+
+sub picklock_container {
+    my ($scope, $id, $player, $room) = @_;
+    my $cont;
+    if ($scope eq 'room') {
+        $cont = read_room_container($room);
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        $cont = read_player_container($player, $n);
+    }
+    unless ($cont) {
+        writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Permanent}) {
+        writeline($config{'systemcolor'}."This container cannot be picklocked.".$config{'themecolor'});
+        return;
+    }
+    if ($cont->{Locked} == 0) {
+        writeline($config{'systemcolor'}."It's not locked.".$config{'themecolor'});
+        return;
+    }
+    my $chance = ($player->{class} && $player->{class} =~ /Thief/i) ? 0.5 : 0.15;
+    if (rand() < $chance) {
+        $cont->{Locked} = 0;
+        if ($scope eq 'room') {
+            write_room_container($room, $cont);
+            save_room_record($player->{room}, $room);
+            broadcast_room_message($player->{room}, $player->{name},
+                $config{'usercolor'}."$player->{name} picks the lock on the $cont->{ContainerName}.".$config{'themecolor'});
+        } else {
+            my ($n) = $id =~ /_(\d+)$/;
+            write_player_container($player, $n, $cont);
+            save_player($player);
+        }
+        writeline($config{'systemcolor'}."You pick the lock successfully.".$config{'themecolor'});
+    } else {
+        writeline($config{'systemcolor'}."You fail to pick the lock.".$config{'themecolor'});
+    }
+}
+
+sub search_container {
+    my ($scope, $id, $player, $room) = @_;
+    my $cont;
+    if ($scope eq 'room') {
+        $cont = read_room_container($room);
+    } else {
+        my ($n) = $id =~ /_(\d+)$/;
+        $cont = read_player_container($player, $n);
+    }
+    unless ($cont) {
+        writeline($config{'systemcolor'}."No such container.".$config{'themecolor'});
+        return;
+    }
+    my $found = 0;
+    if ($cont->{Invisible} && $cont->{Invisible} =~ /-1/) {
+        $cont->{Invisible} = 0;
+        $found = 1;
+    }
+    for my $i (0..4) {
+        my $idx = unpack("s", substr($cont->{Inventory}, $i*2, 2));
+        if ($idx < 0) {
+            substr($cont->{Inventory}, $i*2, 2, pack("s", abs($idx)));
+            $found = 1;
+        }
+    }
+    if ($found) {
+        writeline($config{'systemcolor'}."You discover something hidden in the container!".$config{'themecolor'});
+        if ($scope eq 'room') {
+            write_room_container($room, $cont);
+            save_room_record($player->{room}, $room);
+            broadcast_room_message($player->{room}, $player->{name},
+                $config{'usercolor'}."$player->{name} discovers something hidden in the $cont->{ContainerName}.".$config{'themecolor'});
+        } else {
+            my ($n) = $id =~ /_(\d+)$/;
+            write_player_container($player, $n, $cont);
+            save_player($player);
+        }
+    } else {
+        writeline($config{'systemcolor'}."You search, but find nothing new.".$config{'themecolor'});
+    }
+}
+
+# Inventory-only container logic (in-memory, not file-backed)
+sub put_item {
+    my ($player, $itemname, $containername) = @_;
+    my ($ci, $cont) = find_container_in_inventory($player, $containername);
+    unless ($cont) {
+        writeline($config{'systemcolor'}."No such container in your inventory.".$config{'themecolor'});
+        return 0;
+    }
+    for my $i (0..$#{$player->{inventory}}) {
+        my $inv = $player->{inventory}[$i];
+        next if $inv->{type} eq 'container';
+        my $name = get_item_name($inv);
+        next unless normalize_item_name($name) eq normalize_item_name($itemname);
+
+        splice(@{$player->{inventory}}, $i, 1);
+        $cont->{contents} ||= [];
+        push @{$cont->{contents}}, $inv;
+        writeline($config{'systemcolor'}."You put $itemname into $containername.".$config{'themecolor'});
+        return 1;
+    }
+    writeline($config{'systemcolor'}."You don't have $itemname.".$config{'themecolor'});
+    return 0;
+}
+
+sub drop_item {
+    my ($player, $itemname, $containername, $room) = @_;
+    if ($containername) {
+        my ($ci, $cont) = find_container_in_inventory($player, $containername);
+        unless ($cont) {
+            writeline($config{'systemcolor'}."No such container in your inventory.".$config{'themecolor'});
+            return 0;
+        }
+        my ($ii, $item) = find_item_in_container($cont, $itemname);
+        unless ($item) {
+            writeline($config{'systemcolor'}."No such item in the container.".$config{'themecolor'});
+            return 0;
+        }
+
+        splice(@{$cont->{contents}}, $ii, 1);
+
+        writeline($config{'systemcolor'}."You drop $itemname from $containername.".$config{'themecolor'});
+        return 1;
+    } else {
+
+        return drop_item_to_room($itemname, $room);
+    }
+}
+
+sub take_item {
+    my ($player, $item, $containername) = @_;
+    
+    # Handle taking from containers separately
+    if ($containername) {
+        return take_from_container($player, $item, $containername);
+    }
+    
+    # Delegate to get_item_from_room when no container specified
+    # This ensures consistent behavior across both command paths
+    return get_item_from_room($item, read_room_record($player->{room}), $player);
+}
+
+# Update get_item_from_room to be the primary item retrieval function
+# with proper room state management
+sub get_item_from_room {
+    my ($itemname, $room, $player) = @_;
+    $player //= $::player; # Use global player if not specified
+    
+    my $try_name = normalize_item_name($itemname);
+    my $found_item = 0;
+    
+    # Check treasures first
+    my $treasures = parse_room_treasures($room);
+    for my $i (0..$#$treasures) {
+        my $t = $treasures->[$i];
+        my $treas = read_treasure_record($t->{idx});
+        next unless $treas && $treas->{name};
+        
+        if (normalize_item_name($treas->{name}) eq $try_name) {
+            # Check if this is a permanent treasure
+            if ($treas->{permanent} && $treas->{permanent} != 0) {
+                writeline($config{'errorcolor'}."The $treas->{name} seems to be fixed in place and cannot be moved.".$config{'themecolor'}, 1);
+                return 0;
+            }
+            
+            # Remove the treasure from the room
+            substr($room->{treasure}, $i*2, 2, pack("s", 0));
+            substr($room->{trecharges}, $i*2, 2, pack("s", 0));
+            
+            # Add to player inventory
+            push @{$player->{inventory}}, { 
+                type => 'treasure', 
+                idx => $t->{idx}, 
+                charges => $t->{charges} 
+            };
+            
+            # Save room before notifying - critical!
+            save_room_record($room->{roomnum} || $room, $room);
+            
+            # Notify player and room
+            writeline($config{'systemcolor'}."You pick up $treas->{name}.".$config{'themecolor'}, 1);
+            broadcast_room_message($player->{room}, $player->{name},
+                $config{'usercolor'}."$player->{name} picks up $treas->{name}.".$config{'themecolor'});
+            
+            # Save player inventory
+            save_player($player);
+            $found_item = 1;
+            return 1;
+        }
+    }
+    
+    # Check objects if no treasure found
+    my $objects = parse_room_objects($room);
+    for my $i (0..$#$objects) {
+        my $o = $objects->[$i];
+        next if $o->{hidden};
+        
+        my $obj = read_object_record($o->{idx});
+        next unless $obj && $obj->{name};
+        
+        if (normalize_item_name($obj->{name}) eq $try_name) {
+            # Check if this is a permanent object
+            if ($obj->{permanent} && $obj->{permanent} != 0) {
+                writeline($config{'errorcolor'}."The $obj->{name} seems to be fixed in place and cannot be moved.".$config{'themecolor'}, 1);
+                return 0;
+            }
+            
+            # Remove the object from the room
+            substr($room->{object}, $i*2, 2, pack("s", 0));
+            substr($room->{hiddenobj}, $i*2, 2, pack("s", 0)) if exists $room->{hiddenobj};
+            
+            # Add to player inventory
+            push @{$player->{inventory}}, { 
+                type => 'object', 
+                idx => $o->{idx} 
+            };
+            
+            # Save room before notifying - critical!
+            save_room_record($room->{roomnum} || $room, $room);
+            
+            # Notify player and room
+            writeline($config{'systemcolor'}."You pick up $obj->{name}.".$config{'themecolor'}, 1);
+            broadcast_room_message($player->{room}, $player->{name},
+                $config{'usercolor'}."$player->{name} picks up $obj->{name}.".$config{'themecolor'});
+            
+            # Save player inventory
+            save_player($player);
+            $found_item = 1;
+            return 1;
+        }
+    }
+    
+    # If we get here, we didn't find the item
+    writeline($config{'systemcolor'}."You don't see $itemname here.".$config{'themecolor'}, 1);
+    return 0;
+}
+
+sub take_from_container {
+    my ($player, $item, $containername) = @_;
+    
+    # Find the container
+    my $container = find_container_by_name($containername, $player, read_room_record($player->{room}));
+    unless ($container) {
+        writeline($config{'systemcolor'}."You don't see $containername here.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Get the item from the container
+    my $room = read_room_record($player->{room});
+    my $result = get_from_container($item, $container->{scope}, $container->{id}, $player, $room);
+    
+    # If we modified a room container, save the room
+    if ($result && $container->{scope} eq 'room') {
+        save_room_record($player->{room}, $room);
+    }
+    
+    return $result;
+}
+
+return 1;

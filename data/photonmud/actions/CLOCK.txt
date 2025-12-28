@@ -1,0 +1,11 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@CLOCK@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays the current server time.
+Syntax: CLOCK
+
+- Shows the real-world time on the server.
+- Useful for timing events or checking the time during play.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

@@ -1,0 +1,39 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR CHARM Command - Attempt to Charm Target @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  CHARM <target>
+
+@DATACLR What it does:@THEMECLR
+  CHARM attempts to magically charm a monster or NPC, causing them to
+  become friendly or non-hostile. Success depends on your Charisma.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - CHARM is used on your turn in combat or outside combat.
+  - Roll: d20 + CHA mod; must exceed 18 to succeed.
+  - Some monsters/NPCs are immune to charm.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - Charm Roll: d20 + CHA mod
+
+@DATACLR Outcome:@THEMECLR
+  - Success: Target becomes friendly or leaves you alone.
+  - Failure: Target may become enraged or attack.
+
+@DATACLR Class Features:@THEMECLR
+  - Bards and high-CHA classes have better chance.
+  - All classes can attempt CHARM.
+
+@DATACLR Tips:@THEMECLR
+  - Use CHARM to avoid combat or gain allies.
+  - Not all targets can be charmed.
+
+@DATACLR Example:@THEMECLR
+  CHARM GOBLIN
+    Rolls d20 + CHA mod. If >18, goblin is charmed.
+
+@DATACLR See also:@THEMECLR
+  BEGUILE, ATTACK, TALK
+-------------------------------------------------------------------------------

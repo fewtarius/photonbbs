@@ -1,0 +1,11 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@DISMOUNT@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Dismounts from your current mount.
+Syntax: DISMOUNT
+
+- You must be mounted to use this command.
+- Removes any mount-related bonuses.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

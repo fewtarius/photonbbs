@@ -1,0 +1,127 @@
+#!/usr/bin/perl
+# PhotonBBS DND room.dat record parser (dump all records)
+use strict;
+use warnings;
+
+my $file = shift || 'data/photonmud/rooms.dat';
+my $reclen = 1096;  # Updated for elevation (4 bytes) + biome (8 bytes)
+
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+my $record_num = 1;
+while (1) {
+    seek($fh, ($record_num - 1) * $reclen, 0);
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    # If the record is all zeros, treat as empty/deleted
+    if ($buf =~ /^\0+$/) {
+        $record_num++;
+        next;
+    }
+
+    my %room;
+    $room{action}      = unpack("s", substr($buf, 0, 2));
+    $room{direct}      = substr($buf, 2, 48);
+    $room{flags}       = substr($buf, 50, 40);
+    $room{longdesc}    = substr($buf, 90, 400);
+    $room{monsterclass}= unpack("s", substr($buf, 490, 2));
+    $room{object}      = substr($buf, 492, 40);
+    $room{hiddenobj}   = substr($buf, 532, 40);
+    $room{shortdesc}   = substr($buf, 572, 80);
+    $room{treasure}    = substr($buf, 652, 40);
+    $room{trecharges}  = substr($buf, 692, 40);
+    $room{container}   = substr($buf, 732, 246);
+    $room{container_permanent} = unpack("s", substr($buf, 978, 2));
+    $room{region}      = substr($buf, 980, 16);
+    $room{feature}     = substr($buf, 996, 16);
+    $room{town_name}   = substr($buf, 1012, 24);
+    $room{castle_name} = substr($buf, 1036, 24);
+    $room{river_name}  = substr($buf, 1060, 24);
+    $room{elevation}   = unpack("f<", substr($buf, 1084, 4));
+    $room{biome}       = substr($buf, 1088, 8);
+
+    # Convert all string fields to ASCII, replace non-printables with '.'
+    for my $f (qw(flags shortdesc treasure trecharges region feature town_name castle_name river_name biome)) {
+        next unless defined $room{$f};
+        $room{$f} =~ s/[^[:print:]]/./g;
+        $room{$f} =~ s/[\0\s]+$//;
+    }
+
+    # Longdesc: join all lines, replace non-printables, trim
+    my $longdesc = "";
+    for my $l (0..4) {
+        my $line = substr($room{longdesc}, $l*80, 80);
+        $line =~ s/[^[:print:]]/./g;
+        $line =~ s/\s+$//;
+        $longdesc .= $line . " " if $line ne "";
+    }
+    $longdesc =~ s/\s+$//;
+    $room{longdesc} = $longdesc;
+
+    print "Record: $record_num\n";
+    print "action: $room{action}\n";
+    print "monsterclass: $room{monsterclass}\n";
+    print "flags: $room{flags}\n";
+    print "shortdesc: $room{shortdesc}\n";
+    print "treasure: $room{treasure}\n";
+    print "trecharges: $room{trecharges}\n";
+
+    # Exits
+    my @dirs = qw(N E S W NE SE SW NW UP DOWN IN OUT);
+    print "exits:";
+    for my $i (0..11) {
+        my $val = unpack("f<", substr($room{direct}, $i*4, 4));
+        my $ival = int($val + 0.0001);
+        print " $dirs[$i]=$ival";
+    }
+    print "\n";
+
+    print "longdesc: $room{longdesc}\n";
+
+    # Objects
+    print "objects:";
+    for my $i (0..19) {
+        my $obj = unpack("s", substr($room{object}, $i*2, 2));
+        print " $obj";
+    }
+    print "\n";
+
+    # Hidden objects
+    print "hiddenobj:";
+    for my $i (0..19) {
+        my $hobj = unpack("s", substr($room{hiddenobj}, $i*2, 2));
+        print " $hobj";
+    }
+    print "\n";
+
+    # Container permanent flag
+    my $permanent = unpack("s", substr($room{container}, 244, 2));
+    print "container.permanent: $permanent\n";
+
+    # Format region/feature data with proper padding
+    print "region:      ", sprintf("%-16s", $room{region}), "\n";
+    print "feature:     ", sprintf("%-16s", $room{feature}), "\n";
+    print "town_name:   ", sprintf("%-24s", $room{town_name}), "\n";
+    print "castle_name: ", sprintf("%-24s", $room{castle_name}), "\n";
+    print "river_name:  ", sprintf("%-24s", $room{river_name}), "\n";
+
+    # Enhanced elevation display with validation
+    if (defined $room{elevation} && $room{elevation} != 0) {
+        printf "elevation:   %.3f\n", $room{elevation};
+    } else {
+        print "elevation:   <none>\n";
+    }
+
+    # Enhanced biome display with validation
+    if (defined $room{biome} && $room{biome} =~ /\S/) {
+        print "biome:       $room{biome}\n";
+    } else {
+        print "biome:       <none>\n";
+    }
+
+    print "\n";
+    $record_num++;
+}
+close($fh);

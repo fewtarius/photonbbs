@@ -1,0 +1,14 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@GO <object>@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Use GO to move through a specific object exit, such as a gate, ladder, or
+portal.
+Syntax: GO <object>
+Example: GO GATE
+
+- Works like ENTER, but accepts any valid exit object.
+- Some objects may be locked, closed, or require a key.
+- If successful, you will move to the destination room.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

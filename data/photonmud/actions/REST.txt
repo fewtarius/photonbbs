@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@REST@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Restores HP and spell slots when used in a safe location (like an Inn).
+Syntax: REST
+Aliases: R
+
+- Only works in certain rooms (e.g., Inn).
+- Fully restores HP and spell slots.
+- May cost gold or time.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

@@ -1,0 +1,41 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR PARLEY Command - Negotiate with Monsters or NPCs @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  PARLEY <monster>
+  PARLEY <npc>
+
+@DATACLR What it does:@THEMECLR
+  PARLEY lets you attempt to negotiate, reason, or interact with a
+  monster or NPC. The outcome depends on your Charisma, the target's
+  disposition, and sometimes a random roll.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Use PARLEY to avoid combat, gain information, or request favors.
+  - Some monsters/NPCs may respond with unique dialogue or actions.
+  - Success may depend on d20 + CHA modifier vs. a set difficulty.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - d20 + CHA mod vs. target's DC (varies by target).
+
+@DATACLR Outcome:@THEMECLR
+  - Success: Target may become friendly, share info, or let you pass.
+  - Failure: Target may ignore you or become hostile.
+
+@DATACLR Class Features:@THEMECLR
+  - Bards and high-CHA classes have better odds.
+  - All classes can attempt PARLEY.
+
+@DATACLR Tips:@THEMECLR
+  - Try PARLEY before attacking for peaceful solutions.
+  - Some targets are immune to negotiation.
+
+@DATACLR Example:@THEMECLR
+  PARLEY OGRE
+    Rolls d20 + CHA mod. If successful, ogre lets you pass.
+
+@DATACLR See also:@THEMECLR
+  TALK, BRIBE, CHARM, BEGUILE
+-------------------------------------------------------------------------------

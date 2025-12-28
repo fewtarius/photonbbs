@@ -1,0 +1,44 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR EAT Command - Consume Food for Effects @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  EAT <item>
+
+@DATACLR What it does:@THEMECLR
+  EAT allows you to consume a food item from your inventory. Eating food
+  may restore hit points (HP), remove negative effects, or provide buffs,
+  depending on the item. Some foods are required to survive in harsh areas.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only edible items can be eaten (bread, rations, fruit, etc.).
+  - Some foods restore HP, others may cure poison or grant temporary bonuses.
+  - Spoiled or cursed food may cause harm or negative effects.
+  - Eating is an instant action and does not use a combat turn.
+  - Some classes (e.g., Druid, Ranger) may gain extra benefits from natural foods.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None, unless the food is cursed or spoiled (then a save may be required).
+
+@DATACLR Outcome:@THEMECLR
+  - HP is restored, status effects may be removed, or buffs applied.
+  - The food item is removed from your inventory.
+  - If the food is harmful, you may lose HP or suffer a penalty.
+
+@DATACLR Class Features:@THEMECLR
+  - Druids and Rangers: +1 HP from natural foods.
+  - All classes can eat food.
+
+@DATACLR Tips:@THEMECLR
+  - Carry food for emergencies or long journeys.
+  - Check item descriptions for special effects.
+  - Avoid eating unknown or cursed items.
+
+@DATACLR Example:@THEMECLR
+  EAT BREAD
+    You eat the bread and restore 3 HP.
+
+@DATACLR See also:@THEMECLR
+  DRINK, INVENTORY, STATUS, GET
+-------------------------------------------------------------------------------

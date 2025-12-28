@@ -1,0 +1,452 @@
+# PhotonMUD Broker Client Library
+# Provides socket-based communication with the PhotonMUD Message Broker
+#
+# Usage:
+#   use lib "$config{home}/modules";
+#   require "pm-broker-client";
+#
+#   my $sock = broker_connect($player_name);
+#   broker_join_room($sock, $room_id);
+#   broker_send_room_message($sock, $room_id, $message);
+#   my @messages = broker_poll($sock);
+#   broker_disconnect($sock);
+
+use strict;
+use warnings;
+use IO::Socket::UNIX;
+use IO::Select;
+use JSON::PP;
+use feature 'state';
+
+our $BROKER_SOCKET = "/dev/shm/photonmud/broker.sock";
+our $broker_debug_enabled = $ENV{PHOTONMUD_BROKER_CLIENT_DEBUG} // 0;
+
+sub broker_debug {
+    my ($msg) = @_;
+    return unless $broker_debug_enabled;
+    my $ts = scalar localtime;
+    print STDERR "[BROKER CLIENT $ts] $msg\n";
+}
+
+# ============================================================================
+# CONNECTION MANAGEMENT
+# ============================================================================
+
+# Connect to the broker and register as a player
+sub broker_connect {
+    my ($player_name) = @_;
+    
+    broker_debug("Connecting to broker for player: $player_name");
+    
+    unless (-e $BROKER_SOCKET) {
+        broker_debug("Broker socket not found: $BROKER_SOCKET");
+        return undef;
+    }
+    
+    my $sock = IO::Socket::UNIX->new(
+        Type => SOCK_STREAM,
+        Peer => $BROKER_SOCKET,
+    );
+    
+    unless ($sock) {
+        broker_debug("Failed to connect to broker: $!");
+        return undef;
+    }
+    
+    $sock->blocking(0);
+    
+    # Register with the broker
+    my $result = broker_send_and_wait($sock, {
+        type => 'register',
+        client_type => 'player',
+        id => $player_name,
+    }, 2);  # 2 second timeout
+    
+    if ($result && $result->{type} eq 'ack' && $result->{success}) {
+        broker_debug("Registered with broker as: $player_name");
+        return $sock;
+    }
+    
+    broker_debug("Failed to register with broker");
+    $sock->close();
+    return undef;
+}
+
+# Connect as monster AI
+sub broker_connect_monsterai {
+    my ($ai_id) = @_;
+    
+    broker_debug("Connecting to broker as monsterai: $ai_id");
+    
+    unless (-e $BROKER_SOCKET) {
+        broker_debug("Broker socket not found: $BROKER_SOCKET");
+        return undef;
+    }
+    
+    my $sock = IO::Socket::UNIX->new(
+        Type => SOCK_STREAM,
+        Peer => $BROKER_SOCKET,
+    );
+    
+    unless ($sock) {
+        broker_debug("Failed to connect to broker: $!");
+        return undef;
+    }
+    
+    $sock->blocking(0);
+    
+    # Register with the broker
+    my $result = broker_send_and_wait($sock, {
+        type => 'register',
+        client_type => 'monsterai',
+        id => $ai_id,
+    }, 2);
+    
+    if ($result && $result->{type} eq 'ack' && $result->{success}) {
+        broker_debug("Registered with broker as monsterai: $ai_id");
+        return $sock;
+    }
+    
+    broker_debug("Failed to register with broker");
+    $sock->close();
+    return undef;
+}
+
+# Check if broker is available
+sub broker_available {
+    return -e $BROKER_SOCKET;
+}
+
+# Check if connection is still alive
+sub broker_connected {
+    my ($sock) = @_;
+    return 0 unless $sock && ref($sock);
+    return $sock->connected();
+}
+
+# Disconnect from the broker
+sub broker_disconnect {
+    my ($sock) = @_;
+    return unless $sock;
+    
+    eval {
+        $sock->shutdown(2);
+        $sock->close();
+    };
+    
+    broker_debug("Disconnected from broker");
+}
+
+# ============================================================================
+# ROOM MANAGEMENT
+# ============================================================================
+
+# Join a room
+sub broker_join_room {
+    my ($sock, $room_id) = @_;
+    return 0 unless $sock && defined $room_id;
+    
+    broker_debug("Joining room: $room_id");
+    
+    my $result = broker_send_and_wait($sock, {
+        type => 'room_join',
+        room_id => $room_id,
+    }, 2);
+    
+    if ($result && $result->{type} eq 'ack') {
+        broker_debug("Joined room $room_id with players: " . join(", ", @{$result->{players} || []}));
+        return 1;
+    }
+    
+    return 0;
+}
+
+# Leave current room
+sub broker_leave_room {
+    my ($sock) = @_;
+    return 0 unless $sock;
+    
+    broker_send($sock, { type => 'room_leave' });
+    return 1;
+}
+
+# Get players in a room
+sub broker_get_room_players {
+    my ($sock, $room_id) = @_;
+    return () unless $sock && defined $room_id;
+    
+    my $result = broker_send_and_wait($sock, {
+        type => 'get_room_players',
+        room_id => $room_id,
+    }, 2);
+    
+    if ($result && $result->{type} eq 'room_players') {
+        return @{$result->{players} || []};
+    }
+    
+    return ();
+}
+
+# Get all online players
+sub broker_get_online_players {
+    my ($sock) = @_;
+    return () unless $sock;
+    
+    my $result = broker_send_and_wait($sock, {
+        type => 'get_online_players',
+    }, 2);
+    
+    if ($result && $result->{type} eq 'online_players') {
+        return @{$result->{players} || []};
+    }
+    
+    return ();
+}
+
+# ============================================================================
+# MESSAGING
+# ============================================================================
+
+# Send a message to a room (broadcast)
+sub broker_send_room_message {
+    my ($sock, $room_id, $message, $exclude) = @_;
+    return 0 unless $sock && defined $room_id && $message;
+    
+    broker_send($sock, {
+        type => 'room_message',
+        room_id => $room_id,
+        message => $message,
+        exclude => $exclude,
+    });
+    
+    return 1;
+}
+
+# Send a direct message to a player
+sub broker_send_direct_message {
+    my ($sock, $target, $message) = @_;
+    return 0 unless $sock && $target && $message;
+    
+    broker_send($sock, {
+        type => 'direct_message',
+        target => $target,
+        message => $message,
+    });
+    
+    return 1;
+}
+
+# ============================================================================
+# COMBAT
+# ============================================================================
+
+# Initiate an attack on a player (for monsterai)
+sub broker_monster_attack {
+    my ($sock, $monster_id, $monster_name, $target_player, $room_id) = @_;
+    return undef unless $sock && $monster_id && $target_player && defined $room_id;
+    
+    broker_debug("Monster attack: $monster_name ($monster_id) -> $target_player in room $room_id");
+    
+    my $result = broker_send_and_wait($sock, {
+        type => 'monster_attack',
+        monster_id => $monster_id,
+        monster_name => $monster_name,
+        target => $target_player,
+        room_id => $room_id,
+    }, 5);  # 5 second timeout
+    
+    if ($result && $result->{type} eq 'ack') {
+        broker_debug("Attack pending, combat_id: $result->{combat_id}");
+        return $result->{combat_id};
+    }
+    elsif ($result && $result->{type} eq 'error') {
+        broker_debug("Attack failed: $result->{message}");
+        return undef;
+    }
+    
+    return undef;
+}
+
+# Respond to a combat request (fight or flee)
+sub broker_combat_response {
+    my ($sock, $combat_id, $response) = @_;
+    return 0 unless $sock && $combat_id && $response;
+    
+    broker_debug("Combat response: $combat_id -> $response");
+    
+    broker_send($sock, {
+        type => 'combat_response',
+        combat_id => $combat_id,
+        response => $response,
+    });
+    
+    return 1;
+}
+
+# Send combat update (damage, spell, etc.)
+sub broker_combat_update {
+    my ($sock, $combat_id, $update_type, $data) = @_;
+    return 0 unless $sock && $combat_id && $update_type;
+    
+    broker_send($sock, {
+        type => 'combat_update',
+        combat_id => $combat_id,
+        update_type => $update_type,
+        data => $data || {},
+    });
+    
+    return 1;
+}
+
+# End combat
+sub broker_combat_end {
+    my ($sock, $combat_id, $winner) = @_;
+    return 0 unless $sock && $combat_id;
+    
+    broker_send($sock, {
+        type => 'combat_update',
+        combat_id => $combat_id,
+        update_type => 'end',
+        winner => $winner,
+    });
+    
+    return 1;
+}
+
+# ============================================================================
+# POLLING AND RECEIVING
+# ============================================================================
+
+# Poll for incoming messages (non-blocking)
+sub broker_poll {
+    my ($sock, $timeout) = @_;
+    $timeout //= 0;  # Default non-blocking
+    
+    return () unless $sock;
+    
+    my @messages;
+    my $select = IO::Select->new($sock);
+    
+    while ($select->can_read($timeout)) {
+        my $msg = broker_recv_one($sock);
+        last unless $msg;
+        push @messages, $msg;
+        $timeout = 0;  # After first message, don't wait
+    }
+    
+    return @messages;
+}
+
+# Receive a single message (non-blocking)
+sub broker_recv_one {
+    my ($sock) = @_;
+    return undef unless $sock;
+    
+    state %buffers;
+    my $fd = fileno($sock);
+    $buffers{$fd} //= '';
+    
+    # Try to read more data
+    my $data;
+    my $bytes = $sock->sysread($data, 4096);
+    
+    if ($bytes) {
+        $buffers{$fd} .= $data;
+    }
+    elsif (!defined $bytes && !$!{EAGAIN} && !$!{EWOULDBLOCK}) {
+        # Connection error
+        delete $buffers{$fd};
+        return undef;
+    }
+    
+    # Try to extract a complete message
+    if ($buffers{$fd} =~ s/^(.+?)\n//) {
+        my $line = $1;
+        my $msg = eval { decode_json($line) };
+        if ($msg) {
+            broker_debug("Received: " . ($msg->{type} || 'unknown'));
+            return $msg;
+        }
+    }
+    
+    return undef;
+}
+
+# Wait for a specific message type
+sub broker_wait_for {
+    my ($sock, $type, $timeout) = @_;
+    $timeout //= 5;
+    
+    my $start = time();
+    while (time() - $start < $timeout) {
+        my @msgs = broker_poll($sock, 0.1);
+        for my $msg (@msgs) {
+            return $msg if $msg->{type} eq $type;
+        }
+    }
+    
+    return undef;
+}
+
+# ============================================================================
+# LOW-LEVEL FUNCTIONS
+# ============================================================================
+
+# Send a message to the broker
+sub broker_send {
+    my ($sock, $msg) = @_;
+    return 0 unless $sock && $msg;
+    
+    my $json = encode_json($msg) . "\n";
+    
+    eval {
+        $sock->syswrite($json);
+    };
+    
+    if ($@) {
+        broker_debug("Send error: $@");
+        return 0;
+    }
+    
+    broker_debug("Sent: " . ($msg->{type} || 'unknown'));
+    return 1;
+}
+
+# Send and wait for response
+sub broker_send_and_wait {
+    my ($sock, $msg, $timeout) = @_;
+    $timeout //= 2;
+    
+    broker_send($sock, $msg) or return undef;
+    
+    # Wait for ack or error
+    my $start = time();
+    while (time() - $start < $timeout) {
+        my @msgs = broker_poll($sock, 0.1);
+        for my $response (@msgs) {
+            # Accept ack or error
+            if ($response->{type} eq 'ack' || $response->{type} eq 'error') {
+                return $response;
+            }
+            # Also accept specific response types
+            if ($response->{type} eq 'room_players' || 
+                $response->{type} eq 'online_players' ||
+                $response->{type} eq 'heartbeat_ack') {
+                return $response;
+            }
+        }
+    }
+    
+    broker_debug("Timeout waiting for response to: " . ($msg->{type} || 'unknown'));
+    return undef;
+}
+
+# Send heartbeat
+sub broker_heartbeat {
+    my ($sock) = @_;
+    return 0 unless $sock;
+    broker_send($sock, { type => 'heartbeat' });
+    return 1;
+}
+
+1;

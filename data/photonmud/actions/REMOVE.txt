@@ -1,0 +1,38 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR REMOVE Command - Take Off Worn or Equipped Items @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  REMOVE <item>
+  RETURN <item>
+
+@DATACLR What it does:@THEMECLR
+  REMOVE (or RETURN) takes off a worn item (armor, ring, etc.) or unequips
+  your weapon, returning it to your inventory.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only items currently worn or equipped can be removed.
+  - Removing an item frees up that slot for another item.
+  - Bonuses from the item are lost until it is worn/equipped again.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None. REMOVE is an instant action.
+
+@DATACLR Outcome:@THEMECLR
+  - The item is now in your inventory and no longer provides bonuses.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use REMOVE the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Remove items before equipping or wearing new ones if needed.
+  - Use REMOVE to switch gear for different situations.
+
+@DATACLR Example:@THEMECLR
+  REMOVE SHIELD
+    Shield is now in your inventory.
+
+@DATACLR See also:@THEMECLR
+  EQUIP, WEAR, INVENTORY, STATUS
+-------------------------------------------------------------------------------

@@ -1,0 +1,40 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR CHARGE Command - Aggressive Strength Attack @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  CHARGE <target>
+
+@DATACLR What it does:@THEMECLR
+  CHARGE is a forceful attack that uses your strength to deal extra
+  damage at the cost of accuracy. It is best for strong melee classes.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - CHARGE can be used in place of a standard attack on your turn.
+  - Attack Roll: d20 + STR mod + proficiency + magic - 2 penalty
+  - If you hit, you deal 2d6 + bonuses (or your weapon's dice if higher).
+
+@DATACLR Dice Rolls:@THEMECLR
+  - Attack: d20 + STR mod + proficiency + magic - 2
+  - Damage: 2d6 + STR mod + proficiency + magic (minimum 1)
+
+@DATACLR Outcome:@THEMECLR
+  - High damage potential, but easier to miss.
+  - May leave you open to counterattack if you miss.
+
+@DATACLR Class Features:@THEMECLR
+  - Fighters and Paladins benefit most from CHARGE.
+  - Proficiency with heavy weapons increases effectiveness.
+
+@DATACLR Tips:@THEMECLR
+  - Use CHARGE when you need to break through tough enemies.
+  - Combine with buffs or spells for maximum impact.
+
+@DATACLR Example:@THEMECLR
+  CHARGE OGRE
+    Rolls d20 + bonuses - 2 vs. ogre's AC. If hit, rolls 2d6 + bonuses.
+
+@DATACLR See also:@THEMECLR
+  ATTACK, LUNGE, THRUST, DODGE, PARRY
+-------------------------------------------------------------------------------

@@ -1,0 +1,40 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR THRUST Command - Precise Dexterity Attack @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  THRUST <target>
+
+@DATACLR What it does:@THEMECLR
+  THRUST is a precise attack that favors dexterity over brute strength.
+  It is useful for classes with high DEX or when facing agile opponents.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - THRUST can be used in place of a standard attack on your turn.
+  - Attack Roll: d20 + DEX mod + proficiency + magic - 1 penalty
+  - If you hit, you deal 2d5 + bonuses (or your weapon's dice if higher).
+
+@DATACLR Dice Rolls:@THEMECLR
+  - Attack: d20 + DEX mod + proficiency + magic - 1
+  - Damage: 2d5 + DEX mod + proficiency + magic (minimum 1)
+
+@DATACLR Outcome:@THEMECLR
+  - Slightly less accurate than a normal attack, but can bypass some defenses.
+  - Useful for lightly armored or evasive targets.
+
+@DATACLR Class Features:@THEMECLR
+  - Thieves and Rangers benefit most from THRUST.
+  - Proficiency with light weapons increases effectiveness.
+
+@DATACLR Tips:@THEMECLR
+  - Use THRUST if your DEX is higher than your STR.
+  - Combine with buffs or spells for better results.
+
+@DATACLR Example:@THEMECLR
+  THRUST BANDIT
+    Rolls d20 + bonuses - 1 vs. bandit's AC. If hit, rolls 2d5 + bonuses.
+
+@DATACLR See also:@THEMECLR
+  ATTACK, LUNGE, BACKSTAB, DODGE, PARRY
+-------------------------------------------------------------------------------

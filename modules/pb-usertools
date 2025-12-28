@@ -91,8 +91,8 @@ sub getuname {
   $tochk=$_[0];
   $fuser=$config{'home'}.$config{'data'}."/users.dat";
   lockfile("$fuser");
-  open (getuname,"<$fuser");
-  while (<getuname>) {
+  open (my $uname_fh, '<', $fuser);
+  while (<$uname_fh>) {
     $line=$_;
     chomp ($line);
     ($chkid,$chkname)=split(/\|/,$line);
@@ -100,7 +100,7 @@ sub getuname {
       last;
     }
   }
-  close (getuname);
+  close ($uname_fh);
   unlockfile("$fuser");
   return "$chkname";
 }
@@ -113,19 +113,19 @@ sub finduser {
   $fuser=$config{'home'}.$config{'data'}."/users.dat";
   if ( -e "$fuser" ) {
     lockfile("$fuser");
-    open (in,"<$fuser");
-    while (<in>) {
+    open (my $user_fh, '<', $fuser);
+    while (<$user_fh>) {
       $line=$_;
       chomp ($line);
       ($chkid,$chkname)=split(/\|/,$line);
       if ($chkname eq $tochk) {
-        close (in);
+        close ($user_fh);
         unlockfile("$fuser");
         loaduser($chkid);
         return "valid";
       }
     }
-    close (in);
+    close ($user_fh);
     unlockfile("$fuser");
   }
   return "invalid";
@@ -155,8 +155,8 @@ sub finduserid {
 sub loaduser {
   $ruser=$config{'home'}.$config{'data'}."/users/".$_[0].".dat";
   lockfile("$ruser");
-  open (in,"<$ruser");
-  while (<in>) {
+  open (my $load_fh, '<', $ruser);
+  while (<$load_fh>) {
     $line=$_;
     chomp $line;
     unless ($line =~/^#/) {
@@ -175,7 +175,7 @@ sub loaduser {
       }
     }
   }
-  close (in);
+  close ($load_fh);
   unlockfile("$ruser");
   if ($info{'ansi'} eq 0) {
     $info{'ext'}="asc";
@@ -264,6 +264,15 @@ sub newuser {
   colorize();
   applytheme($config{'theme'});
 
+  #writeline("How many columns is your display (40/80)? ");
+  #my $cols = getline(text,3,"80",1);
+  #chomp($cols);
+  #if ($cols =~ /^40$/i) {
+  #  $info{'terminal_width'} = 40;
+  #} else {
+    $info{'terminal_width'} = 80;  # Default
+  #}
+
   if ($config{'usefullname'} eq "1") {
     fullname: {
       writeline($theme{'fullname'}." ");
@@ -345,7 +354,7 @@ sub newuser {
     }
     $info{'password'}=hash_password($passa);
   }
-  if ( $info{'id'} eq 0 ) {
+  if ( $info{'id'} == 1 ) {
     $info{'security'}=$config{'sec_sysop'};
   } else {
     $info{'security'}=$config{'sec_user'};
@@ -355,6 +364,9 @@ sub newuser {
   writeline($theme{'remember'});
   $null=waitkey();
   updateuser();
+  
+  # Re-initialize terminal config to pick up the saved width
+  initialize_terminal_config();
 
   # Register the new user as online
   iamat($info{'handle'}, "Logging in");
@@ -411,13 +423,13 @@ sub chhide {
 
   if (-e "$config{'home'}$config{'messages'}/teleconf/TELEPUB_/$info{'node'}") {
     lockfile("$config{'home'}$config{'messages'}/teleconf/TELEPUB_/$info{'node'}");
-    open (out,">$config{'home'}$config{'messages'}/teleconf/TELEPUB_/$info{'node'}");
+    open (my $hide_fh, '>', "$config{'home'}$config{'messages'}/teleconf/TELEPUB_/$info{'node'}");
     unless ($info{'hidden'} eq "Y") {
-     print out $info{'node'}."|".$info{'handle'}."|".$channel."\n";
+     print $hide_fh $info{'node'}."|".$info{'handle'}."|".$channel."\n";
     } else {
-     print out $info{'node'}."|*** HIDDEN ***|".$channel."\n";
+     print $hide_fh $info{'node'}."|*** HIDDEN ***|".$channel."\n";
     }
-    close (out);
+    close ($hide_fh);
     unlockfile("$config{'home'}$config{'messages'}/teleconf/TELEPUB_/$info{'node'}");
   }
   updateuser();

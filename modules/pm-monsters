@@ -1,0 +1,1251 @@
+use Storable qw(lock_store lock_retrieve);
+use Fcntl qw(:flock);
+use Digest::SHA qw(sha1_hex);
+
+# Debug configuration
+our $MONSTER_DEBUG = $ENV{PHOTON_MONSTER_DEBUG} // 0;
+
+sub monster_debug {
+    my ($func, $msg) = @_;
+    return unless $MONSTER_DEBUG;
+    
+    # If no function name provided, get it from caller
+    unless ($func) {
+        my (undef, undef, undef, $subroutine) = caller(1);
+        $subroutine =~ s/.*:://; # Remove package name if present
+        $func = $subroutine;
+    }
+    
+    my $timestamp = localtime();
+    warn "[$timestamp] [MONSTER] [$func] $msg\n";
+}
+
+# Mount types and their capabilities
+our %MOUNT_CAPABILITIES = (
+    # Land mounts
+    'horse'       => { type => 'land', speed => 2, combat_bonus => 1, can_carry => 1 },
+    'warhorse'    => { type => 'land', speed => 2, combat_bonus => 3, can_carry => 1 },
+    'pony'        => { type => 'land', speed => 1, combat_bonus => 0, can_carry => 1 },
+    
+    # Flying mounts
+    'dragon'      => { type => 'flying', speed => 4, combat_bonus => 5, can_carry => 1, 
+                       special => ['fire_breath', 'mountain_pass'] },
+    'griffon'     => { type => 'flying', speed => 3, combat_bonus => 3, can_carry => 1 },
+    'pegasus'     => { type => 'flying', speed => 3, combat_bonus => 2, can_carry => 1 },
+    
+    # Exotic mounts
+    'giant_spider' => { type => 'climbing', speed => 2, combat_bonus => 1, can_carry => 0,
+                        special => ['wall_climb', 'web_walk'] },
+    'giant_lizard' => { type => 'amphibious', speed => 2, combat_bonus => 1, can_carry => 1,
+                        special => ['swamp_walk', 'water_walk'] },
+    'centaur'     => { type => 'land', speed => 3, combat_bonus => 2, can_carry => 0,
+                       special => ['archer_bonus'] },
+);
+
+our @MONSTER_IGNORE_MESSAGES = (
+    "looks at you with utter disinterest.",
+    "barely acknowledges your presence.",
+    "snickers and turns away.",
+    "says: 'Come back when you're stronger.'",
+    "waves you off dismissively.",
+    "says: 'You are not worth my time.'",
+    "yawns and ignores you.",
+    "says: 'Run along, child.'",
+    "rolls its eyes at your attempt.",
+    "says: 'Perhaps another day.'",
+    "says: 'You are but a gnat to me.'",
+    "chuckles: 'You call that a weapon?'",
+    "says: 'Return when you have tasted true battle.'",
+    "scoffs: 'Your courage outweighs your skill.'",
+    "says: 'I have faced dragons fiercer than you.'",
+    "says: 'You are not even worth the effort.'",
+    "says: 'Perhaps you should train with the town guard.'",
+    "says: 'I will not sully my blade with your blood.'",
+    "says: 'You are beneath my notice.'",
+    "says: 'Come back with friends, perhaps.'",
+    "says: 'You amuse me, little one.'",
+    "says: 'I have no quarrel with the weak.'",
+    "says: 'You are not even a warm-up.'",
+    "says: 'I have socks older than you.'",
+    "says: 'You would not survive a single blow.'",
+    "says: 'I could defeat you with my eyes closed.'",
+    "says: 'You are not worth the spell components.'",
+    "says: 'Perhaps you should run along now.'",
+    "says: 'I do not fight children.'",
+    "says: 'You are not even worth a curse.'",
+    "says: 'I will not waste my time.'",
+    "says: 'You are as threatening as a kobold.'",
+    "says: 'Come back when you have a real sword.'",
+    "says: 'You are not even worth a fireball.'",
+    "says: 'I have faced heroes, not amateurs.'",
+    "says: 'You are not the challenge I seek.'",
+    "says: 'Perhaps you should find a goblin to fight.'",
+    "says: 'You are not even worth a second glance.'",
+    "says: 'I have no time for such as you.'",
+    "says: 'You are not even worth a warning.'",
+    "says: 'You are not the hero of this tale.'",
+    "says: 'You would make a poor snack.'",
+    "says: 'I have no interest in ending you.'",
+    "says: 'You are not even worth a roar.'",
+    "says: 'You are not the foe I seek.'",
+    "says: 'You are not even worth a spell slot.'",
+    "says: 'You are not even worth a swing.'",
+    "says: 'You are not even worth a growl.'",
+    "says: 'You are not even worth a glare.'",
+    "says: 'You are not even worth a sigh.'",
+);
+
+sub read_monster_record {
+    my ($monnum) = @_;
+    monster_debug(undef, "Reading monster record $monnum");
+    
+    # Check cache first
+    my $cached = data_cache_get('monsters', $monnum);
+    if (defined $cached) {
+        monster_debug(undef, "Cache HIT for monster $monnum");
+        return $cached;
+    }
+    
+    my $file = "$config{'home'}/$config{'data'}/monsters.dat";
+    my $reclen = 180;
+    my %mon;
+    
+    eval {
+        lockfile($file);
+        open(my $fh, "<:raw", $file) or die "Cannot open monsters.dat: $!";
+        seek($fh, ($monnum - 1) * $reclen, SEEK_SET);
+        read($fh, my $buf, $reclen);
+        close($fh);
+        unlockfile($file);
+
+        $mon{name}        = substr($buf, 0, 30);   $mon{name}        =~ s/[\0 ]+$//;
+        $mon{plural}      = substr($buf, 30, 30);  $mon{plural}      =~ s/[\0 ]+$//;
+        $mon{treasure}    = substr($buf, 60, 10);  $mon{treasure}    =~ s/[\0 ]+$//;
+        $mon{exp}         = unpack("d", substr($buf, 70, 8));
+        $mon{gold}        = unpack("d", substr($buf, 78, 8));
+        $mon{number}      = unpack("s", substr($buf, 86, 2));
+        $mon{level}       = unpack("s", substr($buf, 88, 2));
+        $mon{hits}        = unpack("s", substr($buf, 90, 2));
+        $mon{poison}      = unpack("s", substr($buf, 92, 2));
+        $mon{leveldrain}  = unpack("s", substr($buf, 94, 2));
+        $mon{spell}       = unpack("s", substr($buf, 96, 2));
+        $mon{block}       = unpack("s", substr($buf, 98, 2));
+        $mon{prevent}     = unpack("s", substr($buf,100, 2));
+        $mon{follow}      = unpack("s", substr($buf,102, 2));
+        $mon{magic}       = unpack("s", substr($buf,104, 2));
+        $mon{jail}        = unpack("s", substr($buf,106, 2));
+        $mon{teleport}    = unpack("f<", substr($buf,108, 4));
+        $mon{follow_percent}  = unpack("s", substr($buf,112, 2));
+        $mon{block_percent}   = unpack("s", substr($buf,114, 2));
+        $mon{prevent_percent} = unpack("s", substr($buf,116, 2));
+        $mon{spell_percent}   = unpack("s", substr($buf,118, 2));
+        $mon{poison_percent}  = unpack("s", substr($buf,120, 2));
+        $mon{drain_percent}   = unpack("s", substr($buf,122, 2));
+        $mon{rate}        = unpack("s", substr($buf,124, 2));
+        $mon{rate_percent}= unpack("s", substr($buf,126, 2));
+        $mon{permanent}   = unpack("s", substr($buf,128, 2));
+        $mon{talk}        = substr($buf,130, 10);  $mon{talk}        =~ s/[\0 ]+$//;
+        $mon{psionic}     = unpack("s", substr($buf,140, 2));
+        $mon{psionic_spell}=unpack("s", substr($buf,142, 2));
+        $mon{region}      = substr($buf,144, 16);  $mon{region}      =~ s/[\0 ]+$//;
+        $mon{behaviors}   = substr($buf,160, 20);  $mon{behaviors}   =~ s/[\0 ]+$//;
+
+        $mon{hp} = $mon{hits} unless defined $mon{hp};
+
+        monster_debug(undef, sprintf("Loaded monster: %s (Level %d, HP %d/%d)", 
+            $mon{name}, $mon{level}, $mon{hp}, $mon{hits}));
+    };
+    if ($@) {
+        monster_debug(undef, "ERROR: Failed to read monster record: $@");
+        return {};
+    }
+    
+    # Cache the result
+    data_cache_set('monsters', $monnum, \%mon);
+    
+    return \%mon;
+}
+
+sub room_monster_file {
+    my ($roomnum) = @_;
+    return "$config{transient}/permmon_$roomnum.dat";
+}
+
+sub read_monclass_record {
+    my ($monclassnum) = @_;
+    
+    # Check cache first
+    my $cached = data_cache_get('monclass', $monclassnum);
+    return $cached if defined $cached;
+    
+    my $file = "$config{'home'}/$config{'data'}/monclass.dat";
+    my $reclen = 20;
+    my @monsters;
+    lockfile($file);
+    open(my $fh, "<:raw", $file) or do { unlockfile($file); return []; };
+    seek($fh, ($monclassnum - 1) * $reclen, SEEK_SET);
+    read($fh, my $buf, $reclen);
+    close($fh);
+    unlockfile($file);
+    for my $i (0..9) {
+        my $idx = unpack("s", substr($buf, $i*2, 2));
+        push @monsters, $idx if $idx > 0;
+    }
+    
+    # Cache the result
+    data_cache_set('monclass', $monclassnum, \@monsters);
+    
+    return \@monsters;
+}
+
+sub read_monstertalk_record {
+    my ($talknum) = @_;
+    my $file = "$config{'home'}/$config{'data'}/montalk.dat";
+    my $reclen = 80;
+    my %msg;
+    open(my $fh, "<:raw", $file) or return {};
+    seek($fh, ($talknum - 1) * $reclen, SEEK_SET);
+    read($fh, my $buf, $reclen);
+    close($fh);
+    $msg{message} = substr($buf, 0, 80); $msg{message} =~ s/[\0 ]+$//;
+    return \%msg;
+}
+
+sub debug_room_monsters {
+    my ($room) = @_;
+    my $monclass = read_monclass_record($room->{monsterclass});
+    for my $monidx (@$monclass) {
+        next unless $monidx > 0;
+        my $monster = read_monster_record($monidx);
+    }
+}
+
+sub combat_loop {
+    my ($player, $room, $encounter_monsters, $player_has_initiative) = @_;
+    monster_debug(undef, sprintf("Combat start: %s vs %s", 
+        $player->{name},
+        join(", ", map { "$_->{name}(HP:$_->{hp}/$_->{hits})" } @$encounter_monsters)
+    ));
+
+    my $combat_over = 0;
+    my $player_first = defined($player_has_initiative) ? $player_has_initiative : 1;
+
+    while (!$combat_over && grep { $_->{hp} > 0 } @$encounter_monsters) {
+        monster_debug(undef, sprintf("Combat round - Player HP:%d/%d", 
+            $player->{hp}, $player->{max_hp}));
+
+        # Monster phase if they have initiative
+        if (!$player_first) {
+            foreach my $mon (@$encounter_monsters) {
+                next if $mon->{hp} <= 0 || $mon->{_beguiled};
+                process_monster_combat_round($player, $mon);
+                
+                if ($player->{hp} <= 0) {
+                    monster_debug(undef, "Player killed by monster");
+                    writeline($config{errorcolor}."You have been slain by $mon->{name}!".$config{themecolor}, 1);
+                    broadcast_room_message($player->{room}, $player->{name},
+                        $config{usercolor}."$player->{name} has been slain by $mon->{name}!".$config{themecolor});
+                    handle_player_death($player);
+                    $combat_over = 1;
+                    last;
+                }
+            }
+            
+            if ($combat_over) {
+                last;
+            }
+        }
+        
+        # Reset initiative flag after first round
+        $player_first = 1;
+
+        # Player phase
+        show_combat_menu($player, $encounter_monsters);
+        my $action = uc(waitkey("A"));
+        $action = "A" if $action eq "\n" or $action eq "";
+        monster_debug(undef, "Player chose action: $action");
+        
+        if ($action eq "R") {
+            # Attempt to flee
+            my $dex_mod = int(($player->{stats}{dex} // 10 - 10) / 2);
+            my $flee_roll = int(rand(20)) + 1 + $dex_mod;
+            if ($flee_roll >= 15) {
+                writeline($config{systemcolor}."You successfully flee!".$config{themecolor}, 1);
+                $combat_over = 1;
+                last;
+            } else {
+                writeline($config{errorcolor}."You fail to escape!".$config{themecolor}, 1);
+            }
+        } else {
+            process_player_combat_action($player, $encounter_monsters, $action);
+        }
+        
+        # Check if all monsters dead after player action
+        if (!grep { $_->{hp} > 0 } @$encounter_monsters) {
+            monster_debug(undef, "All monsters defeated");
+            $combat_over = 1;
+            last;
+        }
+
+        # Monster phase
+        foreach my $mon (@$encounter_monsters) {
+            next if $mon->{hp} <= 0 || $mon->{_beguiled};
+            process_monster_combat_round($player, $mon);
+            
+            if ($player->{hp} <= 0) {
+                monster_debug(undef, "Player killed by monster");
+                writeline($config{errorcolor}."You have been slain by $mon->{name}!".$config{themecolor}, 1);
+                broadcast_room_message($player->{room}, $player->{name},
+                    $config{usercolor}."$player->{name} has been slain by $mon->{name}!".$config{themecolor});
+                handle_player_death($player);
+                $combat_over = 1;
+                last;
+            }
+        }
+    }
+    
+    $player->{in_combat} = 0;
+    $player->{last_combat_time} = time();
+    monster_debug(undef, "Combat ended");
+}
+
+sub monster_initial_action {
+    my ($monster) = @_;
+    
+    # Base chance to attack based on monster level
+    my $attack_chance = 0.3 + (($monster->{level} || 1) * 0.1);
+    $attack_chance = 0.9 if $attack_chance > 0.9;
+    
+    # Modify based on monster type/alignment
+    if ($monster->{alignment} && $monster->{alignment} =~ /evil/i) {
+        $attack_chance += 0.2;
+    }
+    
+    # Roll for action
+    my $roll = rand();
+    
+    if ($roll < $attack_chance) {
+        return 'attack';
+    } elsif ($roll < ($attack_chance + 0.2)) {
+        return 'flee';
+    } else {
+        return 'ignore';
+    }
+}
+
+sub show_combat_menu {
+    my ($player, $monsters) = @_;
+
+    # Unified and robust combat actions list, including special attacks and aliases
+    our @combat_actions = (
+        { key => 'A', name => 'Attack',     desc => 'Attack the monster' },
+        { key => 'C', name => 'Charm',      desc => 'Attempt to charm the monster' },
+        { key => 'B', name => 'Beguile',    desc => 'Attempt to beguile the monster' },
+        { key => 'S', name => 'Shield',     desc => 'Defend with your shield' },
+        { key => 'G', name => 'Guard',      desc => 'Guard against attacks' },
+        { key => 'L', name => 'Lunge',      desc => 'Lunge for a strong attack' },
+        { key => 'D', name => 'Dodge',      desc => 'Dodge the next attack' },
+        { key => 'K', name => 'Backstab',   desc => 'Attempt a backstab (Thief only)' },
+        { key => 'P', name => 'Parry',      desc => 'Parry the next attack' },
+        { key => 'T', name => 'Thrust',     desc => 'Thrust for a precise attack' },
+        { key => 'H', name => 'Charge',     desc => 'Charge the monster' },
+        { key => 'U', name => 'Turn',       desc => 'Turn undead (Cleric/Paladin only)' },
+        { key => 'O', name => 'Counter',    desc => 'Counter the next attack' },
+        { key => 'M', name => 'Talk',       desc => 'Talk to the monster' },
+        { key => 'R', name => 'Run',        desc => 'Attempt to run away' },
+        # --- Special attacks (aliases) ---
+        { key => 'Q', name => 'Punch',      desc => 'Unarmed attack (1d3+STR)' },
+        { key => 'E', name => 'Beat',       desc => 'Blunt attack, chance to stun' },
+        { key => 'U', name => 'Pummel',     desc => 'Heavy blunt attack, chance to stun' },
+        { key => 'C', name => 'Circle',     desc => 'Circle for advantage (+2 to hit next turn)' },
+        { key => 'F', name => 'Feint',      desc => 'Feint for advantage (+2 to hit next turn)' },
+    );
+
+    # Filter actions based on player class
+    my @avail = grep {
+        ($_->{name} eq 'Backstab' && $player->{class} !~ /Thief/i) ? 0 :
+        ($_->{name} eq 'Turn'     && $player->{class} !~ /Cleric|Paladin/i) ? 0 :
+        1
+    } @combat_actions;
+
+    # Remove duplicate keys (e.g., C for both Charm and Circle)
+    my %seen_key;
+    @avail = grep { !$seen_key{$_->{key}}++ } @avail;
+
+    # Format actions into columns for display
+    my @lines;
+    my $cols = 3;
+    my $per_col = int((@avail + $cols - 1) / $cols);
+    for my $row (0..$per_col-1) {
+        my @row;
+        for my $col (0..$cols-1) {
+            my $idx = $row + $col * $per_col;
+            next if $idx >= @avail;
+            push @row, sprintf("[%-1s] %-9s", $avail[$idx]{key}, $avail[$idx]{name});
+        }
+        push @lines, join("   ", @row);
+    }
+
+    writeline($config{'usercolor'}."Combat Actions:".$config{'themecolor'}, 1);
+    for my $line (@lines) {
+        writeline($config{'datacolor'}.$line.$config{'themecolor'}, 1);
+    }
+    writeline($config{'promptcolor'}."Choose action: ".$config{'themecolor'}, 0);
+}
+
+sub award_experience {
+    my ($player, $xp) = @_;
+    $player->{experience} ||= 0;
+    $player->{experience} += $xp;
+    writeline($config{'systemcolor'}."You gain $xp experience points!".$config{'themecolor'}, 1);
+    check_level_up($player);
+    add_to_ranklist($player);
+}
+
+sub apply_spell_effect {
+    my ($player, $spell, $target, $context) = @_;
+    my $type = $spell->{type};
+    my $msg = sub { writeline($config{'systemcolor'}.$_[0].$config{'themecolor'}, 1); };
+    my $err = sub { writeline($config{'errorcolor'}.$_[0].$config{'themecolor'}, 1); };
+
+   
+    if ($type == 1) {
+        my $enchanted = 0;
+        foreach my $slot (qw(weapon armor shield)) {
+            if ($player->{equipped}{$slot}) {
+                my $inv = $player->{equipped}{$slot};
+                my $treas = read_treasure_record($inv->{idx});
+                $inv->{plus} = ($inv->{plus} // $treas->{plus} // 0) + 1;
+                $enchanted = 1;
+                $msg->("Your $slot glows with magical energy! (+1)");
+            }
+        }
+        $msg->("You have nothing equipped to enchant.") unless $enchanted;
+    }
+   
+    elsif ($type == 2) {
+        my $dmg = int(rand(6)) + 1 + int(($player->{stats}{int} // 0)/4);
+        if ($target && $target->{hp}) {
+            $target->{hp} -= $dmg;
+            $msg->("You blast $target->{name} for $dmg damage! (HP left: $target->{hp})");
+            if ($target->{hp} <= 0) {
+                $msg->("You have defeated $target->{name}!");
+            }
+        } else {
+            $msg->("You unleash a blast of energy for $dmg damage!");
+        }
+    }
+   
+    elsif ($type == 3) {
+        $player->{blessed} = 1;
+        $msg->("You feel blessed. (+1 to all saves for a while)");
+    }
+   
+    elsif ($type == 4) {
+        my @effects = (
+            sub { $player->{hp} = $player->{max_hp}; $msg->("You are fully healed!"); },
+            sub { $player->{gold} += 1000; $msg->("A pile of gold appears! (+1000 gold)"); },
+            sub { $player->{level}++; $msg->("You feel yourself grow stronger! (Level up)"); check_level_up($player); },
+            sub { $player->{stats}{str}++ if $player->{stats}{str} < 18; $msg->("You feel much stronger!"); },
+            sub { $player->{blessed} = 1; $msg->("You are blessed by the gods!"); },
+        );
+        $effects[int(rand(@effects))]->();
+    }
+   
+    elsif ($type == 5) {
+        if ($target && $target->{hp}) {
+            $target->{poisoned} = 1;
+            $msg->("You poison $target->{name}!");
+        } else {
+            $player->{poisoned} = 1;
+            $err->("You are poisoned!");
+        }
+    }
+   
+    elsif ($type == 6) {
+        my $heal = int(rand(6)) + 3;
+        $player->{hp} += $heal;
+        $player->{hp} = $player->{max_hp} if $player->{hp} > $player->{max_hp};
+        $msg->("You feel invigorated! (+$heal HP)");
+    }
+   
+    elsif ($type == 7) {
+        $player->{hp} = $player->{max_hp};
+        $msg->("You are fully healed!");
+    }
+   
+    elsif ($type == 8) {
+        $player->{poisoned} = 0;
+        $msg->("You are cured of poison.");
+    }
+   
+    elsif ($type == 9) {
+        if ($target && $target->{level}) {
+            $target->{level}-- if $target->{level} > 1;
+            $msg->("You drain a level from $target->{name}!");
+        } else {
+            $player->{level}-- if $player->{level} > 1;
+            $err->("You feel your life force ebb away! (Level drain)");
+        }
+    }
+   
+    elsif ($type == 10) {
+        my $dest = int($spell->{teleport});
+        if ($dest > 0) {
+            if ($target && $target->{room}) {
+                $target->{room} = $dest;
+                $msg->("$target->{name} is teleported away!");
+            } else {
+                $player->{room} = $dest;
+                $msg->("You are teleported to another place!");
+            }
+        }
+    }
+   
+    elsif ($type == 11) {
+        my @stats = qw(str int wis dex con pie cha);
+        my $stat = $stats[int(rand(@stats))];
+        $player->{stats}{$stat}++ if $player->{stats}{$stat} < 18;
+        $msg->("You feel your $stat increase!");
+    }
+   
+    elsif ($type == 12) {
+        my @stats = qw(str int wis dex con pie cha);
+        my $stat = $stats[int(rand(@stats))];
+        $player->{stats}{$stat}-- if $player->{stats}{$stat} > 3;
+        $err->("You feel your $stat decrease!");
+    }
+   
+    elsif ($type == 13) {
+        $player->{invisible} = 1;
+        $msg->("You fade from sight. (Invisible)");
+    }
+   
+    elsif ($type == 14) {
+        $msg->("You sense magical auras and traps nearby.");
+       
+        search_room($context->{room}) if $context && $context->{room};
+    }
+   
+    elsif ($type == 15) {
+        $player->{cursed} = 0;
+        $msg->("You feel the curse lift.");
+    }
+   
+    elsif ($type == 16) {
+        reset_spell_slots($player);
+    }
+   
+    elsif ($type == 17) {
+        my $room = $context->{room};
+        my $monclass = $room ? read_monclass_record($room->{monsterclass}) : [];
+        my $turned = 0;
+        foreach my $monidx (@$monclass) {
+            my $monster = read_monster_record($monidx);
+            next unless $monster && $monster->{name};
+            if ($monster->{name} =~ /undead|skeleton|zombie|ghost|vampire|wight|wraith|mummy|lich/i) {
+                $monster->{hp} = 0;
+                $turned++;
+            }
+        }
+        $msg->($turned ? "You turn $turned undead creature(s)!" : "No undead here to turn.");
+    }
+   
+    elsif ($type == 18) {
+        $player->{passdoor} = 1;
+        $msg->("You can pass through doors for a short time.");
+    }
+   
+    elsif ($type == 19) {
+        $msg->("A magical ally appears to aid you!");
+       
+    }
+   
+    elsif ($type == 20) {
+        $msg->("You focus your mind for a psionic effect.");
+       
+        $player->{psionic} = ($player->{psionic} // 0) + 1;
+    }
+   
+    elsif ($type == 21) {
+        $msg->("You sense locked objects nearby.");
+       
+    }
+   
+    elsif ($type == 22) {
+        $msg->("You sense evil presences.");
+       
+    }
+   
+    elsif ($type == 23) {
+        $msg->("You sense traps in the area.");
+       
+    }
+   
+    elsif ($type == 24) {
+        $player->{intoxicated} = 1;
+        $msg->("You feel dizzy and intoxicated!");
+    }
+   
+    elsif ($type == 25) {
+        $msg->("You set a magical trap in the area.");
+       
+        $context->{room}{trap_set} = 1 if $context && $context->{room};
+    }
+   
+    elsif ($type == 26) {
+        $player->{hidden} = 1;
+        $msg->("You blend into the shadows. (Hidden)");
+    }
+   
+    elsif ($type == 27) {
+        $msg->("You search the area carefully.");
+        search_room($context->{room}) if $context && $context->{room};
+    }
+   
+    elsif ($type == 28) {
+        $msg->("You feel knowledge flow into your mind.");
+       
+        my $found = 0;
+        for my $inv (@{$player->{inventory}}) {
+            my $treas = read_treasure_record($inv->{idx});
+            next unless $treas->{name};
+           
+            writeline($config{'datacolor'}."Identified: $treas->{name} (Type: ".($treas->{scroll} ? "Scroll" : $treas->{potion} ? "Potion" : $treas->{ringtype} ? "Ring" : "Other").")", 1);
+            $found = 1;
+            last;
+        }
+        $msg->("Nothing to identify.") unless $found;
+    }
+    else {
+        $msg->("Nothing happens.");
+    }
+}
+
+sub apply_room_actions {
+    my ($player, $room, $action) = @_;
+   
+    if ($action->{attr2} == 1) {
+        unless (player_has_env_protection($player, "air")) {
+            $player->{env_blocked} = 1;
+            writeline($config{'errorcolor'}."You cannot breathe here without air protection!".$config{'themecolor'}, 1);
+        } else {
+            $player->{env_blocked} = 0;
+        }
+    } elsif ($action->{attr2} == 2) {
+        unless (player_has_env_protection($player, "underwater")) {
+            $player->{env_blocked} = 1;
+            writeline($config{'errorcolor'}."You cannot breathe underwater here!".$config{'themecolor'}, 1);
+        } else {
+            $player->{env_blocked} = 0;
+        }
+    } else {
+        $player->{env_blocked} = 0;
+    }
+
+   
+    if ($action->{level}) {
+        if ($action->{level} > 0 && $player->{level} < $action->{level}) {
+            $player->{room_blocked} = 1;
+            writeline($config{'errorcolor'}."You must be at least level $action->{level} to enter here.".$config{'themecolor'}, 1);
+        } elsif ($action->{level} < 0 && $player->{level} > abs($action->{level})) {
+            $player->{room_blocked} = 1;
+            writeline($config{'errorcolor'}."Only characters level ".abs($action->{level})." or below may enter here.".$config{'themecolor'}, 1);
+        } else {
+            $player->{room_blocked} = 0;
+        }
+    } else {
+        $player->{room_blocked} = 0;
+    }
+
+   
+    if ($action->{restrictions}) {
+        $player->{restricted_dirs} = $action->{restrictions};
+    } else {
+        $player->{restricted_dirs} = 0;
+    }
+
+   
+    if ($action->{health_rate}) {
+        $player->{hp} += $action->{health_rate};
+        $player->{hp} = $player->{max_hp} if $player->{hp} > $player->{max_hp};
+        $player->{hp} = 0 if $player->{hp} < 0;
+        if ($action->{health_rate} > 0) {
+            writeline($config{'systemcolor'}."You feel a little healthier! (+$action->{health_rate} HP)".$config{'themecolor'}, 1);
+        } elsif ($action->{health_rate} < 0) {
+            writeline($config{'errorcolor'}."You feel weaker... ($action->{health_rate} HP)".$config{'themecolor'}, 1);
+        }
+    }
+
+    if ($action->{hitpoints}) {
+        $player->{hp} += $action->{hitpoints};
+        $player->{hp} = $player->{max_hp} if $player->{hp} > $player->{max_hp};
+        $player->{hp} = 0 if $player->{hp} < 0;
+        if ($action->{hitpoints} > 0) {
+            writeline($config{'systemcolor'}."A surge of vitality fills you! (+$action->{hitpoints} HP)".$config{'themecolor'}, 1);
+        } else {
+            writeline($config{'errorcolor'}."A trap saps your strength! ($action->{hitpoints} HP)".$config{'themecolor'}, 1);
+        }
+    }
+
+   
+    if ($action->{fumble} && rand() < 0.05) {
+        foreach my $slot (qw(weapon shield)) {
+            if ($player->{equipped}{$slot}) {
+                my $item = $player->{equipped}{$slot};
+                push @{$player->{inventory}}, $item;
+                $player->{equipped}{$slot} = undef;
+                writeline($config{'errorcolor'}."You fumble and drop your $slot!". $config{'themecolor'}, 1);
+            }
+        }
+    }
+
+   
+    if ($action->{inventory} && rand() < 0.05) {
+        my @slots;
+        push @slots, 'weapon' if $action->{inventory} == 1;
+        push @slots, 'shield' if $action->{inventory} == 2;
+        push @slots, 'armor'  if $action->{inventory} == 3;
+        push @slots, 'ring'   if $action->{inventory} == 4;
+        foreach my $slot (@slots) {
+            if ($player->{equipped}{$slot}) {
+                $player->{equipped}{$slot} = undef;
+                writeline($config{'errorcolor'}."Your $slot breaks from wear and tear!" . $config{'themecolor'}, 1);
+            }
+        }
+    }
+
+   
+    if ($action->{rust_rate} && rand() < 0.05) {
+        foreach my $slot (qw(weapon shield armor)) {
+            if ($player->{equipped}{$slot}) {
+                my $inv = $player->{equipped}{$slot};
+                my $treas = read_treasure_record($inv->{idx});
+                if ($treas->{rustable} && $treas->{rustable} == -1) {
+                    $treas->{plus}-- if $treas->{plus} > 0;
+                    writeline($config{'errorcolor'}."Your $slot is rusted by the environment!" . $config{'themecolor'}, 1);
+                }
+            }
+        }
+    }
+
+   
+    if ($action->{steal_rate} && rand() < 0.05 && @{$player->{inventory}}) {
+        my $stolen = splice(@{$player->{inventory}}, int(rand(@{$player->{inventory}})), 1);
+        writeline($config{'errorcolor'}."Something steals an item from you!" . $config{'themecolor'}, 1);
+    }
+
+   
+    if ($action->{teleport}) {
+        my $dest = int($action->{teleport});
+        if ($dest > 0 && $dest != $player->{room}) {
+            $player->{room} = $dest;
+            writeline($config{'errorcolor'}."A magical force teleports you elsewhere!" . $config{'themecolor'}, 1);
+           
+        }
+    }
+
+   
+    if ($action->{monster_talk}) {
+        my $msg = read_monstertalk_record($action->{monster_talk});
+        writeline($config{'datacolor'}."A voice says: $msg->{message}" . $config{'themecolor'}, 1) if $msg->{message};
+    }
+
+   
+    if ($action->{monster_trigger}) {
+        return if $player->{in_combat} || $player->{hp} <= 0 || ($player->{last_combat_time} && time() - $player->{last_combat_time} < 2);
+        my $monster = read_monster_record($action->{monster_trigger});
+        if ($monster->{name}) {
+            writeline($config{'systemcolor'}."A $monster->{name} appears!" . $config{'themecolor'}, 1);
+            my $num_appearing = $monster->{number} > 1 ? $monster->{number} : 1;
+            my @encounter_monsters = map {
+                my $m = { %$monster, hp => $monster->{hits} };
+                $m->{id} = generate_monster_id();
+                $m;
+            } (1..$num_appearing);
+            $player->{in_combat} = 1;
+            combat_loop($player, $room, \@encounter_monsters);
+            $player->{in_combat} = 0;
+            $player->{last_combat_time} = time();
+        }
+    }
+
+    if ($action->{spell_trigger}) {
+        my $spell = read_spell_record($action->{spell_trigger});
+        if ($spell->{name}) {
+            writeline($config{'systemcolor'}."A magical effect fills the air: $spell->{name}" . $config{'themecolor'}, 1);
+            apply_spell_effect($player, $spell, undef, { room => $room });
+        }
+    }
+
+   
+    if ($action->{poison}) {
+        $player->{poisoned} = 1;
+        writeline($config{'errorcolor'}."You are poisoned by a trap!" . $config{'themecolor'}, 1);
+    }
+
+   
+    my $flags = parse_room_flags($room);
+    for my $i (0..$#$flags) {
+        if ($flags->[$i] == 2 || $flags->[$i] == 3 || $flags->[$i] == 6 || $flags->[$i] == 7) {
+            writeline($config{'errorcolor'}."A trap is triggered as you enter the room!" . $config{'themecolor'}, 1);
+           
+        }
+    }
+}
+
+sub show_monster_info {
+    my ($mon, $room) = @_;
+    writeline($config{'systemcolor'}."Monster: $mon->{name} (Level: $mon->{level} HP: $mon->{hp}/$mon->{hits})".$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."Type: ".($mon->{is_boss} ? "Boss" : "Regular").$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."Region: ".($mon->{region} // "unknown").$config{'themecolor'}, 1);
+    writeline($config{'datacolor'}."Behavior: ".($mon->{behavior_profile} // "unknown").$config{'themecolor'}, 1);
+
+    if ($mon->{special}) {
+        writeline($config{'datacolor'}."Special: $mon->{special}".$config{'themecolor'}, 1);
+    }
+    # Show inventory/treasure
+    if ($mon->{treasure}) {
+        my @items;
+        for my $i (0..4) {
+            my $idx = unpack("s", substr($mon->{treasure}, $i*2, 2));
+            next unless $idx > 0;
+            my $treas = read_treasure_record($idx);
+            push @items, $treas->{name} if $treas->{name};
+        }
+        if (@items) {
+            writeline($config{'datacolor'}."Carrying: ".join(", ", @items).$config{'themecolor'}, 1);
+        }
+    }
+    if ($mon->{inventory} && ref($mon->{inventory}) eq 'ARRAY') {
+        my @inv = map { $_->{name} } grep { $_->{name} } @{ $mon->{inventory} };
+        if (@inv) {
+            writeline($config{'datacolor'}."Inventory: ".join(", ", @inv).$config{'themecolor'}, 1);
+        }
+    }
+    # Optionally show abilities
+    my @abilities;
+    push @abilities, "Poison" if $mon->{poison};
+    push @abilities, "Level Drain" if $mon->{leveldrain};
+    push @abilities, "Spellcasting" if $mon->{spell};
+    push @abilities, "Psionic" if $mon->{psionic};
+    push @abilities, "Rust" if $mon->{rust};
+    push @abilities, "Steal" if $mon->{steal};
+    push @abilities, "Block" if $mon->{block};
+    push @abilities, "Teleport" if $mon->{teleport};
+    push @abilities, "Jail" if $mon->{jail};
+    push @abilities, "Follow" if $mon->{follow};
+    if (@abilities) {
+        writeline($config{'datacolor'}."Abilities: ".join(", ", @abilities).$config{'themecolor'}, 1);
+    }
+}
+
+sub get_room_monsters {
+    my ($room) = @_;
+    my $roomnum = $room->{roomnum};
+    monster_debug(undef, "Getting monsters for room $roomnum");
+    
+    my $perm_file = "$config{transient}/permmon_$roomnum.dat";
+    my @monsters;
+    if (-e $perm_file) {
+        eval {
+            monster_debug(undef, "Loading monsters from $perm_file");
+            my $retrieved = lock_retrieve($perm_file);
+            @monsters = @$retrieved if $retrieved && ref($retrieved) eq 'ARRAY';
+            monster_debug(undef, sprintf("Found %d monsters in room", scalar(@monsters)));
+        };
+        if ($@) {
+            monster_debug(undef, "ERROR: Failed to load room monsters: $@");
+        }
+    }
+    return @monsters;
+}
+
+sub save_room_monsters {
+    my ($room, $monsters) = @_;
+    my $roomnum = $room->{roomnum} || $room->{_roomnum} || $room->{id};
+    my $file = room_monster_file($roomnum);
+    lock_store($monsters, $file);
+}
+
+sub update_monster_in_room {
+    my ($room, $mon_id_or_name, $update_sub) = @_;
+    my $roomnum = $room->{roomnum} || $room->{_roomnum} || $room->{id};
+    my $file = room_monster_file($roomnum);
+
+    open(my $fh, "+<", $file) or return 0;
+    flock($fh, LOCK_EX);
+
+    my @monsters = @{ lock_retrieve($file) };
+    my $changed = 0;
+    foreach my $mon (@monsters) {
+        if (
+            ($mon->{id} && $mon_id_or_name && $mon->{id} eq $mon_id_or_name) ||
+            (lc($mon->{name}) eq lc($mon_id_or_name) && (!$mon->{id} || !$mon_id_or_name))
+        ) {
+            $changed = 1 if $update_sub->($mon);
+        }
+    }
+    lock_store(\@monsters, $file) if $changed;
+
+    flock($fh, LOCK_UN);
+    close($fh);
+    return $changed;
+}
+
+sub ensure_room_monsters {
+    my ($room) = @_;
+    return unless $room && $room->{roomnum};
+    my $roomnum = $room->{roomnum};
+    my $file = room_monster_file($roomnum);
+    return if -e $file;
+}
+
+sub remove_permanent_monster {
+    my ($room, $mon) = @_;
+    my $roomnum = $room->{roomnum};
+    return unless $roomnum;
+    my $perm_file = "$config{transient}/permmon_$roomnum.dat";
+    my @monsters;
+    if (-e $perm_file) {
+        open(my $fh, "+<", $perm_file) or return;
+        flock($fh, LOCK_EX);
+
+        my $retrieved = eval { lock_retrieve($perm_file) };
+        @monsters = @{ $retrieved } if $retrieved && ref($retrieved) eq 'ARRAY';
+        @monsters = grep {
+            !($mon->{id} && $_->{id} && $_->{id} eq $mon->{id}) &&
+            !($_->{name} eq $mon->{name} && !$mon->{id})
+        } @monsters;
+        eval { lock_store(\@monsters, $perm_file); };
+
+        flock($fh, LOCK_UN);
+        close($fh);
+    }
+}
+
+sub generate_monster_id {
+    return time . $$ . int(rand(1000000));
+}
+
+sub bribe_monster {
+    my ($player, $mon, $amount) = @_;
+    return 0 unless $mon && $amount > 0;
+    if ($player->{gold} < $amount) {
+        writeline($config{'errorcolor'}."You don't have enough gold.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    my $roll = int(rand(20)) + 1 + int(($player->{stats}{cha} // 10) - 10);
+    my $difficulty = 10 + ($mon->{level} // 1);
+    if ($roll + $amount/10 > $difficulty) {
+        $player->{gold} -= $amount;
+        $mon->{bribed_by}{$player->{name}} = 1;
+        writeline($config{'systemcolor'}."You bribe $mon->{name}. It leaves you alone.".$config{'themecolor'}, 1);
+        # Remove monster from room, or set non-hostile
+        $mon->{hostile} = 0;
+        save_player($player);
+        return 1;
+    } else {
+        writeline($config{'errorcolor'}."Bribe failed! $mon->{name} is enraged!".$config{'themecolor'}, 1);
+        $mon->{hostile} = 1;
+        save_player($player);
+        return 0;
+    }
+}
+
+sub save_monster_by_id {
+    my ($id, $mon) = @_;
+    
+    return unless $id && $mon && ref($mon) eq 'HASH';
+    
+    # Ensure the monster persists combat cooldown and other critical fields
+    my $file = File::Spec->catfile($config{transient}, "monster_data_$id.stor");
+    
+    # First try to load existing data to merge
+    my $existing = {};
+    if (-e $file) {
+        eval {
+            $existing = retrieve($file);
+        };
+        if ($@) {
+            debug_log("[ERROR] Failed to load monster data for ID $id: $@");
+            $existing = {};
+        }
+    }
+    
+    # Merge existing and new data, prioritizing new data
+    my %merged = (%$existing, %$mon);
+    
+    # Ensure critical fields are preserved
+    $merged{id} = $id;
+    $merged{is_monster} = 1;
+    
+    eval {
+        store(\%merged, $file);
+        debug_log("[DEBUG] Saved monster data for $merged{name} (id $id)");
+    };
+    if ($@) {
+        debug_log("[ERROR] Failed to save monster data for ID $id: $@");
+    }
+    
+    return \%merged;
+}
+
+sub monster_combat_lock_path {
+    my ($monster_id, $player_name) = @_;
+    my $hash = safe_name($player_name);
+    return File::Spec->catfile($config{transient}, "monster_player_combat_lock_${monster_id}_${hash}.lock");
+}
+
+sub check_monster_combat_lock {
+    my ($monster_id, $player_name) = @_;
+    my $lock_file = monster_combat_lock_path($monster_id, $player_name);
+    
+    # Check if lock exists and is recent (less than 60 seconds old)
+    if (-e $lock_file) {
+        my $age = time() - (stat($lock_file))[9];
+        if ($age < 60) {
+            return 1; # Lock exists and is recent
+        } else {
+            unlink $lock_file; # Old lock, remove it
+        }
+    }
+    return 0;
+}
+
+sub set_monster_combat_lock {
+    my ($monster_id, $player_name, $duration) = @_;
+    $duration //= 60;
+    my $lock_file = monster_combat_lock_path($monster_id, $player_name);
+    
+    # Create lock file with timeout
+    open(my $fh, ">", $lock_file) or return 0;
+    print $fh time() + $duration;
+    close($fh);
+    return 1;
+}
+
+sub remove_monster_combat_lock {
+    my ($monster_id, $player_name) = @_;
+    my $lock_file = monster_combat_lock_path($monster_id, $player_name);
+    if (-e $lock_file) {
+        return unlink $lock_file;
+    }
+    return 1; # Success if file didn't exist
+}
+
+sub attempt_tame_monster {
+    my ($player, $monster_name) = @_;
+    
+    # Find monster in current room
+    my $room = read_room_record($player->{room});
+    my $monster = find_monster_in_room($player->{room}, $monster_name);
+    
+    unless ($monster) {
+        writeline($config{'errorcolor'}."There is no $monster_name here to tame.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Check if monster is tameable
+    my $monster_type = get_monster_base_type($monster->{name});
+    unless (exists $MOUNT_CAPABILITIES{$monster_type}) {
+        writeline($config{'errorcolor'}."You cannot tame a $monster->{name}.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Check if player already has a mount
+    if ($player->{mount}) {
+        writeline($config{'errorcolor'}."You already have a mount.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Taming difficulty based on monster level and type
+    my $base_difficulty = 15;
+    my $monster_level = $monster->{level} || 1;
+    my $difficulty = $base_difficulty + $monster_level;
+    
+    # Player modifiers
+    my $cha_mod = int(($player->{stats}{cha} || 10) - 10) / 2;
+    my $animal_handling = $player->{skills}{animal_handling} || 0;
+    my $class_bonus = 0;
+    
+    # Class bonuses for taming
+    if ($player->{class} =~ /Ranger|Druid/i) {
+        $class_bonus = 4;
+    } elsif ($player->{class} =~ /Paladin/i) {
+        $class_bonus = 2;
+    }
+    
+    # Roll for taming
+    my $roll = int(rand(20)) + 1 + $cha_mod + $animal_handling + $class_bonus;
+    
+    if ($roll >= $difficulty) {
+        # Successful taming
+        my $mount_data = {
+            name => $monster->{name},
+            type => $monster_type,
+            level => $monster_level,
+            hp => $monster->{hp},
+            max_hp => $monster->{hits},
+            loyalty => 50 + ($roll - $difficulty) * 5, # Higher roll = more loyal
+            capabilities => $MOUNT_CAPABILITIES{$monster_type},
+            tamed_by => $player->{name},
+            tamed_time => time(),
+        };
+        
+        $player->{mount} = $mount_data;
+        
+        writeline($config{'systemcolor'}."You successfully tame the $monster->{name}!".$config{'themecolor'}, 1);
+        broadcast_room_message($player->{room}, $player->{name},
+            $config{'usercolor'}."$player->{name} tames the $monster->{name}!".$config{'themecolor'});
+        
+        # Remove monster from room
+        remove_monster_from_room($monster, $room);
+        save_player($player);
+        return 1;
+        
+    } else {
+        # Failed taming - monster might attack or flee
+        my $reaction_roll = int(rand(100));
+        
+        if ($reaction_roll < 30) {
+            writeline($config{'errorcolor'}."The $monster->{name} attacks you in anger!".$config{'themecolor'}, 1);
+            # Trigger combat
+            if (defined &start_monster_combat) {
+                start_monster_combat($player, $monster);
+            }
+        } elsif ($reaction_roll < 60) {
+            writeline($config{'systemcolor'}."The $monster->{name} flees from your taming attempt.".$config{'themecolor'}, 1);
+            # Remove monster temporarily
+            remove_monster_from_room($monster, $room);
+        } else {
+            writeline($config{'systemcolor'}."The $monster->{name} ignores your taming attempt.".$config{'themecolor'}, 1);
+        }
+        return 0;
+    }
+}
+
+sub mount_tamed_creature {
+    my ($player) = @_;
+    
+    unless ($player->{mount}) {
+        writeline($config{'errorcolor'}."You don't have a tamed mount.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    if ($player->{mounted}) {
+        writeline($config{'errorcolor'}."You are already mounted.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    my $mount = $player->{mount};
+    
+    # Check mount loyalty and health
+    if ($mount->{loyalty} < 25) {
+        writeline($config{'errorcolor'}."Your $mount->{name} is not loyal enough to be ridden.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    if ($mount->{hp} < $mount->{max_hp} * 0.25) {
+        writeline($config{'errorcolor'}."Your $mount->{name} is too injured to be ridden.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    # Mount successfully
+    $player->{mounted} = {
+        name => $mount->{name},
+        type => $mount->{type},
+        capabilities => $mount->{capabilities},
+        loyalty => $mount->{loyalty},
+    };
+    
+    # Apply mount bonuses
+    my $caps = $mount->{capabilities};
+    $player->{movement_bonus} = $caps->{speed} || 1;
+    $player->{mounted_combat_bonus} = $caps->{combat_bonus} || 0;
+    
+    writeline($config{'systemcolor'}."You mount your $mount->{name}.".$config{'themecolor'}, 1);
+    broadcast_room_message($player->{room}, $player->{name},
+        $config{'usercolor'}."$player->{name} mounts their $mount->{name}.".$config{'themecolor'});
+    
+    save_player($player);
+    return 1;
+}
+
+sub dismount_creature {
+    my ($player) = @_;
+    
+    unless ($player->{mounted}) {
+        writeline($config{'errorcolor'}."You are not mounted.".$config{'themecolor'}, 1);
+        return 0;
+    }
+    
+    my $mount_name = $player->{mounted}{name};
+    
+    # Remove mount bonuses
+    delete $player->{mounted};
+    delete $player->{movement_bonus};
+    delete $player->{mounted_combat_bonus};
+    
+    writeline($config{'systemcolor'}."You dismount from your $mount_name.".$config{'themecolor'}, 1);
+    broadcast_room_message($player->{room}, $player->{name},
+        $config{'usercolor'}."$player->{name} dismounts from their $mount_name.".$config{'themecolor'});
+    
+    save_player($player);
+    return 1;
+}
+
+sub get_monster_base_type {
+    my ($monster_name) = @_;
+    my $name = lc($monster_name);
+    
+    # Map monster names to mount types
+    return 'horse' if $name =~ /horse|steed|stallion|mare/;
+    return 'dragon' if $name =~ /dragon/;
+    return 'griffon' if $name =~ /griffon|gryphon/;
+    return 'pegasus' if $name =~ /pegasus/;
+    return 'giant_spider' if $name =~ /giant.?spider|spider/;
+    return 'giant_lizard' if $name =~ /giant.?lizard|lizard/;
+    return 'centaur' if $name =~ /centaur/;
+    
+    return undef; # Not tameable
+}
+
+sub can_traverse_terrain {
+    my ($player, $from_room, $to_room, $direction) = @_;
+    
+    # If not mounted, use normal movement rules
+    return 1 unless $player->{mounted};
+    
+    my $mount_caps = $player->{mounted}{capabilities};
+    my $mount_specials = $mount_caps->{special} || [];
+    
+    # Check terrain compatibility
+    my $to_terrain = $to_room->{region} || $to_room->{feature} || '';
+    
+    # Flying mounts can go almost anywhere
+    if ($player->{mounted}{type} eq 'flying') {
+        # Can't fly in underground areas without high ceilings
+        return 0 if $to_terrain =~ /Cave|Dungeon/i && $to_room->{feature} !~ /Vault|Cathedral/i;
+        return 1;
+    }
+    
+    # Water walking for amphibious mounts
+    if (grep { $_ eq 'water_walk' } @$mount_specials) {
+        return 1 if $to_terrain =~ /Lake|River|Swamp/i;
+    }
+    
+    # Wall climbing for spiders
+    if (grep { $_ eq 'wall_climb' } @$mount_specials) {
+        return 1 if $to_terrain =~ /Mountain|Cliff/i;
+    }
+    
+    # Mountain passes for dragons
+    if (grep { $_ eq 'mountain_pass' } @$mount_specials) {
+        return 1 if $to_terrain =~ /Mountain/i;
+    }
+    
+    return 1; # Default: normal movement rules apply
+}
+
+return 1;

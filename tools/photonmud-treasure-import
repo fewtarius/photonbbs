@@ -1,0 +1,106 @@
+#!/usr/bin/perl
+# filepath: /Users/andrew/repositories/fewtarius/photonbbs/tools/photonmud-treasure-import
+use strict;
+use warnings;
+use Encode qw(encode);
+
+# CSV FORMAT:
+# name|shortname|weight|gold|spell|plus|coin|keyed|scroll|charges|potion|armor|shield|weapon|container|type|locked|closed|loadable|ammunition|ammoloads|invisible|permanent|proficiency|ringtype|ringspell|edible|rustable|rustpercent|stealable|stealpercent|launchable|launchloads|launchammo|movable|vehicle|vehiclehits|vehicletype|lighttype|lightcharges|fueltype|fuelcharges
+# Each record is exactly 140 bytes.
+
+my $csvfile = shift || 'treasures.csv';
+my $outfile = shift || 'treasure.dat';
+
+open(my $infh, "<:encoding(utf8)", $csvfile) or die "Cannot open $csvfile: $!";
+open(my $outfh, ">:raw", $outfile) or die "Cannot open $outfile: $!";
+
+my $header = <$infh>;
+chomp $header;
+
+while (my $line = <$infh>) {
+    chomp $line;
+    next if $line =~ /^\s*$/ || $line =~ /^\/\//;
+    my @row = parse_csv_line($line);
+
+    $row[$_] //= 0 for (0..39);
+
+    my $name        = pack_str($row[0], 30);
+    my $shortname   = pack_str($row[1], 30);
+    my $weight      = pack("s", $row[2]);
+    my $gold        = pack("s", $row[3]);
+    my $spell       = pack("s", $row[4]);
+    my $plus        = pack("s", $row[5]);
+    my $coin        = pack("s", $row[6]);
+    my $keyed       = pack("s", $row[7]);
+    my $scroll      = pack("s", $row[8]);
+    my $charges     = pack("s", $row[9]);
+    my $potion      = pack("s", $row[10]);
+    my $armor       = pack("s", $row[11]);
+    my $shield      = pack("s", $row[12]);
+    my $weapon      = pack("s", $row[13]);
+    my $container   = pack("s", $row[14]);
+    my $type        = pack("s", $row[15]);
+    my $locked      = pack("s", $row[16]);
+    my $closed      = pack("s", $row[17]);
+    my $loadable    = pack("s", $row[18]);
+    my $ammunition  = pack("s", $row[19]);
+    my $ammoloads   = pack("s", $row[20]);
+    my $invisible   = pack("s", $row[21]);
+    my $permanent   = pack("s", $row[22]);
+    my $proficiency = pack("s", $row[23]);
+    my $ringtype    = pack("s", $row[24]);
+    my $ringspell   = pack("s", $row[25]);
+    my $edible      = pack("s", $row[26]);
+    my $rustable    = pack("s", $row[27]);
+    my $rustpercent = pack("s", $row[28]);
+    my $stealable   = pack("s", $row[29]);
+    my $stealpercent= pack("s", $row[30]);
+    my $launchable  = pack("s", $row[31]);
+    my $launchloads = pack("s", $row[32]);
+    my $launchammo  = pack("s", $row[33]);
+    my $movable     = pack("s", $row[34]);
+    my $vehicle     = pack("s", $row[35]);
+    my $vehiclehits = pack("s", $row[36]);
+    my $vehicletype = pack("s", $row[37]);
+    my $lighttype   = pack("s", $row[38]);
+    my $lightcharges= pack("s", $row[39]);
+    my $fueltype    = pack("s", $row[40]);
+    my $fuelcharges = pack("s", $row[41]);
+
+    my $record = $name . $shortname . $weight . $gold . $spell . $plus . $coin . $keyed . $scroll . $charges . $potion . $armor . $shield . $weapon . $container . $type . $locked . $closed . $loadable . $ammunition . $ammoloads . $invisible . $permanent . $proficiency . $ringtype . $ringspell . $edible . $rustable . $rustpercent . $stealable . $stealpercent . $launchable . $launchloads . $launchammo . $movable . $vehicle . $vehiclehits . $vehicletype . $lighttype . $lightcharges . $fueltype . $fuelcharges;
+
+    die "Record is not 140 bytes, got " . length($record) . " for $row[0]" unless length($record) == 140;
+    print $outfh $record;
+}
+close $infh;
+close $outfh;
+print "Import complete: $outfile\n";
+
+sub pack_str {
+    my ($str, $len) = @_;
+    $str //= '';
+    $str = encode('utf8', $str);
+    $str = substr($str, 0, $len);
+    return $str . ("\0" x ($len - length($str)));
+}
+
+sub parse_csv_line {
+    my ($line) = @_;
+    my @fields;
+    my $field = '';
+    my $in_quotes = 0;
+    my @chars = split //, $line;
+    while (@chars) {
+        my $c = shift @chars;
+        if ($c eq '"') {
+            $in_quotes = !$in_quotes;
+        } elsif ($c eq '|' && !$in_quotes) {
+            push @fields, $field;
+            $field = '';
+        } else {
+            $field .= $c;
+        }
+    }
+    push @fields, $field;
+    return @fields;
+}

@@ -1,0 +1,23 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR EMOTE Command - Roleplay Actions @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  /me <action>
+  /emote <action>
+
+@DATACLR What it does:@THEMECLR
+  EMOTE lets you describe your character's actions or emotions to everyone in the room.
+  The message is shown as "<your name> <action>".
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Everyone in the room sees your emote.
+  - Use for roleplay, storytelling, or fun.
+
+@DATACLR Example:@THEMECLR
+  /me dances happily.
+    Alice dances happily.
+
+@DATACLR See also:@THEMECLR
+  SAY, PARTY, TALK

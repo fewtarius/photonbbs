@@ -1,0 +1,276 @@
+# --- Session Messaging & Room Notifications for PhotonMUD ---
+
+use Fcntl qw(:flock);
+our $messaging_debug_enabled = $ENV{PHOTON_MESSAGING_DEBUG} // 0;
+
+sub messaging_debug {
+    my ($msg) = @_;
+    return unless $messaging_debug_enabled;
+    my $ts = scalar localtime;
+    print STDERR "[MESSAGING DEBUG $ts] $msg\n";
+}
+
+sub player_online {
+    my ($playername) = @_;
+    return 0 unless $playername;
+    
+    my $nodes_dir = "$config{'home'}$config{'nodes'}";
+    return 0 unless -d $nodes_dir;
+    
+    # Normalize player name for comparison
+    $playername = lc($playername);
+    
+    # Check node files for the player
+    opendir(my $dh, $nodes_dir) or return 0;
+    while (my $file = readdir($dh)) {
+        next if $file =~ /^\./;  # Skip hidden files
+        next unless -f "$nodes_dir/$file";
+        
+        open(my $fh, "<", "$nodes_dir/$file") or next;
+        my $line = <$fh>;
+        close($fh);
+        
+        next unless $line;
+        chomp($line);
+        
+        my ($ip, $node, $pid, $time, $user, $proto, $location) = split(/\|/, $line);
+        next unless defined $user && $user ne '' && $user ne 'CONNECT';
+        
+        # Case-insensitive comparison
+        if (lc($user) eq $playername) {
+            closedir($dh);
+            
+            # Verify process is actually running (avoid stale node files)
+            if (defined $pid && $pid =~ /^\d+$/) {
+                # On Unix/Linux, check if process exists
+                if ($^O ne 'MSWin32') {
+                    my $exists = kill(0, $pid);
+                    if (!$exists) {
+                        # Process doesn't exist, clean up stale node file
+                        unlink "$nodes_dir/$file";
+                        return 0;
+                    }
+                }
+            }
+            
+            return 1;
+        }
+    }
+    closedir($dh);
+    
+    return 0;
+}
+
+# Directory for per-session message buffers
+sub get_session_msg_dir {
+    my $dir = "$config{transient}/session_msgs";
+    unless (-d $dir) {
+        mkdir $dir, 0777 or die "Cannot create $dir: $!";
+    }
+    return $dir;
+}
+
+# Path to a player's message buffer file
+sub session_msg_file {
+    my ($playername) = @_;
+    my $dir = get_session_msg_dir();
+    my $player_hash = safe_name($playername);
+    return "$dir/$player_hash.msg";
+}
+
+# Write a message to a player's buffer (always colorized)
+sub write_session_message {
+    my ($playername, $msg, $color) = @_;
+    $color //= $config{'usercolor'};
+    $msg = $color . $msg . $config{'themecolor'} unless $msg =~ /\Q$config{'themecolor'}\E$/;
+    my $file = session_msg_file($playername);
+    open(my $fh, ">>", $file) or do {
+        print STDERR "Could not open session message file for $playername ($file)\n";
+        return;
+    };
+    flock($fh, 2);
+    print $fh $msg;
+    flock($fh, 8);
+    close($fh);
+}
+
+# Read and clear all messages for a player
+sub read_session_messages {
+    my ($playername) = @_;
+    my $file = session_msg_file($playername);
+    return () unless -e $file;
+    open(my $fh, "+<", $file) or return ();
+    flock($fh, LOCK_EX);
+    my @lines = <$fh>;
+    seek($fh, 0, 0);
+    truncate($fh, 0);
+    flock($fh, LOCK_UN);
+    close($fh);
+    chomp @lines;
+    return @lines;
+}
+
+# Send a message to all players in a room
+sub broadcast_room_message {
+    my ($roomid, $exclude_name, $message) = @_;
+    return unless $roomid && $message;
+    
+    my @players = players_in_room($roomid);
+    foreach my $player (@players) {
+        next if defined $exclude_name && lc($player->{name}) eq lc($exclude_name);
+        send_session_message($player->{name}, $message);
+    }
+}
+
+# Send a message to a specific player in a room
+sub send_room_message {
+    my ($roomid, $target_name, $message) = @_;
+    return unless $roomid && $target_name && $message;
+    
+    my $file = room_players_file($roomid);
+    my %players;
+    
+    # Check if target is in the room
+    lock_room_players($roomid);
+    if (-e $file) {
+        open(my $fh, "<", $file);
+        while (<$fh>) {
+            chomp;
+            my ($name, $node) = split(/\|/, $_, 2);
+            $players{$name} = $node;
+        }
+        close($fh);
+    }
+    unlock_room_players($roomid);
+    
+    if (exists $players{$target_name}) {
+        send_session_message($target_name, $message);
+        return 1;
+    }
+    
+    return 0;
+}
+
+sub send_session_message {
+    my ($playername, $message, $color) = @_;
+    return unless $playername && $message;
+    
+    # Skip if player doesn't exist or isn't online
+    return unless player_online($playername);
+    
+    messaging_debug("send_session_message: sending to $playername: $message");
+    write_session_message($playername, $message, $color);
+    return 1;
+}
+
+# Broadcast a message to all players in a room (including sender, always colorized)
+sub broadcast_room_message_all {
+    my ($roomid, $msg, $color) = @_;
+    $color //= $config{'usercolor'};
+    $msg = $color . $msg . $config{'themecolor'} unless $msg =~ /\Q$config{'themecolor'}\E$/;
+    my @players = list_players_in_room($roomid);
+    for my $p (@players) {
+        my $name = ref($p) eq 'HASH' ? $p->{name} : $p;
+        next unless $name;
+        write_session_message($name, $msg, $color);
+    }
+}
+
+# On quitting/disconnect
+sub photonmud_quit {
+    my ($player) = @_;
+    remove_player_from_all_rooms($player);
+    remove_node_session($player);
+    # Optionally, clear their message buffer
+    my $file = session_msg_file($player->{name});
+    unlink $file if -e $file;
+}
+
+# --- Room "say" command (dot prefix) ---
+
+sub handle_say_command {
+    my ($player, $room, $line) = @_;
+    $line =~ s/^\.\s*//;
+    return unless $line ne '';
+    my $msg = "$player->{name} says: $line";
+    broadcast_room_message($player->{room}, $player->{name}, $msg, $config{'usercolor'});
+    writeline($config{'usercolor'}."You say: $config{'themecolor'}$line", 1);
+}
+
+sub list_online_players {
+    my @users;
+    my $nodes_dir = "$config{'home'}$config{'nodes'}";
+    unless (-d $nodes_dir) {
+        mkdir $nodes_dir, 0777 or do {
+            writeline($config{'errorcolor'}."Cannot create nodes directory: $nodes_dir".$config{'themecolor'}, 1);
+            return;
+        };
+    }
+    opendir(my $dh, $nodes_dir) or do {
+        writeline($config{'errorcolor'}."Cannot open nodes directory: $nodes_dir".$config{'themecolor'}, 1);
+        return;
+    };
+    my @node_files = grep { !/^\./ && -f "$nodes_dir/$_" } readdir($dh);
+    closedir($dh);
+
+    foreach my $node_file (@node_files) {
+        open(my $fh, "<", "$nodes_dir/$node_file") or next;
+        my $line = <$fh>;
+        close($fh);
+        chomp($line);
+        my ($ip, $node, $pid, $time, $user, $proto, $location) = split(/\|/, $line);
+        next unless $user && $user ne "CONNECT";
+        my $locdesc = "";
+        if (defined $location && $location =~ /^\d+$/) {
+            my $room = eval { read_room_record($location) };
+            $locdesc = ($room && $room->{shortdesc}) ? $room->{shortdesc} : $location;
+        } else {
+            $locdesc = $location // '';
+        }
+        push @users, {
+            node     => $node,
+            user     => $user,
+            location => $locdesc,
+        };
+    }
+
+    @users = sort { $a->{node} <=> $b->{node} } @users;
+
+    # Use sprintf for perfect alignment
+    my $header_fmt = "%-6s %-14s %-s";
+    my $line_fmt   = "%-6s %-14s %-s";
+    writeline($config{'systemcolor'} . sprintf($header_fmt, "Node", "User", "Location") . $config{'themecolor'}, 1);
+    foreach my $u (@users) {
+        writeline(sprintf($line_fmt, $u->{node} // '', $u->{user} // '', $u->{location} // ''), 1);
+    }
+    writeline($config{'systemcolor'}."Total online: ".scalar(@users).$config{'themecolor'}, 1);
+}
+
+sub record_node_session {
+    my ($player) = @_;
+    my $nodes_dir = "$config{'home'}$config{'nodes'}";
+    mkdir $nodes_dir, 0777 unless -d $nodes_dir;
+    my $node_file = "$nodes_dir/$player->{nodeid}";
+    open(my $fh, ">", $node_file) or return;
+    flock($fh, LOCK_EX);
+    print $fh join('|',
+        $player->{ip}      // '',
+        $player->{nodeid}  // '',
+        $$,                # pid
+        time,
+        $player->{name}    // '',
+        $player->{proto}   // 'MUD',
+        $player->{room}    // ''
+    ), "\n";
+    flock($fh, LOCK_UN);
+    close($fh);
+}
+
+sub remove_node_session {
+    my ($player) = @_;
+    my $nodes_dir = "$config{'home'}$config{'nodes'}";
+    my $node_file = "$nodes_dir/$player->{nodeid}";
+    unlink $node_file if -e $node_file;
+}
+
+return 1;

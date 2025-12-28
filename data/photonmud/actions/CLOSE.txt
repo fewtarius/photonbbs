@@ -1,0 +1,37 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR CLOSE Command - Shut Containers or Exits @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  CLOSE <container>
+  CLOSE <exit>
+
+@DATACLR What it does:@THEMECLR
+  CLOSE shuts a container (chest, bag, etc.) or an exit (door, gate).
+  Closed containers cannot be accessed until opened again.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Some containers or exits can be locked after closing.
+  - Closing may prevent others from seeing or taking contents.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - The container or exit is now closed.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes can use CLOSE.
+
+@DATACLR Tips:@THEMECLR
+  - Close containers to protect valuables.
+  - Close doors to block monsters or players.
+
+@DATACLR Example:@THEMECLR
+  CLOSE CHEST
+    The chest is now closed.
+
+@DATACLR See also:@THEMECLR
+  OPEN, LOCK, UNLOCK, GET, PUT
+-------------------------------------------------------------------------------

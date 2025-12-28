@@ -1,0 +1,38 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR DROP Command - Leave Items in the Room @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  DROP <item>
+  DROP <item> FROM <container>
+
+@DATACLR What it does:@THEMECLR
+  DROP removes an item from your inventory (or a container you carry)
+  and places it in the current room. Other players may pick it up.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - You must specify the exact name of the item.
+  - DROP <item> FROM <container> removes from a specific container.
+  - Dropped items remain in the room until taken or destroyed.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - The item is no longer in your inventory.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes can DROP items.
+
+@DATACLR Tips:@THEMECLR
+  - Drop unwanted items to make room for new ones.
+  - Be careful not to drop valuable gear by mistake.
+
+@DATACLR Example:@THEMECLR
+  DROP POTION
+    Potion is now in the room.
+
+@DATACLR See also:@THEMECLR
+  GET, PUT, INVENTORY, LOOKIN
+-------------------------------------------------------------------------------

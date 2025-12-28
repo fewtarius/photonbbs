@@ -1,0 +1,38 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR TIME/CLOCK/DATE Command - Check the Current Server Time @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  TIME
+  CLOCK
+  DATE
+
+@DATACLR What it does:@THEMECLR
+  TIME, CLOCK, or DATE shows the current real-world server time and date.
+  This helps you keep track of when events happen or how long you've played.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Shows the server's local time and date.
+  - Does not affect gameplay or in-game time.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You see the current time and date.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use TIME the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Useful for timing events or knowing when to log off.
+  - Some events may be scheduled at specific times.
+
+@DATACLR Example:@THEMECLR
+  TIME
+    Current server time: Thu May 15 21:30:00 2025
+
+@DATACLR See also:@THEMECLR
+  NEWS, HINT, HELP
+-------------------------------------------------------------------------------

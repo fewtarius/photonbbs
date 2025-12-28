@@ -1,0 +1,4029 @@
+#!/usr/bin/perl
+
+# PhotonMUD Monster AI Daemon
+
+# -----------------------------------------------------------------------------
+# PhotonMUD Monster AI System Overview
+#
+# This daemon manages all monster placement, spawning, and AI behavior in PhotonMUD.
+#
+# MONSTER CLASSES:
+# - Boss Monsters: Defined by @BOSS_MONSTERS (e.g., 'dragon king', 'lich king', etc.).
+#   These are high-level, unique monsters placed in special rooms (vaults, towers, keeps, throne rooms).
+#   Only one boss is placed per boss room, and each boss is restricted to its assigned region for movement.
+#
+# - Regular Monsters: All other monsters from monsters.csv.
+#   These are assigned to rooms based on their type, region, or class, using %ROOM_TYPE_TO_MONSTER mapping.
+#
+# PLACEMENT LOGIC:
+# - Boss monsters are randomly selected and placed first in appropriate special rooms.
+#   Bosses are never duplicated and never share a room.
+# - Regular monsters are distributed across the map, with placement restricted by room type and monster type.
+#   No more than $MAX_MONSTERS_PER_ROOM (default 3) are placed in any room, and only one boss per room.
+#   Monster class/type quotas are balanced to match available rooms.
+# - If all suitable rooms are full, fallback logic places monsters in any available room.
+#
+# MOVEMENT CONFINEMENT:
+# - Boss monsters are confined to rooms of the same feature as their starting room (e.g., a boss in a 'Tower'
+#   only moves within 'Tower' rooms).
+# - Regular monsters are generally restricted to rooms matching their assigned type or region (e.g., cave
+#   monsters stay in caves, town monsters in town areas).
+#
+# AI BEHAVIOR:
+# - Each monster decides its action based on stats, HP, and random chance.
+#   Possible actions include: run, steal, block, follow, jail, teleport, rust, drain, psionic, cast, talk, attack, or wait.
+#
+# BALANCE:
+# - Monster population is scaled to map size ($MONSTER_PER_ROOM).
+# - Bosses are rare and powerful, regular monsters are thematically appropriate for their environment.
+# - The system prevents overcrowding and ensures a challenging but fair distribution of monsters.
+#
+# See the rest of this script for implementation details.
+# -----------------------------------------------------------------------------
+
+use strict;
+use warnings;
+use threads;
+use threads::shared;
+use File::Spec;
+use Time::HiRes qw(sleep);
+use List::Util qw(shuffle);
+use Getopt::Long;
+use Fcntl qw(SEEK_SET);
+use Storable qw(store retrieve dclone);
+use POSIX ":sys_wait_h";
+use Digest::SHA qw(sha1_hex);
+use JSON::PP;
+use feature qw(state);
+use Fcntl qw(:flock O_WRONLY O_CREAT);
+
+$| = 1;
+select STDERR; $| = 1; select STDOUT;
+
+# --- Loader Logic (matches bin/photonmud) ---
+our %config;
+our @MONSTER_IGNORE_MESSAGES;
+
+sub require_module {
+    my ($mod) = @_;
+    my $sys_path = "/opt/photonbbs/modules/$mod";
+    my $local_path = "./modules/$mod";
+    if (-e $sys_path) {
+        require $sys_path;
+    } elsif (-e $local_path) {
+        require $local_path;
+    } else {
+        die "Cannot find required module $mod in /opt/photonbbs/modules or ./modules";
+    }
+}
+
+require_module("pm-defaults");
+
+# Use transient directory for temp files
+$config{transient} = "/dev/shm/photonmud";
+unless (-d $config{transient}) {
+    mkdir $config{transient}, 0777;
+    chmod 0777, $config{transient};
+}
+unless (-d "$config{transient}/room_players") {
+    mkdir "$config{transient}/room_players", 0777;
+    chmod 0777, "$config{transient}/room_players";
+}
+# Ensure proper permissions even if directories already existed
+chmod 0777, $config{transient};
+chmod 0777, "$config{transient}/room_players";
+
+require_module("pb-framework");
+require_module("pb-usertools");
+require_module("pm-cache");      # Data caching - must load before data modules
+require_module("pm-monsters");
+require_module("pm-combat");
+require_module("pm-spells");
+require_module("pm-containers");
+require_module("pm-market");
+require_module("pm-npcs");
+require_module("pm-rooms");
+require_module("pm-player");
+require_module("pm-objects");
+require_module("pm-utils");
+require_module("pm-messaging");
+require_module("pm-broker-client");  # Message broker client
+
+my $MONSTER_PER_ROOM = 0.04; # 1 monster per 12 rooms
+our $MAX_MONSTERS_PER_ROOM = 3; # Maximum monsters allowed in a single room
+my $MAX_MONSTER_THREADS = 200;
+my %active_monster_threads :shared;
+
+# Broker socket - NOT shared since each worker process needs its own connection
+our $broker_sock = undef;
+our %pending_combat_responses :shared;  # Track pending combat responses from broker
+
+my $idle_cooldown = 6;  # seconds between idle actions
+my $lurk_cooldown = 10; # seconds between lurk actions
+$config{monster_engage_range_base} = 3;
+$config{monster_engage_range_scale} = 0.3;
+
+my $DEBUG_MONSTERAI = 0;
+
+my $all_idle :shared = 1;
+my %monster_last_taunt;
+my %boss_heartbeat_last;
+my %boss_heartbeat_seen;
+my %monster_last_taunt_player;
+my @dirs = qw(N S E W NE NW SE SW UP DOWN IN OUT);
+my %combat_threads;
+use constant MONSTER_ARRIVAL_GRACE => 0.5;
+
+my $enable_stats = 0;
+GetOptions("stats" => \$enable_stats);
+
+# --- Boss and Room Type Mapping (Balanced) ---
+my @BOSS_MONSTERS = (
+    'tarrasque', 'demon prince', 'dragon king', 'lich king', 'vampire lord', 'demon lord', 'balor',
+    'pit fiend', 'marilith', 'gold dragon', 'black dragon', 'red dragon', 'blue dragon', 'green dragon',
+    'platinum dragon', 'slaad lord', 'death slaad', 'beholder', 'mind flayer', 'major titan',
+    'stone golem', 'iron golem'
+);
+
+my %ROOM_TYPE_TO_MONSTER = (
+    # Boss rooms
+    'DungeonVault'   => 'boss',
+    'Keep'           => 'boss',
+    'ThroneRoom'     => 'boss',
+    'Tower'          => 'dragon',
+
+    # Dungeon/cave
+    'DungeonCorridor'=> 'dungeon',
+    'DungeonRoom'    => 'dungeon',
+    'CaveTunnel'     => 'cave',
+    'CaveLake'       => 'cave',
+
+    # Castle/fortified
+    'Castle'         => 'castle',
+    'Fortress'       => 'castle',
+    'Barracks'       => 'castle',
+    'Armory'         => 'castle',
+
+    # Town/urban
+    'Plaza'          => 'town',
+    'Shop'           => 'town',
+    'Temple'         => 'town',
+    'Tavern'         => 'town',
+    'Inn'            => 'town',
+    'House'          => 'town',
+    'Market'         => 'town',
+    'Guild'          => 'town',
+
+    # Forest/nature
+    'Forest'         => 'forest',
+    'Grove'          => 'forest',
+    'Treehouse'      => 'forest',
+
+    # Swamp/wetlands
+    'Swamp'          => 'swamp',
+    'Marsh'          => 'swamp',
+    'Bog'            => 'swamp',
+
+    # Water
+    'Lake'           => 'lake',
+    'River'          => 'lake',
+    'Waterfall'      => 'lake',
+
+    # Mountain/hills
+    'Mountain'       => 'outdoor',
+    'Hill'           => 'outdoor',
+    'Cliff'          => 'outdoor',
+
+    # Open/outdoor
+    'Grass'          => 'outdoor',
+    'Field'          => 'outdoor',
+    'Road'           => 'outdoor',
+    'Valley'         => 'outdoor',
+    'Plain'          => 'outdoor',
+
+    # Fallback
+    ''               => 'outdoor',
+);
+
+# --- Utility: Get all rooms ---
+sub get_all_rooms {
+    my ($all) = @_;
+    my @rooms;
+    my $max_room = get_max_room();
+    my $max_x = $config{width}  // 100;
+    my $max_y = $config{height} // 100;
+    for my $roomid (1..$max_room) {
+        my $room = read_room_with_num($roomid);
+        ensure_room_exits($room);
+        $room->{roomnum} = $roomid if $room && ref($room) eq 'HASH';
+        if ($all || is_valid_monster_room($room, $max_x, $max_y)) {
+            push @rooms, $room;
+        }
+    }
+    @rooms = shuffle(@rooms);
+    return \@rooms;
+}
+
+sub cleanup_monster_messages {
+    my ($mon, $room) = @_;
+    return unless $mon && $room && $room->{roomnum};
+    my $msgfile = "$config{transient}/room_msgs/$room->{roomnum}.$mon->{name}.msg";
+    unlink $msgfile if -e $msgfile;
+}
+
+sub get_valid_monster_rooms {
+    my $all_rooms = get_all_rooms(1); # get all, unfiltered
+    my $max_x = $config{width}  // 100;
+    my $max_y = $config{height} // 100;
+    return [ grep { is_valid_monster_room($_, $max_x, $max_y) } @$all_rooms ];
+}
+
+sub is_valid_monster_room {
+    my ($room, $max_x, $max_y) = @_;
+
+    return 0 unless $room && ref($room) eq 'HASH';
+    ensure_room_exits($room);
+
+    # Must have at least one usable exit
+    my $has_exits = 0;
+    if ($room->{exits} && ref($room->{exits}) eq 'HASH') {
+        $has_exits = scalar grep { defined($room->{exits}{$_}) && $room->{exits}{$_} > 0 } keys %{ $room->{exits} };
+    }
+    return 0 unless $has_exits;
+
+    # Must have a name or description
+    my $rname = (defined $room->{name} && length $room->{name}) ? $room->{name}
+              : (defined $room->{shortdesc} && length $room->{shortdesc}) ? $room->{shortdesc}
+              : (defined $room->{longdesc} && length $room->{longdesc}) ? $room->{longdesc}
+              : "";
+    return 0 unless $rname;
+
+    # Must be within map bounds if x/y defined
+    if (defined $room->{x} && defined $room->{y}) {
+        return 0 unless ($room->{x} >= 0 && $room->{x} < $max_x && $room->{y} >= 0 && $room->{y} < $max_y);
+    }
+
+    # Optional: Exclude rooms flagged impassable (if you have such a flag)
+    if ($room->{impassable} && $room->{impassable}) {
+        return 0;
+    }
+
+    # Otherwise, allow monsters everywhere!
+    return 1;
+}
+
+sub cleanup_monster_state_files {
+    my $data_dir = $config{transient};
+    opendir(my $dh, $data_dir);
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^monster_(lastroom|currentroom|status)_.*/;
+        unlink "$data_dir/$file";
+    }
+    closedir($dh);
+    print "[monsterai] Removed all monster lastroom/currentroom/status files.\n";
+}
+
+sub explain_invalid_monster_room {
+    my ($room, $max_x, $max_y) = @_;
+    return "room is undef" unless $room && ref($room) eq 'HASH';
+
+    # Robust exit check: use $room->{exits} if present, else parse from $room->{direct}
+    my $has_exits = 0;
+    if ($room->{exits} && ref($room->{exits}) eq 'HASH') {
+        $has_exits = scalar(grep { $room->{exits}{$_} && $room->{exits}{$_} > 0 } @dirs);
+    } elsif ($room->{direct} && length($room->{direct}) >= 48) {
+        for my $i (0..11) {
+            my $val = unpack("f<", substr($room->{direct}, $i*4, 4));
+            my $ival = int($val + 0.0001);
+            if ($ival > 0) { $has_exits++; last; }
+        }
+    }
+    return "no usable exits" unless $has_exits;
+
+    my $rname = (defined $room->{name} && length $room->{name}) ? $room->{name}
+              : (defined $room->{shortdesc} && length $room->{shortdesc}) ? $room->{shortdesc}
+              : (defined $room->{longdesc} && length $room->{longdesc}) ? $room->{longdesc}
+              : "";
+    return "no name/desc" unless $rname;
+    return "missing feature" unless defined $room->{feature} && $room->{feature} ne '';
+    return "missing region" unless defined $room->{region} && $room->{region} ne '';
+    if (defined $room->{x} && defined $room->{y}) {
+        return "out of bounds ($room->{x},$room->{y})" unless ($room->{x} >= 0 && $room->{x} < $max_x && $room->{y} >= 0 && $room->{y} < $max_y);
+    }
+    my $type = normalize_monster_region($room->{feature} // $room->{region} // '');
+    return "region is $type" if $type eq 'mountain' || $type eq 'lake' || $type eq 'moat';
+    return "unknown reason (normalized_type=$type)";
+}
+
+sub get_online_players {
+    my %players;
+    my $nodes_dir = $config{'home'} . $config{'nodes'};
+    return () unless -d $nodes_dir; # Directory must exist
+    opendir(my $dh, $nodes_dir) or return ();
+    my @node_files = grep { !/^\./ && -f "$nodes_dir/$_" } readdir($dh);
+    closedir($dh);
+    return () unless @node_files; # No node files means no players
+    foreach my $file (@node_files) {
+        my $full = "$nodes_dir/$file";
+        open(my $fh, "<", $full) or next;
+        my $line = <$fh>;
+        close($fh);
+        next unless defined $line && $line ne '';
+        chomp($line);
+        my ($ip, $nodeid, $pid, $time, $user, $proto, $location) = split(/\|/, $line);
+        next unless $user && $user ne "CONNECT";
+        next if $pid && $pid =~ /^\d+$/ && !kill 0, $pid;
+        $players{$user} = 1;
+    }
+    return keys %players;
+}
+
+sub normalize_monster_region {
+    my ($region) = @_;
+    $region = ucfirst(lc($region // ''));
+    return $ROOM_TYPE_TO_MONSTER{$region} if exists $ROOM_TYPE_TO_MONSTER{$region};
+    return 'dungeon' if $region =~ /dungeon/i;
+    return 'cave'    if $region =~ /cave/i;
+    return 'castle'  if $region =~ /castle/i;
+    return 'town'    if $region =~ /town|shop|inn|temple|tavern|market|guild/i;
+    return 'forest'  if $region =~ /forest|grove|treehouse/i;
+    return 'swamp'   if $region =~ /swamp|marsh|bog/i;
+    return 'lake'    if $region =~ /lake|river|waterfall/i;
+    return 'boss'    if $region =~ /boss/i;
+    return 'dragon'  if $region =~ /dragon/i;
+    return 'outdoor' if $region =~ /outdoor|hill|mountain|plain|valley|field|grass|cliff/i;
+    return 'outdoor'; # fallback
+}
+
+sub safe_roomnum {
+    my ($room) = @_;
+    return (defined $room && ref($room) eq 'HASH' && $room->{roomnum}) ? $room->{roomnum} : '(unknown)';
+}
+
+sub safe_roomname {
+    my ($room) = @_;
+    return (defined $room && ref($room) eq 'HASH' && (
+        $room->{name} || $room->{shortdesc} || $room->{longdesc}
+    )) ? ($room->{name} || $room->{shortdesc} || $room->{longdesc}) : '(unnamed)';
+}
+
+# --- Helper: Identify boss monsters by name ---
+sub is_boss_monster {
+    my ($mod) = @_;
+    return 0 unless $mod && ref($mod) eq 'HASH' && defined $mod->{name} && $mod->{name} ne '';
+    foreach my $boss (@BOSS_MONSTERS) {
+        next unless defined $boss && $boss ne '';
+        return 1 if lc($mod->{name}) eq lc($boss);
+    }
+    return 0;
+}
+
+# --- Helper: Get all boss monsters ---
+sub get_boss_monsters {
+    my ($monsters) = @_;
+    return [ grep { is_boss_monster($_) } @$monsters ];
+}
+
+# --- Boss Persistence File ---
+sub boss_persistence_file {
+    return "$config{'home'}/$config{'data'}/boss_persistence.dat";
+}
+
+# --- Load boss state from file ---
+sub load_boss_persistence {
+    my $file = boss_persistence_file();
+    return {} unless -e $file;
+    my $data = eval { retrieve($file) };
+    return $@ ? {} : ($data || {});
+}
+
+# --- Save boss state to file ---
+sub save_boss_persistence {
+    my ($state) = @_;
+    my $file = boss_persistence_file();
+    eval { store($state, $file) };
+}
+
+# --- Helper: Load boss landmark mapping for state_of_realm ---
+sub load_boss_landmarks {
+    my $file = "$config{'home'}/$config{'data'}/boss_landmarks.txt";
+    return {} unless -e $file;
+    my %landmark_by_room;
+    open(my $fh, "<:utf8", $file) or return {};
+    while (<$fh>) {
+        chomp;
+        next if /^#/ || !$_;
+        my @f = split /\|/;
+        my ($type, $vault_type, $nearest_type, $nearest_name, $room_idx) = @f;
+        next unless $room_idx && $room_idx =~ /^\d+$/;
+        $landmark_by_room{$room_idx} = {
+            entrance_type => $type,
+            vault_type    => $vault_type,
+            nearest_type  => $nearest_type,
+            nearest_name  => $nearest_name,
+        };
+    }
+    close($fh);
+    return \%landmark_by_room;
+}
+
+# --- Helper: Get roomnum from x,y,z ---
+sub roomnum_by_xyz {
+    my ($x, $y, $z) = @_;
+    my $rooms = get_all_rooms(1);
+    foreach my $room (@$rooms) {
+        if (defined $room->{x} && defined $room->{y} && defined $room->{z}) {
+            if ($room->{x} == $x && $room->{y} == $y && $room->{z} == $z) {
+                debug_log("[DEBUG] Found roomnum $room->{roomnum} for $x,$y,$z");
+                return $room->{roomnum};
+            }
+        }
+    }
+    debug_log("[DEBUG] No roomnum found for $x,$y,$z");
+    return undef;
+}
+
+# --- Helper: Parse boss_landmarks.txt and group entrances by type ---
+sub load_boss_entrances {
+    my $file = "$config{'home'}/$config{'data'}/boss_landmarks.txt";
+    return {} unless -e $file;
+    my %by_type;
+    open(my $fh, "<:utf8", $file) or return {};
+    while (<$fh>) {
+        chomp;
+        next if /^#/ || !$_;
+        my @f = split /\|/;
+        my ($type, $vault_type, $nearest_type, $nearest_name, $room_idx) = @f;
+        next unless $room_idx && $room_idx =~ /^\d+$/;
+        push @{ $by_type{$type} }, {
+            room_idx     => $room_idx,
+            vault_type   => $vault_type,
+            nearest_type => $nearest_type,
+            nearest_name => $nearest_name,
+        };
+    }
+    close($fh);
+    return \%by_type;
+}
+
+# --- Boss Placement ---
+sub place_boss_monsters {
+    my ($rooms, $monsters) = @_;
+    my $bosses = get_boss_monsters($monsters);
+
+    # Load boss landmark entries (one per boss to place)
+    my $entrances = load_boss_entrances(); # { Dungeon => [ {room_idx,...} ], ... }
+
+    # Prepare pools
+    my @dragons = grep { $_->{name} =~ /dragon/i } @$bosses;
+    my @other_bosses = grep { $_->{name} !~ /dragon/i } @$bosses;
+
+    my %used_boss;
+    my @boss_assignments;
+
+    # Place one dragon boss per Tower landmark
+    foreach my $entry (@{ $entrances->{Tower} // [] }) {
+        my $boss = shift @dragons // shift @other_bosses;
+        next unless $boss;
+        push @boss_assignments, [$boss, $entry->{room_idx}, $entry];
+        $used_boss{ lc($boss->{name}) } = 1;
+    }
+
+    # Place one boss per Dungeon landmark
+    foreach my $entry (@{ $entrances->{Dungeon} // [] }) {
+        my $boss = shift @other_bosses // shift @dragons;
+        next unless $boss;
+        push @boss_assignments, [$boss, $entry->{room_idx}, $entry];
+        $used_boss{ lc($boss->{name}) } = 1;
+    }
+
+    # Place one boss per Cave landmark
+    foreach my $entry (@{ $entrances->{Cave} // [] }) {
+        my $boss = shift @other_bosses // shift @dragons;
+        next unless $boss;
+        push @boss_assignments, [$boss, $entry->{room_idx}, $entry];
+        $used_boss{ lc($boss->{name}) } = 1;
+    }
+
+    # --- Load boss persistence state ---
+    my $boss_state = load_boss_persistence();
+    my $landmarks = load_boss_landmarks();
+
+    my $placed = 0;
+
+    foreach my $assign (@boss_assignments) {
+        my ($boss, $roomnum, $entry) = @$assign;
+        next unless $boss && $roomnum;
+        my $room = read_room_with_num($roomnum);
+        $room->{roomnum} = $roomnum if $room && ref($room) eq 'HASH' && !$room->{roomnum};
+        my $max_x = $config{width}  // 100;
+        my $max_y = $config{height} // 100;
+        unless ($room && is_valid_monster_room($room, $max_x, $max_y)) {
+            debug_log("[monsterai] Boss $boss->{name} landmark room $roomnum is invalid for monsters, skipping.");
+            next;
+        }
+
+        my $bname = lc($boss->{name});
+        my $persist = $boss_state->{$bname};
+        my $landmark = $landmarks->{$roomnum} // $entry;
+
+        # If boss is marked defeated, skip respawn
+        if ($persist && $persist->{defeated}) {
+            log_info("Boss $boss->{name} is defeated, not respawning.");
+            next;
+        }
+
+        # If boss exists in persistence and is not defeated, restore state.
+        if ($persist && !$persist->{defeated}) {
+            %$boss = (%$boss, %$persist); # merge
+            $boss->{is_boss} = 1;
+            $boss->{room} = $persist->{room} // $roomnum;
+            $boss->{hp} = $persist->{hp} // $boss->{hits};
+            $boss->{movement_region} = $persist->{movement_region} // ($room->{feature} // '');
+            $boss->{landmark} = $persist->{landmark} // $landmark->{nearest_name};
+            log_info("Restored boss $boss->{name} in $room->{feature} (room $boss->{room})");
+        } else {
+            # New boss spawn or respawn after defeat
+            $boss->{room} = $roomnum;
+            $boss->{hp} = $boss->{hits};
+            $boss->{ai_bonus} = $boss->{ai_bonus} // int(rand(6)) + 10;
+            $boss->{is_boss} = 1;
+            $boss->{movement_region} = $room->{feature} // '';
+            $boss->{landmark} = $landmark->{nearest_name};
+            log_info("Placed boss $boss->{name} in $room->{feature} (room $roomnum)");
+            # Save/refresh boss state in persistence
+            $boss_state->{$bname} = {
+                map { $_ => $boss->{$_} } qw(name room hp hits ai_bonus is_boss movement_region landmark)
+            };
+        }
+
+        save_monster_to_room($boss, $room);
+        $boss->{id} //= generate_monster_id();
+        my $thr = threads->create(\&monster_thread, $boss);
+        if ($thr) {
+            debug_log("[DEBUG] monster_thread created for $boss->{name} (tid: " . $thr->tid . ")");
+        } else {
+            debug_log("[ERROR] Failed to create monster_thread for $boss->{name}");
+        }
+        $placed++;
+    }
+
+    # Save boss state after placement
+    save_boss_persistence($boss_state);
+    write_state_of_realm_file($boss_state);
+
+    return $placed;
+}
+
+sub add_permanent_monster {
+    my ($room, $mon) = @_;
+    my $roomnum = $room->{roomnum} // $room->{action};
+    unless ($room && ref($room) eq 'HASH' && $roomnum) {
+        my $room_str = defined $room ? join(", ", map { "$_=" . (defined $room->{$_} ? $room->{$_} : "undef") } keys %$room) : "undef";
+        debug_log("[DEBUG] add_permanent_monster: missing or invalid roomnum for monster " . ($mon->{name} // '(unnamed)') . " (room: $room_str)");
+        return;
+    }
+    if (room_has_monster_name($room, $mon->{name}, $mon->{id})) {
+        debug_log("[DEBUG] add_permanent_monster: Room $roomnum already has a monster named $mon->{name}, not adding duplicate.");
+        return;
+    }
+    assign_monster_move_rate($mon);
+    my $perm_file = "$config{transient}/permmon_$roomnum.dat";
+    my @monsters;
+    if (-e $perm_file) {
+        my $retrieved = eval { retrieve($perm_file) };
+        if ($@) {
+            debug_log("[DEBUG] add_permanent_monster: failed to retrieve $perm_file: $@");
+        }
+        @monsters = @{ $retrieved } if $retrieved && ref($retrieved) eq 'ARRAY';
+    }
+    if (scalar(@monsters) >= $MAX_MONSTERS_PER_ROOM) {
+        debug_log("[DEBUG] add_permanent_monster: Room $roomnum is full (max $MAX_MONSTERS_PER_ROOM monsters), not adding $mon->{name}.");
+        return;
+    }
+    $mon->{is_monster} = 1;
+    $mon->{hp} = $mon->{hits} unless defined $mon->{hp};
+    if (defined $mon->{name} && $mon->{name} ne '') {
+        $mon->{name} = lc($mon->{name});
+        $mon->{id} //= generate_monster_id();
+        push @monsters, { %$mon };
+        if (scalar(@monsters) > $MAX_MONSTERS_PER_ROOM) {
+            debug_log("[DEBUG] add_permanent_monster: Room $roomnum would exceed max monsters ($MAX_MONSTERS_PER_ROOM), not adding $mon->{name}.");
+            return;
+        }
+    } else {
+        debug_log("[DEBUG] add_permanent_monster: Tried to add monster with missing name to room $roomnum!");
+        return;
+    }
+    eval {
+        store(\@monsters, $perm_file);
+    };
+    if ($@) {
+        debug_log("[DEBUG] add_permanent_monster: Failed to store to $perm_file: $@");
+    }
+}
+
+# Helper: Path for monster wakeup flag
+sub monster_wakeup_flag_path {
+    my ($name) = @_;
+    return File::Spec->catfile($config{transient}, "wake_monster_" . safe_name($name) . ".flag");
+}
+
+# Helper: Touch the wakeup flag for a monster
+sub wake_monster {
+    my ($name) = @_;
+    my $flag = monster_wakeup_flag_path($name);
+    open(my $fh, '>', $flag); close($fh);
+}
+
+sub room_has_bidirectional_exit {
+    my ($room) = @_;
+    return 0 unless $room && $room->{exits} && ref($room->{exits}) eq 'HASH';
+    foreach my $dir (keys %{ $room->{exits} }) {
+        my $dest_id = $room->{exits}{$dir};
+        next unless $dest_id && $dest_id > 0;
+        my $dest_room = read_room_with_num($dest_id);
+        next unless $dest_room && $dest_room->{exits} && ref($dest_room->{exits}) eq 'HASH';
+        foreach my $rev_dir (keys %{ $dest_room->{exits} }) {
+            return 1 if $dest_room->{exits}{$rev_dir} && $dest_room->{exits}{$rev_dir} == $room->{roomnum};
+        }
+    }
+    return 0;
+}
+
+sub balanced_monster_spread {
+    my ($rooms, $monsters, $monster_count, $bosses_placed) = @_;
+
+    my %rooms_by_type;
+    my %monsters_by_type;
+    my $max_x = $config{width}  // 100;
+    my $max_y = $config{height} // 100;
+
+    # IMPROVED: More permissive room selection - accept rooms with ANY exit
+    my @valid_rooms;
+    foreach my $room (@$rooms) {
+        next unless $room && ref($room) eq 'HASH';
+        next unless is_valid_monster_room($room, $max_x, $max_y);
+        
+        # Accept rooms with ANY exit (not just bidirectional)
+        my $has_any_exit = 0;
+        if ($room->{exits} && ref($room->{exits}) eq 'HASH') {
+            $has_any_exit = scalar(grep { $room->{exits}{$_} && $room->{exits}{$_} > 0 } keys %{$room->{exits}});
+        }
+        next unless $has_any_exit;
+        
+        push @valid_rooms, $room;
+        
+        my $feature = (defined $room->{feature} && $room->{feature} ne '') ? $room->{feature} : '';
+        my $type = ($feature ne '' && exists $ROOM_TYPE_TO_MONSTER{$feature})
+            ? $ROOM_TYPE_TO_MONSTER{$feature}
+            : 'outdoor'; # fallback
+        push @{ $rooms_by_type{$type} }, $room->{roomnum};
+    }
+
+    # Group monsters by type (excluding bosses)
+    foreach my $mon (@$monsters) {
+        next unless $mon && ref($mon) eq 'HASH';
+        next if is_boss_monster($mon);
+        my $region = (defined $mon->{region} && $mon->{region} ne '') ? lc($mon->{region}) : 'outdoor';
+        my $type = normalize_monster_region($region);
+        push @{ $monsters_by_type{$type} }, $mon;
+    }
+
+    my @types = keys %rooms_by_type;
+    my $total_valid_rooms = scalar(@valid_rooms);
+    my $remaining = $monster_count - $bosses_placed;
+    $remaining = 0 if $remaining < 0;
+
+    # IMPROVED: Calculate quotas based on actual room distribution, not fixed percentages
+    my %quota;
+    my $total_type_rooms = 0;
+    $total_type_rooms += scalar(@{ $rooms_by_type{$_} }) for @types;
+
+    # Summary information about monster distribution
+    log_info("Monster distribution: $remaining monsters across $total_valid_rooms valid rooms");
+    
+    # Store type information for verbose logging
+    my @type_info;
+
+    if ($total_type_rooms > 0) {
+        # Distribute monsters proportionally to room availability
+        foreach my $type (@types) {
+            my $room_count = scalar(@{ $rooms_by_type{$type} // [] });
+            $quota{$type} = int($remaining * ($room_count / $total_type_rooms));
+            
+            # Ensure at least some monsters in each type if rooms exist
+            if ($room_count > 0 && $quota{$type} == 0 && $remaining > 0) {
+                $quota{$type} = 1;
+            }
+            
+            # Store type info for verbose logging only
+            push @type_info, "Type '$type': $room_count rooms, quota: $quota{$type}";
+        }
+
+        # IMPROVED: Ensure we use all available monsters by distributing remainder
+        my $total_quota = 0;
+        $total_quota += $quota{$_} for @types;
+        my $remainder = $remaining - $total_quota;
+        
+        # Distribute remainder to types with most available rooms
+        if ($remainder > 0) {
+            my @sorted_types = sort { 
+                scalar(@{ $rooms_by_type{$b} // [] }) <=> scalar(@{ $rooms_by_type{$a} // [] }) 
+            } @types;
+            
+            for my $i (0..$remainder-1) {
+                my $type = $sorted_types[$i % @sorted_types];
+                $quota{$type}++;
+            }
+        }
+    } else {
+        # Fallback if no typed rooms found
+        log_info("No typed rooms found, using fallback distribution");
+        $quota{outdoor} = $remaining;
+        @types = ('outdoor');
+    }
+
+    # Log verbose type information if DEBUG_MONSTERAI is enabled
+    if ($DEBUG_MONSTERAI) {
+        foreach my $info (@type_info) {
+            log_info($info, 'verbose');
+        }
+    }
+
+    my %placed_monsters;
+    my %placement_counts;
+
+    # IMPROVED: Place monsters with better distribution and fallback
+    foreach my $type (@types) {
+        my @mons = sort { ($a->{level} // 1) <=> ($b->{level} // 1) } shuffle @{ $monsters_by_type{$type} // [] };
+        my @rms  = shuffle @{ $rooms_by_type{$type} // [] };
+        my $type_quota = $quota{$type} // 0;
+        next unless $type_quota && @rms && @mons;
+
+        # Only log the start of placement for each type
+        log_info("Placing $type_quota monsters of type '$type' in " . scalar(@rms) . " rooms", 'verbose');
+        
+        # Initialize placement counter for this type
+        $placement_counts{$type} = 0;
+
+        # IMPROVED: Smarter monster selection with level distribution
+        my @selected_monsters;
+        
+        # Level bands
+        my @low  = grep { ($_->{level} // 1) <= 4 } @mons;
+        my @mid  = grep { ($_->{level} // 1) >= 5 && ($_->{level} // 1) <= 8 } @mons;
+        my @high = grep { ($_->{level} // 1) >= 9 } @mons;
+
+        # If we have more quota than unique monsters, allow duplicates with proper distribution
+        if ($type_quota > @mons) {
+            # Calculate level distribution
+            my $low_needed = int($type_quota * 0.6);  # 60% low level
+            my $mid_needed = int($type_quota * 0.3);  # 30% mid level  
+            my $high_needed = $type_quota - $low_needed - $mid_needed; # 10% high level
+            
+            # Add low level monsters (allow duplicates)
+            for (1..$low_needed) {
+                push @selected_monsters, @low ? dclone($low[rand(@low)]) : ();
+            }
+            
+            # Add mid level monsters
+            for (1..$mid_needed) {
+                push @selected_monsters, @mid ? $mid[($_ - 1) % @mid] : 
+                                         @low ? dclone($low[rand(@low)]) : ();
+            }
+            
+            # Add high level monsters
+            for (1..$high_needed) {
+                push @selected_monsters, @high ? $high[($_ - 1) % @high] : 
+                                         @mid ? $mid[($_ - 1) % @mid] :
+                                         @low ? dclone($low[rand(@low)]) : ();
+            }
+        } else {
+            # Use original logic for smaller quotas
+            my $group = 19;
+            my $num_groups = int($type_quota / $group);
+            my $rem = $type_quota % $group;
+
+            my $low_count  = $num_groups * 12;
+            my $mid_count  = $num_groups * 6;
+            my $high_count = $num_groups * 1;
+
+            # Distribute remainder: favor low, then mid, then high
+            if ($rem > 0) {
+                my $add_low  = $rem > 12 ? 12 : $rem;
+                $low_count  += $add_low;
+                $rem -= $add_low;
+            }
+            if ($rem > 0) {
+                my $add_mid  = $rem > 6 ? 6 : $rem;
+                $mid_count  += $add_mid;
+                $rem -= $add_mid;
+            }
+            if ($rem > 0) {
+                $high_count += $rem;
+            }
+
+            # Allow duplication of low-level monsters to fill quota
+            my @low_pick;
+            if (@low && $low_count > 0) {
+                while (@low_pick < $low_count) {
+                    push @low_pick, dclone($low[ @low_pick % @low ]);
+                }
+            }
+            my @mid_pick  = @mid  && $mid_count  > 0 ? (shuffle @mid)[0..($mid_count-1 < $#mid ? $mid_count-1 : $#mid)]   : ();
+            my @high_pick = @high && $high_count > 0 ? (shuffle @high)[0..($high_count-1 < $#high ? $high_count-1 : $#high)] : ();
+            @selected_monsters = (@low_pick, @mid_pick, @high_pick);
+
+            # Fill up to quota with remaining monsters if needed (allow duplication of low-levels)
+            if (scalar(@selected_monsters) < $type_quota && @low) {
+                while (scalar(@selected_monsters) < $type_quota) {
+                    push @selected_monsters, dclone($low[ scalar(@selected_monsters) % @low ]);
+                }
+            }
+        }
+
+        # IMPROVED: Place monsters with better room distribution
+        my $room_idx = 0;
+        my $placed_in_type = 0;
+        
+        foreach my $mon (@selected_monsters) {
+            last unless $room_idx < @rms;
+            last if $placed_in_type >= $type_quota;
+            
+            my $roomnum = $rms[$room_idx % @rms]; # Cycle through rooms if needed
+            my $room = read_room_with_num($roomnum);
+            next unless $room && $room->{roomnum};
+            
+            my @monsters_in_room = get_room_monsters($room);
+            
+            # Check room capacity
+            my $max_for_room = $MAX_MONSTERS_PER_ROOM;
+            my $region_type = normalize_monster_region($room->{feature} // '');
+            if (grep { $_ eq $region_type } qw(town castle)) {
+                $max_for_room = 1; # Urban areas get fewer monsters
+            }
+            
+            if (scalar(@monsters_in_room) >= $max_for_room) {
+                $room_idx++;
+                next;
+            }
+            
+            # Prevent exact duplicate names in same room
+            if (grep { lc($_->{name}) eq lc($mon->{name}) } @monsters_in_room) {
+                $room_idx++;
+                next;
+            }
+            
+            # Place the monster
+            my $mon_copy = dclone($mon);
+            $mon_copy->{room} = $room->{roomnum};
+            $mon_copy->{hp} = $mon_copy->{hits};
+            $mon_copy->{ai_bonus} = $mon_copy->{ai_bonus} // int(rand(6)) + 5;
+            $mon_copy->{is_monster} = 1;
+            $mon_copy->{movement_region} = $room->{feature} // $mon_copy->{region};
+            
+            save_monster_to_room($mon_copy, $room);
+            spawn_monster_thread(dclone($mon_copy));
+            
+            $placed_monsters{$mon} = 1;
+            $placed_in_type++;
+            $placement_counts{$type}++;
+            $room_idx++;
+        }
+        
+        # Only show the final count of placed monsters for each type
+        log_info("Successfully placed $placement_counts{$type}/$type_quota monsters of type '$type'");
+    }
+
+    # IMPROVED: More aggressive fallback placement for remaining monsters
+    my @unplaced = grep { !$placed_monsters{$_} && !is_boss_monster($_) } @$monsters;
+    my $unplaced_count = scalar(@unplaced);
+    if ($unplaced_count > 0) {
+        log_info("Fallback placement for $unplaced_count unplaced monsters");
+
+        # Use ALL valid rooms for fallback, prioritizing those with bidirectional exits
+        my @fallback_rooms = shuffle(@valid_rooms);
+        
+        # Sort rooms: bidirectional exits first, then others
+        @fallback_rooms = sort {
+            my $a_bidirectional = room_has_bidirectional_exit($a) ? 1 : 0;
+            my $b_bidirectional = room_has_bidirectional_exit($b) ? 1 : 0;
+            $b_bidirectional <=> $a_bidirectional;
+        } @fallback_rooms;
+        
+        # Keep track of fallback placements for summary
+        my $fallback_placed = 0;
+        
+        foreach my $mon (@unplaced) {
+            unless (defined $mon->{name} && $mon->{name} ne '') {
+                debug_log("[FALLBACK] Skipping monster with missing name");
+                next;
+            }
+            
+            my $placed = 0;
+            
+            # Try to find a similar region first
+            my $preferred_type = normalize_monster_region($mon->{region} // '');
+            my @similar_rooms = grep {
+                my $room_type = normalize_monster_region($_->{feature} // $_->{region} // '');
+                features_are_similar($_->{feature} // '', $mon->{region} // '') ||
+                $room_type eq $preferred_type
+            } @fallback_rooms;
+            
+            # Try similar rooms first, then all rooms
+            my @try_rooms = (@similar_rooms, @fallback_rooms);
+            
+            foreach my $room (@try_rooms) {
+                next unless $room && $room->{roomnum};
+                
+                my @monsters_in_room = get_room_monsters($room);
+                next if scalar(@monsters_in_room) >= $MAX_MONSTERS_PER_ROOM;
+                
+                # Allow some duplicate names in fallback (different rooms)
+                my $same_name_count = grep { lc($_->{name}) eq lc($mon->{name}) } @monsters_in_room;
+                next if $same_name_count >= 1; # Max 1 of same name per room
+                
+                # Place the monster
+                my $mon_copy = dclone($mon);
+                $mon_copy->{room} = $room->{roomnum};
+                $mon_copy->{hp} = $mon_copy->{hits};
+                $mon_copy->{ai_bonus} = $mon_copy->{ai_bonus} // int(rand(6)) + 5;
+                $mon_copy->{is_monster} = 1;
+                $mon_copy->{movement_region} = $room->{feature} // $mon_copy->{region};
+                
+                save_monster_to_room($mon_copy, $room);
+                spawn_monster_thread(dclone($mon_copy));
+                
+                $fallback_placed++;
+                $placed = 1;
+                
+                # Only log summary of fallback placements, not individual placements
+                log_info("Fallback-placed $mon_copy->{name} (lvl " . ($mon_copy->{level} // '?') . ") in room $room->{roomnum}", 'verbose');
+                
+                last;
+            }
+            
+            unless ($placed) {
+                debug_log("[FALLBACK] Could not place $mon->{name} - all suitable rooms full");
+            }
+        }
+        
+        # Log summary of fallback placements
+        log_info("Fallback placement complete: $fallback_placed/$unplaced_count monsters placed");
+    }
+
+    my $total_placed = scalar(grep { $placed_monsters{$_} } @$monsters);
+    log_info("Monster placement complete: $total_placed monsters placed across the map");
+    
+    return;
+}
+
+sub group_monsters_by_region {
+    my ($monsters, $rooms) = @_;
+    my %room_by_num = map { $_->{roomnum} => $_ } grep { $_ && ref($_) eq 'HASH' && defined $_->{roomnum} } @$rooms;
+    my %region_map;
+    foreach my $mon (@$monsters) {
+        next unless $mon && ref($mon) eq 'HASH';
+        next if is_boss_monster($mon);
+        my $region = (defined $mon->{region} && $mon->{region} ne '') ? lc($mon->{region}) : 'outdoor';
+        my $type = normalize_monster_region($region);
+        push @{ $region_map{$type} }, $mon;
+    }
+    return \%region_map;
+}
+
+sub ensure_monster_combat_thread {
+    my ($mon, $player_name) = @_;
+    $mon->{is_monster} = 1;
+    $mon->{id} //= generate_monster_id();
+
+    my $player_hash = safe_name($player_name);
+    my $key = $mon->{id} . ":" . $player_hash;
+    my $now = time();
+    
+    # Check if combat lock exists
+    if (check_monster_combat_lock($mon->{id}, $player_name)) {
+        debug_log("[DEBUG] Combat lock exists for $mon->{name} vs $player_name");
+        return;
+    }
+    
+    # IMPORTANT: Check if monster is in cooldown period and respect it
+    if ($mon->{combat_cooldown_until} && $now < $mon->{combat_cooldown_until}) {
+        debug_log("[DEBUG] Monster $mon->{name} in cooldown for " . 
+                  ($mon->{combat_cooldown_until} - $now) . " more seconds");
+        return;
+    }
+    
+    # Check if monster is already in combat with someone
+    if (monster_in_combat($mon->{id})) {
+        debug_log("[DEBUG] Monster $mon->{name} (id $mon->{id}) already in combat with someone else");
+        return;
+    }
+    
+    # Check if player is already in combat with someone
+    if (player_in_combat($player_name)) {
+        debug_log("[DEBUG] Player $player_name already in combat with someone else");
+        return;
+    }
+    
+    # Add a pre-combat verification check
+    my $room = read_room_with_num($mon->{room});
+    my @players = players_in_room($mon->{room});
+    my $player_still_here = grep { lc($_->{name}) eq lc($player_name) } @players;
+    
+    unless ($player_still_here) {
+        debug_log("[DEBUG] Player $player_name no longer in room $mon->{room}, not starting combat");
+        return;
+    }
+    
+    # Set combat lock BEFORE starting anything
+    set_monster_combat_lock($mon->{id}, $player_name, 120);
+    
+    # Set a meaningful combat cooldown
+    $mon->{combat_cooldown_until} = $now + 120;  # 2-minute cooldown
+    save_monster_by_id($mon->{id}, $mon);
+    
+    # Create a clear handshake file for the player to see
+    my $handshake_file = "$config{transient}/combat_handshake_$player_hash.txt";
+    open(my $hf, ">", $handshake_file);
+    print $hf "$mon->{name}|$mon->{id}|$mon->{room}|" . time();
+    close($hf);
+    
+    # Start combat thread with appropriate delay
+    sleep(0.5);  # Allow time for handshake file to be read by player
+    
+    my $combat_thread = eval {
+        threads->create(
+            sub {
+                # Additional sleep to ensure proper timing
+                sleep(0.2);
+                my $result = monster_combat_thread($mon, $player_name, $player_hash);
+                return $result;
+            }
+        );
+    };
+    
+    if ($@) {
+        debug_log("[ERROR] Failed to create combat thread: $@");
+        unlink $handshake_file;
+        return;
+    }
+    
+    return $combat_thread;
+}
+
+sub region_monster_thread {
+    my ($region, $monsters, $rooms) = @_;
+    my %room_by_num = map { $_->{roomnum} => $_ } @$rooms;
+    while (1) {
+        foreach my $mon (@$monsters) {
+            next unless defined($mon->{hp}) && $mon->{hp} > 0;
+            next unless defined($mon->{room});
+            my $room = $room_by_num{$mon->{room}} or next;
+            ensure_room_exits($room);
+            monster_ai_tick($mon, $room, $rooms);
+            sleep 0.2;
+        }
+        sleep 0.8;
+    }
+}
+
+sub monster_combat_thread {
+    my ($mon, $player_name, $player_hash) = @_;
+    
+    debug_log("[DEBUG] monster_combat_thread START for $mon->{name} (id $mon->{id}) vs $player_name");
+
+    # CRITICAL: Mark combat thread as active IMMEDIATELY to prevent double engagement
+    $mon->{combat_thread_active} = 1;
+
+    # Ensure cleanup happens regardless of how function exits
+    my $cleanup_handshake = sub {
+        $mon->{in_combat_handshake} = 0;
+        $mon->{handshake_start_time} = 0;
+        $mon->{_handshake_logged} = 0;
+        $mon->{current_target} = undef;
+        $mon->{combat_thread_active} = 0;
+
+        # CRITICAL: Remove combat lock immediately in cleanup
+        remove_monster_combat_lock($mon->{id}, $player_name);
+
+        # CRITICAL: Save the monster state immediately to persist the flag changes
+        save_monster_by_id($mon->{id}, $mon);
+
+        # CRITICAL: Remove ALL handshake files for this player (both directions)
+        my $handshake_file = "$config{transient}/combat_handshake_$player_hash.txt";
+        unlink $handshake_file if -e $handshake_file;
+
+        # ALSO remove the response file to prevent player-side detection
+        my $response_file = "$config{transient}/combat_response_$player_hash.txt";
+        unlink $response_file if -e $response_file;
+
+        # Clean up any player ready flags
+        my $ready_file = "$config{transient}/combat_ready_$player_hash.txt";
+        unlink $ready_file if -e $ready_file;
+
+        # Remove any stale combat pointer files
+        my $player_pointer = "$config{transient}/player_$player_hash.combat";
+        my $monster_pointer = "$config{transient}/monster_$mon->{id}.combat";
+        unlink $player_pointer if -e $player_pointer;
+        unlink $monster_pointer if -e $monster_pointer;
+
+        debug_log("[DEBUG] Enhanced cleanup completed for $mon->{name} (id $mon->{id}) vs $player_name");
+    };
+
+    # Set up cleanup to run on any exit
+    local $SIG{__DIE__} = sub { $cleanup_handshake->(); die @_; };
+
+    # Wait for player response to combat handshake
+    my $response_file = "$config{transient}/combat_response_$player_hash.txt";
+    my $wait_count = 0;
+    my $response = "";
+
+    while (!-e $response_file && $wait_count < 100) {
+        sleep(0.1);
+        $wait_count++;
+    }
+
+    if ($wait_count >= 100) {
+        debug_log("[ERROR] Timed out waiting for player $player_name response");
+        $cleanup_handshake->();
+        # Set a longer cooldown to prevent immediate re-engagement
+        $mon->{combat_cooldown_until} = time() + 30;
+        save_monster_by_id($mon->{id}, $mon);
+        return 0;
+    }
+
+    # Read the response
+    if (-e $response_file) {
+        open(my $fh, "<", $response_file);
+        my $line = <$fh>;
+        close($fh);
+        if ($line && $line =~ /^(\w+)\|/) {
+            $response = $1;
+        }
+        # Don't unlink response file here - let cleanup handle it
+    }
+
+    # Only proceed if player chose to fight
+    unless ($response eq "fight") {
+        debug_log("[DEBUG] Player $player_name chose not to fight (response: $response)");
+        $cleanup_handshake->();
+        # Set a longer cooldown to prevent immediate re-engagement
+        $mon->{combat_cooldown_until} = time() + 30;
+        save_monster_by_id($mon->{id}, $mon);
+        return 0;
+    }
+
+    debug_log("[DEBUG] Player $player_name accepted combat, starting PvP loop");
+
+    # Load player object properly
+    my $player_obj = load_player($player_name);
+    
+    unless ($player_obj) {
+        debug_log("[ERROR] Could not load player object for $player_name");
+        $cleanup_handshake->();
+        return 0;
+    }
+
+    # CRITICAL: Clear the handshake flag BEFORE attempting to start combat
+    # This prevents the "already in handshake" check from failing
+    $mon->{in_combat_handshake} = 0;
+    $mon->{handshake_start_time} = 0;
+    $mon->{current_target} = undef;
+
+    # CRITICAL: Save the cleared state immediately
+    save_monster_by_id($mon->{id}, $mon);
+
+    # Create combat metafile
+    my $combat_file = combat_metafile_path($player_name, $mon);
+    
+    # CRITICAL FIX: Use proper player ID (safe_name) as the key in combat state
+    # This is the root cause of the "Can't use string as a HASH ref" error
+    my $player_id = safe_name($player_name);
+    
+    my $combat_state = {
+        players => {
+            $player_id => player_to_combatant($player_obj),  # Use safe_name as key
+            $mon->{id} => monster_to_combatant($mon)
+        },
+        start_time => time(),
+        current_turn => $mon->{id},  # Monster attacks first since they initiated
+        turn => $mon->{id},
+        turn_order => [$mon->{id}, $player_id],  # Monster first, then player
+        turn_index => 0,
+        combat_mode => 0,  # COMBAT_MODE_NORMAL
+        last_action_time => time(),
+        round => 1,
+        status => 'active',
+        log => [],
+        initiative => {}
+    };
+    
+    # Store combat state
+    eval {
+        lock_store($combat_state, $combat_file);
+    };
+    if ($@) {
+        debug_log("[ERROR] Failed to create combat file: $@");
+        $cleanup_handshake->();
+        return 0;
+    }
+    
+    # Create pointer files for both participants
+    my $monster_pointer = monster_combat_pointer_path($mon->{id});
+    my $player_pointer = player_combat_pointer_path($player_name);
+    
+    # Generate a unique creator ID for this combat instance
+    my $creator_id = "$$-" . time() . "-" . int(rand(1000000));
+    
+    # Create monster pointer file first
+    unless (write_pointer_file($monster_pointer, $combat_file, $creator_id)) {
+        debug_log("[ERROR] Failed to create monster pointer file");
+        unlink $combat_file if -e $combat_file;
+        $cleanup_handshake->();
+        return 0;
+    }
+    
+    # Create player pointer file
+    unless (write_pointer_file($player_pointer, $combat_file, $creator_id)) {
+        debug_log("[ERROR] Failed to create player pointer file");
+        unlink $monster_pointer if -e $monster_pointer;
+        unlink $combat_file if -e $combat_file;
+        $cleanup_handshake->();
+        return 0;
+    }
+
+    debug_log("[DEBUG] Starting pvp_combat_metaloop for $mon->{name} (id $mon->{id}) vs $player_name (ai=1)");
+    log_combat_event("Combat starting: $mon->{name} (id $mon->{id}) vs $player_name", 1);
+
+    # Set combat flags
+    $mon->{in_combat} = 1;
+    $mon->{combat_cooldown_until} = time() + 60;
+
+    # Start the actual combat loop
+    my $result = pvp_combat_metaloop($mon, ai => 1);
+
+    # CRITICAL: Check monster status after combat to determine what happened
+    my $monster_died = 0;
+    # Reload monster state to check final HP
+    my $final_monster_state = eval { retrieve($combat_file) } if -e $combat_file;
+    if ($final_monster_state && $final_monster_state->{players} && $final_monster_state->{players}{$mon->{id}}) {
+        my $final_hp = $final_monster_state->{players}{$mon->{id}}{hp};
+        if (defined $final_hp && $final_hp <= 0) {
+            $monster_died = 1;
+            $mon->{hp} = 0;  # Ensure local copy reflects death
+        }
+    }
+
+    # Cleanup - ENSURE handshake is cleared again after combat
+    $mon->{in_combat} = 0;
+    $mon->{combat_thread_active} = 0;
+
+    if ($mon->{hp} <= 0 || $monster_died) {
+        debug_log("[DEBUG] $mon->{name} (id $mon->{id}) died in combat with $player_name");
+
+        my $room = read_room_with_num($mon->{room});
+        cleanup_monster_messages($mon, $room);
+        ensure_room_exits($room);
+        $room->{roomnum} = $mon->{room} if $room && ref($room) eq 'HASH' && !$room->{roomnum};
+        if ($room && $mon->{name}) {
+            remove_monster_from_room($mon, $room);
+            remove_monster_wakeup_flag($mon);
+            # Don't broadcast death message here - it's already handled in combat cleanup
+            debug_log("[DEBUG] $mon->{name} (id $mon->{id}) removed from room $room->{roomnum} after death.");
+        }
+        delete $monster_last_taunt{$mon->{name}};
+    } else {
+        # Save monster state if it survived
+        save_monster_by_id($mon->{id}, $mon);
+        remove_monster_combat_lock($mon->{id}, $player_name);
+        debug_log("[DEBUG] $mon->{name} (id $mon->{id}) survived combat with $player_name, updated state");
+    }
+
+    # Boss kill tracking
+    if ($mon->{is_boss}) {
+        my $meta = lock_retrieve($combat_file) if -e $combat_file;
+        if ($meta && $meta->{players}) {
+            my ($p1, $p2) = keys %{ $meta->{players} };
+            my $player_key = (lc($p1) eq lc($mon->{id})) ? $p2 : $p1;
+            my $player_state = $meta->{players}{$player_key};
+            if ($player_state && $player_state->{hp} <= 0) {
+                record_boss_kill($mon->{name}, $mon->{room});
+                debug_log("[DEBUG] Boss $mon->{name} (id $mon->{id}) killed $player_key in room $mon->{room}");
+            }
+        }
+    }
+
+    # FINAL cleanup call to ensure everything is cleared
+    $cleanup_handshake->();
+
+    debug_log("[DEBUG] monster_combat_thread completed for $mon->{name} (id $mon->{id}) vs $player_name");
+    return $result;
+}
+
+# Helper: Path for monster status file
+sub monster_status_file {
+    my ($name) = @_;
+    return File::Spec->catfile($config{transient}, "monster_status_" . safe_name($name) . ".stor");
+}
+
+# Write monster status to file (atomic)
+sub write_monster_status {
+    my ($status) = @_;
+    my $file = monster_status_file($status->{name});
+    my $tmp = "$file.tmp";
+    eval {
+        store($status, $tmp);
+        rename($tmp, $file);
+    };
+    if ($@) {
+        warn "[monsterai] Failed to write status for $status->{name}: $@";
+    }
+}
+
+# Read monster status from file
+sub read_monster_status {
+    my ($name) = @_;
+    my $file = monster_status_file($name);
+    return unless -e $file;
+    my $status = eval { retrieve($file) };
+    return $@ ? undef : $status;
+}
+
+# --- Monster AI tick with enhanced room presence validation ---
+# This function runs each AI cycle to manage monster behavior and combat
+sub monster_ai_tick {
+    my ($mon, $room, $rooms) = @_;
+    my $now = time();
+    
+    # --- Track state in a single consistent object ---
+    my $status = {
+        name   => $mon->{name},
+        id     => $mon->{id},
+        hp     => $mon->{hp},
+        room   => safe_roomnum($room),
+        rname  => safe_roomname($room),
+        state  => "processing",
+        target => "",
+        action => "initializing"
+    };
+
+    # --- Combat pointer check ---
+    my $combat_pointer = "$config{transient}/monster_$mon->{id}.combat";
+    if (-e $combat_pointer) {
+        my $pointer_data = read_pointer_file($combat_pointer);
+        if ($pointer_data && $pointer_data->{meta} && -e $pointer_data->{meta}) {
+            # Load combat meta to check turn
+            my $meta = eval { lock_retrieve($pointer_data->{meta}) };
+            if ($meta && $meta->{current_turn} && $meta->{current_turn} eq $mon->{id}) {
+                # It's our turn - process combat action
+                my ($opponent_key) = grep { $_ ne $mon->{id} } keys %{$meta->{players}};
+                
+                # Actually execute the AI turn
+                my $result = ai_combat_turn($mon, $meta, $mon->{id}, $opponent_key);
+                
+                # Make sure changes are saved before advancing turn
+                eval { lock_store($meta, $pointer_data->{meta}) };
+                
+                # Now advance the turn
+                advance_turn($meta, $pointer_data->{meta});
+            }
+            
+            $status->{state} = "engaged"; 
+            $status->{action} = "active combat";
+            write_monster_status($status);
+            return;
+        }
+        
+        # Clean up stale combat pointer
+        unlink $combat_pointer;
+    }
+
+    # --- Combat handshake check with proper timeout and cooldown ---
+    if ($mon->{in_combat_handshake}) {
+        my $time_in_handshake = $now - ($mon->{handshake_start_time} || $now);
+        if ($time_in_handshake > 15) {  # Increased to 15 second timeout
+            debug_log("[DEBUG] $mon->{name} (id $mon->{id}) handshake timeout after 15 seconds, setting cooldown");
+            $mon->{in_combat_handshake} = 0;
+            $mon->{handshake_start_time} = 0;
+            $mon->{current_target} = undef;
+            $mon->{combat_thread_active} = 0;
+            # Set a longer cooldown to prevent immediate re-engagement
+            $mon->{combat_cooldown_until} = $now + 30;
+            
+            # Clean up recent engagements for this timeout
+            if ($mon->{recent_engagements}) {
+                foreach my $key (keys %{$mon->{recent_engagements}}) {
+                    if ($now - $mon->{recent_engagements}{$key} > 30) {
+                        delete $mon->{recent_engagements}{$key};
+                    }
+                }
+            }
+            
+            # Clean up any stale handshake files
+            my @players_here = players_in_room($room->{roomnum});
+            foreach my $player (@players_here) {
+                my $player_hash = safe_name($player->{name});
+                my $handshake_file = "$config{transient}/combat_handshake_$player_hash.txt";
+                unlink $handshake_file if -e $handshake_file;
+            }
+            
+            # Save the monster state to persist these changes
+            save_monster_by_id($mon->{id}, $mon);
+        } else {
+            $status->{state} = "negotiating";
+            $status->{action} = "combat handshake";
+            write_monster_status($status);
+            return;
+        }
+    }
+
+    # --- Combat cooldown check ---
+    if (defined $mon->{combat_cooldown_until} && $mon->{combat_cooldown_until} > $now) {
+        my $remaining = $mon->{combat_cooldown_until} - $now;
+        debug_log("[DEBUG] Monster $mon->{name} in combat cooldown for $remaining more seconds");
+        $status->{state} = "cooling";
+        $status->{action} = "combat cooldown ($remaining sec)";
+        write_monster_status($status);
+        return;
+    }
+
+    # --- Defensive validity checks ---
+    unless ($mon && ref($mon) eq 'HASH' && $mon->{name} && $mon->{id}) {
+        debug_log("[AI ERROR] Invalid monster data passed to monster_ai_tick");
+        return;
+    }
+    
+    unless ($room && ref($room) eq 'HASH' && defined $room->{roomnum}) {
+        debug_log("[AI ERROR] Invalid room data for monster $mon->{name} (id $mon->{id})");
+        return;
+    }
+
+    # --- Movement timing controls ---
+    if ($mon->{last_move_time} && $now - $mon->{last_move_time} < MONSTER_ARRIVAL_GRACE) {
+        # Check for combat initiation during grace period
+        my @players_here = players_in_room($room->{roomnum});
+        if (@players_here) {
+            $status->{state} = "ready";
+            $status->{action} = "combat ready";
+        } else {
+            $status->{state} = "arriving";
+            $status->{action} = "post-movement grace";
+        }
+        write_monster_status($status);
+        return;
+    }
+
+    # Initial idle after movement
+    my $idle_after_move = $config{monster_idle_after_move} // 2;
+    if ($mon->{last_move_time} && $now - $mon->{last_move_time} < $idle_after_move) {
+        $status->{state} = "idle";
+        $status->{action} = "just entered";
+        write_monster_status($status);
+        return;
+    }
+
+    # Basic state checks
+    return if !defined($mon->{hp}) || $mon->{hp} <= 0;
+
+    if ($mon->{last_move_time} && $now - $mon->{last_move_time} < ($mon->{move_rate} // 6)) {
+        $status->{state} = "waiting";
+        $status->{action} = "move cooldown";
+        write_monster_status($status);
+        return;
+    }
+
+    # --- Player presence checks ---
+    my @players = get_online_players();
+    unless (@players) {
+        $mon->{last_idle_time} = $now;
+        $status->{state} = "dormant";
+        $status->{action} = "no players";
+        write_monster_status($status);
+        sleep 1;
+        return;
+    }
+
+    # --- Combat state checks with proper locking ---
+    if (monster_in_combat($mon->{id}) || monster_in_group_combat($mon->{id})) {
+        $status->{state} = "engaged";
+        $status->{action} = "in combat";
+        write_monster_status($status);
+        return;
+    }
+
+    # --- CRITICAL: Check if we're already in a combat thread ---
+    if ($mon->{combat_thread_active}) {
+        $status->{state} = "engaging";
+        $status->{action} = "combat thread active";
+        write_monster_status($status);
+        return;
+    }
+
+    # --- Get players in room with retries ---
+    my $max_retries = 3;
+    my $retry_count = 0;
+    my @players_here;
+    
+    while ($retry_count < $max_retries) {
+        @players_here = players_in_room($room->{roomnum});
+        @players_here = grep { ref($_) eq 'HASH' && $_->{name} } @players_here;
+        last if @players_here;
+        $retry_count++;
+        sleep(0.1) if $retry_count < $max_retries;
+    }
+
+    # Double-check combat status after player detection
+    if (@players_here && (monster_in_combat($mon->{id}) || monster_in_group_combat($mon->{id}))) {
+        $status->{state} = "engaged";
+        $status->{action} = "combat detected";
+        write_monster_status($status);
+        return;
+    }
+
+    debug_log("[AI DEBUG] Found " . scalar(@players_here) . " players in room $room->{roomnum} for $mon->{name}");
+
+    # --- Calculate valid combat targets ---
+    my $engage_range = int(
+        ($config{monster_engage_range_base} // 2)
+        + ($config{monster_engage_range_scale} // 0.3) * ($mon->{level} // 1)
+    );
+    $engage_range = 1 if $engage_range < 1;
+
+    # Calculate valid targets FIRST (before debug output that references them)
+    my @valid_targets = grep {
+        my $player_name = $_->{name};  # Use the actual name, not hash
+        my $p = load_player($player_name);  # Pass the name directly to load_player
+        
+        defined $p && defined $p->{level} && defined $mon->{level}
+            && $mon->{level} >= $p->{level} - $engage_range
+            && $mon->{level} <= $p->{level} + $engage_range
+            && !player_in_combat($_->{name})  # Check if player is already in combat
+    } @players_here;
+
+    # Check for players that are too low level (monster ignores them)
+    my ($too_low) = grep {
+        my $player_name = $_->{name};  # Use the actual name, not hash
+        my $p = load_player($player_name);  # Pass the name directly to load_player
+        defined $p && defined $p->{level} && defined $mon->{level} 
+            && $mon->{level} > $p->{level} + $engage_range
+    } @players_here;
+
+    # ABSOLUTE FORCED DEBUG - This should ALWAYS appear in logs when players present
+    if (@players_here) {
+        debug_log("[ABSOLUTE] Monster $mon->{name} processing " . scalar(@players_here) . " players in room $room->{roomnum}");
+        debug_log("[ABSOLUTE] Monster level: " . ($mon->{level} // 'undef') . ", calculated engage_range: $engage_range");
+        
+        foreach my $p (@players_here) {
+            my $player_name = $p->{name};
+            my $player_hash = safe_name($player_name);
+            debug_log("[ABSOLUTE] Player $player_name -> hash: '$player_hash'");
+            
+            my $player_obj = load_player($player_name);  # Use name, not hash
+            debug_log("[ABSOLUTE] Processing player $player_name - player_obj loaded: " . (defined $player_obj ? "YES" : "NO"));
+            
+            # Debug the player loading process
+            if (!defined $player_obj) {
+                # Try to debug why load_player failed using the correct path function
+                my $expected_file = player_save_path($player_name);
+                debug_log("[ABSOLUTE] Expected player file: $expected_file");
+                debug_log("[ABSOLUTE] Expected file exists: " . (-e $expected_file ? "YES" : "NO"));
+                
+                # Check what files actually exist for this player
+                my $pattern = "$config{'home'}/$config{'data'}/*$player_hash*";
+                my @matching_files = glob($pattern);
+                debug_log("[ABSOLUTE] Files matching pattern '$pattern': " . join(", ", @matching_files));
+                
+                # Also check for the old-style file locations that the AI was looking for
+                my $old_style_file = "$config{'home'}/$config{'data'}/users/$player_hash.dat";
+                debug_log("[ABSOLUTE] Old-style file check: $old_style_file exists: " . (-e $old_style_file ? "YES" : "NO"));
+            }
+            
+            if ($player_obj) {
+                my $p_level = $player_obj->{level} // 'undef';
+                my $m_level = $mon->{level} // 'undef';
+                debug_log("[ABSOLUTE] Player $player_name: level=$p_level, monster_level=$m_level");
+                
+                if (defined $player_obj->{level} && defined $mon->{level}) {
+                    my $min_range = $player_obj->{level} - $engage_range;
+                    my $max_range = $player_obj->{level} + $engage_range;
+                    my $check1 = $mon->{level} >= $min_range ? "PASS" : "FAIL";
+                    my $check2 = $mon->{level} <= $max_range ? "PASS" : "FAIL";
+                    my $in_combat = player_in_combat($player_name) ? "YES" : "NO";
+                    
+                    debug_log("[ABSOLUTE] Player $player_name: range=$min_range-$max_range, check1=$check1, check2=$check2, in_combat=$in_combat");
+                } else {
+                    debug_log("[ABSOLUTE] Player $player_name: MISSING LEVEL DATA - cannot calculate range");
+                }
+            }
+        }
+        
+        debug_log("[ABSOLUTE] Final valid_targets count: " . scalar(@valid_targets));
+        debug_log("[ABSOLUTE] Too low players: " . (defined $too_low ? $too_low->{name} : "none"));
+    }
+
+    my $debug_summary = "";
+    my $state = "";
+    my $action = "";
+    my $target_name = "";
+
+    # --- COMBAT LOGIC with proper handshake and cooldown respect ---
+    if (my $target = $valid_targets[0]) {
+        $state = "engaged";
+        $target_name = $target->{name};
+        my $player_hash = safe_name($target_name);
+
+        # Check if we're still in cooldown from a previous engagement
+        if ($mon->{combat_cooldown_until} && $now < $mon->{combat_cooldown_until}) {
+            my $remaining = $mon->{combat_cooldown_until} - $now;
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) still in cooldown for $remaining seconds, not engaging $target_name";
+            $action = "combat cooldown";
+            goto UPDATE_STATUS;
+        }
+
+        # IMPORTANT: Check if we've already engaged this specific player recently
+        my $recent_engagement_key = "$mon->{id}:$player_hash";
+        if ($mon->{recent_engagements} && $mon->{recent_engagements}{$recent_engagement_key}) {
+            my $last_engagement = $mon->{recent_engagements}{$recent_engagement_key};
+            if ($now - $last_engagement < 10) {  # Increased to 10 seconds for better blocking
+                $debug_summary = "[AI] $mon->{name} (id $mon->{id}) recently engaged $target_name, skipping";
+                $action = "recent engagement cooldown";
+                goto UPDATE_STATUS;
+            }
+        }
+
+        # CRITICAL: Check if already in handshake with this specific player
+        if ($mon->{in_combat_handshake} && $mon->{current_target} && $mon->{current_target} eq $target_name) {
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) already in handshake with $target_name";
+            $action = "handshake in progress";
+            goto UPDATE_STATUS;
+        }
+
+        # CRITICAL: Check if handshake file already exists for this player
+        my $handshake_file = "$config{transient}/combat_handshake_$player_hash.txt";
+        if (-e $handshake_file) {
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) handshake already exists for $target_name";
+            $action = "handshake exists";
+            goto UPDATE_STATUS;
+        }
+
+        # CRITICAL: Check if any combat metafile exists involving this monster and player
+        my $existing_metafile = "$config{transient}/combat_${player_hash}_$mon->{id}.storable";
+        my $existing_metafile_alt = "$config{transient}/combat_$mon->{id}_${player_hash}.storable";
+        if (-e $existing_metafile || -e $existing_metafile_alt) {
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) combat metafile already exists for $target_name";
+            $action = "metafile exists";
+            goto UPDATE_STATUS;
+        }
+
+        # CRITICAL: Check if monster already has a combat pointer
+        my $monster_pointer = "$config{transient}/monster_$mon->{id}.combat";
+        if (-e $monster_pointer) {
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) already has combat pointer, skipping $target_name";
+            $action = "monster pointer exists";
+            goto UPDATE_STATUS;
+        }
+
+        # CRITICAL: Check if player already has a combat pointer
+        my $player_pointer = "$config{transient}/player_$player_hash.combat";
+        if (-e $player_pointer) {
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) player $target_name already has combat pointer";
+            $action = "player pointer exists";
+            goto UPDATE_STATUS;
+        }
+
+        # CRITICAL: Check if we're already in an active combat thread with anyone
+        if ($mon->{combat_thread_active}) {
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) already has active combat thread";
+            $action = "combat thread active";
+            goto UPDATE_STATUS;
+        }
+
+        # Set handshake flag and target tracking FIRST
+        $mon->{in_combat_handshake} = 1;
+        $mon->{handshake_start_time} = $now;
+        $mon->{current_target} = $target_name;
+        $mon->{combat_thread_active} = 1;
+
+        # Record this engagement attempt with current timestamp
+        $mon->{recent_engagements} //= {};
+        $mon->{recent_engagements}{$recent_engagement_key} = $now;
+
+        # Double-check player presence with retry
+        my $player_found = 0;
+        for (my $i = 0; $i < 3; $i++) {
+            my @current_players = players_in_room($room->{roomnum});
+            if (grep { ref($_) eq 'HASH' && $_->{name} eq $target_name } @current_players) {
+                $player_found = 1;
+                last;
+            }
+            sleep(0.1);
+        }
+        
+        unless ($player_found) {
+            $mon->{in_combat_handshake} = 0;
+            $mon->{handshake_start_time} = 0;
+            $mon->{current_target} = undef;
+            $mon->{combat_thread_active} = 0;
+            delete $mon->{recent_engagements}{$recent_engagement_key};
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) did not find $target_name in room, skipping attack";
+            goto UPDATE_STATUS;
+        }
+
+        # Check combat lock
+        if (check_monster_combat_lock($mon->{id}, $player_hash)) {
+            $mon->{in_combat_handshake} = 0;
+            $mon->{handshake_start_time} = 0;
+            $mon->{current_target} = undef;
+            $mon->{combat_thread_active} = 0;
+            delete $mon->{recent_engagements}{$recent_engagement_key};
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) already has combat lock with $target_name";
+            $action = "locked in combat with $target_name";
+            goto UPDATE_STATUS;
+        }
+
+        # Verify player is not already in combat
+        if (player_in_combat($target_name)) {
+            $mon->{in_combat_handshake} = 0;
+            $mon->{handshake_start_time} = 0;
+            $mon->{current_target} = undef;
+            $mon->{combat_thread_active} = 0;
+            delete $mon->{recent_engagements}{$recent_engagement_key};
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) found $target_name already in combat";
+            goto UPDATE_STATUS;
+        }
+
+        # Create handshake file for player - ONLY if all checks pass
+        eval {
+            open(my $hf, ">", $handshake_file);
+            print $hf "$mon->{name}|$mon->{id}|$room->{roomnum}|$now";
+            close($hf);
+        };
+        if ($@) {
+            $mon->{in_combat_handshake} = 0;
+            $mon->{handshake_start_time} = 0;
+            $mon->{current_target} = undef;
+            $mon->{combat_thread_active} = 0;
+            delete $mon->{recent_engagements}{$recent_engagement_key};
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) failed to create handshake file: $@";
+            goto UPDATE_STATUS;
+        }
+
+        # Set combat lock and initialize combat
+        set_monster_combat_lock($mon->{id}, $player_hash, 120);
+        
+        my $player_obj = load_player($target_name);  # Use name, not hash
+        if (!$player_obj) {
+            remove_monster_combat_lock($mon->{id}, $player_hash);
+            unlink $handshake_file;
+            $mon->{in_combat_handshake} = 0;
+            $mon->{handshake_start_time} = 0;
+            $mon->{current_target} = undef;
+            $mon->{combat_thread_active} = 0;
+            delete $mon->{recent_engagements}{$recent_engagement_key};
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) couldn't load player $target_name";
+            goto UPDATE_STATUS;
+        }
+        
+        if ($player_obj->{room} != $mon->{room}) {
+            remove_monster_combat_lock($mon->{id}, $player_hash);
+            unlink $handshake_file;
+            $mon->{in_combat_handshake} = 0;
+            $mon->{handshake_start_time} = 0;
+            $mon->{current_target} = undef;
+            $mon->{combat_thread_active} = 0;
+            delete $mon->{recent_engagements}{$recent_engagement_key};
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) and $target_name not in same room";
+            goto UPDATE_STATUS;
+        }
+
+        # Initialize combat with handshake flag set - using a thread that cleans up properly
+        my $combat_thread = threads->create(sub {
+            my $result = monster_combat_thread($mon, $target_name, $player_hash);
+            
+            # Cleanup thread state when combat ends
+            $mon->{combat_thread_active} = 0;
+            $mon->{current_target} = undef;
+            
+            return $result;
+        });
+        
+        if ($combat_thread) {
+            $combat_thread->detach();
+            $action = "attack $target_name";
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) engaging $target_name";
+        } else {
+            # Failed to create thread - cleanup
+            remove_monster_combat_lock($mon->{id}, $player_hash);
+            unlink $handshake_file;
+            $mon->{in_combat_handshake} = 0;
+            $mon->{handshake_start_time} = 0;
+            $mon->{current_target} = undef;
+            $mon->{combat_thread_active} = 0;
+            delete $mon->{recent_engagements}{$recent_engagement_key};
+            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) failed to create combat thread for $target_name";
+            $action = "thread creation failed";
+        }
+        
+        goto UPDATE_STATUS;
+    }
+    
+    # Handle players that are too low level for the monster
+    elsif ($too_low) {
+        my $too_low_name = $too_low->{name};
+        my $key = $mon->{name} . "|" . safe_name($too_low_name);
+        $monster_last_taunt_player{$key} //= 0;
+        
+        if ($now - $monster_last_taunt_player{$key} > 120) {
+            my @players_here_now = players_in_room($room->{roomnum});
+            my $still_here = grep { ref($_) eq 'HASH' && $_->{name} eq $too_low_name } @players_here_now;
+            
+            if ($still_here) {
+                my $msg = $config{'usercolor'}."$mon->{name} " .
+                    $MONSTER_IGNORE_MESSAGES[int(rand(@MONSTER_IGNORE_MESSAGES))] .
+                    $config{'themecolor'} . "\n";
+                broadcast_room_message($room->{roomnum}, undef, $msg);
+                $monster_last_taunt_player{$key} = $now;
+                $debug_summary = "[AI] $mon->{name} (id $mon->{id}) taunts low-level player $too_low_name";
+            }
+        }
+        $state = "idle";
+        $action = "taunt/ignore";
+        goto UPDATE_STATUS;
+    }
+    else {
+        if (rand() < 0.6) {
+            $state = "idle";
+            $action = "lurking";
+            if ($now - ($mon->{last_lurk_time} // 0) >= $lurk_cooldown) {
+                $mon->{last_lurk_time} = $now;
+                $mon->{last_lurk_rand} = 3 + int(rand(5));
+                $debug_summary = "[AI] $mon->{name} (id $mon->{id}) lurks in room " . safe_roomnum($room);
+            } else {
+                $debug_summary = "[AI] $mon->{name} (id $mon->{id}) idles in room " . safe_roomnum($room);
+            }
+            goto UPDATE_STATUS;
+        } else {
+            # Try to move to find players - IMPROVED MOVEMENT LOGIC
+            my @exits = available_exits($room->{roomnum}, $mon);
+            if (@exits) {
+                my $pick = pick_least_crowded_exit($room, $mon);
+                my ($dir, $dest_room);
+                
+                if ($pick) {
+                    $dir = $pick->{exit};
+                    $dest_room = $pick->{dest_room};
+                } else {
+                    # Fallback: just pick a random exit and load the destination
+                    $dir = $exits[int(rand(@exits))];
+                    my $dest_id = $room->{exits}{$dir};
+                    $dest_room = read_room_with_num($dest_id);
+                    ensure_room_exits($dest_room);
+                    $dest_room->{roomnum} = $dest_id if $dest_room && ref($dest_room) eq 'HASH' && !$dest_room->{roomnum};
+                }
+                
+                # Enhanced validation and movement logic
+                if ($dest_room) {
+                    my $max_x = $config{width}  // 100;
+                    my $max_y = $config{height} // 100;
+                    
+                    # Check if destination is valid for monsters
+                    if (is_valid_monster_room($dest_room, $max_x, $max_y)) {
+                        # Try the move with improved movement function
+                        if (attempt_monster_move($mon, $room, $dest_room, $dir)) {
+                            $state = "moving";
+                            $action = "move $dir";
+                            $debug_summary = "[AI] $mon->{name} (id $mon->{id}) moves $dir to room " . safe_roomnum($dest_room);
+                        } else {
+                            # Move failed, try a different approach
+                            my $fallback_exit = find_any_valid_exit($room, $mon);
+                            if ($fallback_exit) {
+                                if (attempt_monster_move($mon, $room, $fallback_exit->{dest_room}, $fallback_exit->{dir})) {
+                                    $state = "moving";
+                                    $action = "move $fallback_exit->{dir}";
+                                    $debug_summary = "[AI] $mon->{name} (id $mon->{id}) fallback moves $fallback_exit->{dir} to room " . safe_roomnum($fallback_exit->{dest_room});
+                                } else {
+                                    $state = "stuck";
+                                    $action = "move blocked";
+                                    $debug_summary = "[AI] $mon->{name} (id $mon->{id}) cannot move - all exits blocked";
+                                }
+                            } else {
+                                $state = "stuck";
+                                $action = "no valid exits";
+                                $debug_summary = "[AI] $mon->{name} (id $mon->{id}) cannot find any valid exits";
+                            }
+                        }
+                    } else {
+                        $state = "stuck";
+                        $action = "invalid destination";
+                        $debug_summary = "[AI] $mon->{name} (id $mon->{id}) destination room invalid: " . explain_invalid_monster_room($dest_room, $max_x, $max_y);
+                    }
+                } else {
+                    $state = "stuck";
+                    $action = "no destination";
+                    $debug_summary = "[AI] $mon->{name} (id $mon->{id}) cannot load destination room";
+                }
+            } else {
+                $state = "stuck";
+                $action = "no exits";
+                $debug_summary = "[AI] $mon->{name} (id $mon->{id}) is stuck - no exits";
+            }
+            goto UPDATE_STATUS;
+        }
+    }
+
+UPDATE_STATUS:
+    my $should_log = 0;
+    if ($debug_summary) {
+        $should_log = 1 if $action =~ /attack|cast|move|teleport|taunt|blocked|engaged|stuck/i;
+        $should_log = 1 if $mon->{is_boss} && $state eq 'engaged';
+        $should_log = 1 if $state eq 'stuck';
+        $should_log = 1 if $debug_summary =~ /\[ERROR\]/;
+    }
+    debug_log($debug_summary) if $should_log;
+
+    write_monster_status({
+        name   => $mon->{name},
+        id     => $mon->{id},
+        hp     => $mon->{hp},
+        room   => safe_roomnum($room),
+        rname  => safe_roomname($room),
+        state  => $state,
+        target => $target_name,
+        action => $action,
+    });
+}
+
+sub save_monster_to_room {
+    my ($mon, $room) = @_;
+    $mon->{id} //= generate_monster_id();
+    add_permanent_monster($room, $mon);
+}
+
+sub remove_monster_wakeup_flag {
+    my ($mon) = @_;
+    my $flag = monster_wakeup_flag_path($mon->{name});
+    unlink $flag if -e $flag;
+}
+
+sub monster_decide_action {
+    my ($mon, $players) = @_;
+    my $roll = int(rand(20)) + ($mon->{ai_bonus} // 10);
+    return 'attack' if $roll > 15;
+    return 'cast'   if $roll > 12 && $mon->{spell};
+    return 'talk'   if $roll > 10 && $mon->{talk};
+    return 'idle';
+}
+
+sub load_all_monsters {
+    my @monsters;
+    my $max_mon = 0;
+    while (1) {
+        my $mon = read_monster_record($max_mon + 1);
+        last unless $mon && $mon->{name};
+        $max_mon++;
+    }
+    for my $monnum (1..$max_mon) {
+        my $mon = read_monster_record($monnum);
+        next unless $mon && ref($mon) eq 'HASH' && $mon->{name};
+        # If region is missing or empty, set to 'outdoor' and warn
+        if (!defined $mon->{region} || $mon->{region} eq '') {
+            debug_log("[monsterai] Monster '$mon->{name}' missing region, defaulting to 'outdoor'");
+            $mon->{region} = 'outdoor';
+        }
+        # Ensure hp is always set
+        $mon->{hp} = $mon->{hits} unless defined $mon->{hp};
+        # Initialize combat cooldown if not set
+        $mon->{combat_cooldown_until} //= 0;
+        push @monsters, $mon;
+    }
+    return \@monsters;
+}
+
+sub features_are_similar {
+    my ($f1, $f2) = @_;
+    return 1 unless defined $f1 && defined $f2; # If either is undefined, allow movement
+    return 1 if $f1 eq $f2; # Exact match
+    
+    my %groups = (
+        outdoor => [qw(Grass Field Road Valley Plain Hill Mountain Cliff)],
+        nature  => [qw(Forest Grove Treehouse Grass Field)],
+        wetland => [qw(Swamp Marsh Bog Lake River Waterfall)],
+        elevated => [qw(Hill Mountain Cliff Tower)],
+        civilized => [qw(Town Plaza Shop Temple Tavern Inn House Market Guild Castle Fortress Barracks Armory)],
+        underground => [qw(Dungeon DungeonRoom DungeonCorridor DungeonVault Cave CaveTunnel CaveLake)],
+    );
+    
+    # Check if both features belong to the same group
+    foreach my $group (values %groups) {
+        my %set = map { $_ => 1 } @$group;
+        return 1 if $set{$f1} && $set{$f2};
+    }
+    
+    # Allow some cross-group movement for outdoor types
+    my %outdoor_compat = (
+        'Grass' => [qw(Field Road Valley Plain Forest Grove)],
+        'Field' => [qw(Grass Road Valley Plain)],
+        'Forest' => [qw(Grove Treehouse Grass Hill)],
+        'Hill' => [qw(Mountain Cliff Grass Forest)],
+        'Mountain' => [qw(Hill Cliff)],
+        'Road' => [qw(Grass Field Valley Plain)],
+    );
+    
+    if ($outdoor_compat{$f1}) {
+        return 1 if grep { $_ eq $f2 } @{$outdoor_compat{$f1}};
+    }
+    if ($outdoor_compat{$f2}) {
+        return 1 if grep { $_ eq $f1 } @{$outdoor_compat{$f2}};
+    }
+    
+    return 0;
+}
+
+# --- Monster Movement Boundaries ---
+sub available_exits {
+    my ($roomid, $mon) = @_;
+    my $room = read_room_with_num($roomid);
+    ensure_room_exits($room);
+    $room->{roomnum} = $roomid if $room && ref($room) eq 'HASH' && !$room->{roomnum};
+    return () unless $room && $room->{exits};
+    my $max_x = $config{width}  // 100;
+    my $max_y = $config{height} // 100;
+    
+    # Get basic monster type and current room info
+    my $restrict = $mon->{is_boss} ? $mon->{movement_region} : undef;
+    my $mon_type = normalize_monster_region($mon->{movement_region} // $mon->{region} // '');
+    my $current_room_type = normalize_monster_region($room->{feature} // $room->{region} // '');
+    
+    # Enhanced debug logging - check exit structure first
+    if ($DEBUG_MONSTERAI) {
+        debug_log("[EXITS] Monster $mon->{name} (id $mon->{id}) in room $roomid");
+        debug_log("[EXITS] Current room feature: '" . ($room->{feature} // 'none') . "', region: '" . ($room->{region} // 'none') . "'");
+        debug_log("[EXITS] Monster type: '$mon_type', current room type: '$current_room_type'");
+        debug_log("[EXITS] Monster region: '" . ($mon->{region} // 'none') . "', movement_region: '" . ($mon->{movement_region} // 'none') . "'");
+        debug_log("[EXITS] Is boss: " . ($mon->{is_boss} ? 'YES' : 'NO') . ", boss restriction: '" . ($restrict // 'none') . "'");
+        
+        # DEBUG: Show the actual exit structure
+        if ($room->{exits} && ref($room->{exits}) eq 'HASH') {
+            my @raw_exits = keys %{$room->{exits}};
+            debug_log("[EXITS] Raw exits hash keys: [" . join(", ", map { "'$_'" } @raw_exits) . "]");
+            debug_log("[EXITS] Exit values: " . join(", ", map { "$_ => " . ($room->{exits}{$_} // 'undef') } @raw_exits));
+            
+            # CRITICAL: Check if we have empty string keys - this indicates a data loading issue
+            my $empty_key_count = grep { $_ eq '' } @raw_exits;
+            if ($empty_key_count > 0) {
+                debug_log("[EXITS] WARNING: Found $empty_key_count empty string exit keys! This indicates a room data loading problem.");
+                debug_log("[EXITS] Attempting to rebuild exits from room->direct data...");
+                
+                # Try to rebuild exits from the raw room data
+                if ($room->{direct} && length($room->{direct}) >= 48) {
+                    my %rebuilt_exits;
+                    my @direction_names = qw(N S E W NE NW SE SW UP DOWN IN OUT);
+                    
+                    for my $i (0..11) {
+                        my $val = unpack("f<", substr($room->{direct}, $i*4, 4));
+                        my $ival = int($val + 0.0001);
+                        if ($ival > 0) {
+                            my $dir_name = $direction_names[$i];
+                            $rebuilt_exits{$dir_name} = $ival;
+                            debug_log("[EXITS] Rebuilt exit: $dir_name => $ival");
+                        }
+                    }
+                    
+                    if (%rebuilt_exits) {
+                        debug_log("[EXITS] Successfully rebuilt " . scalar(keys %rebuilt_exits) . " exits from direct data");
+                        $room->{exits} = \%rebuilt_exits;
+                    }
+                }
+            }
+        } else {
+            debug_log("[EXITS] No exits hash or invalid structure");
+        }
+    }
+    
+    # Get exits again after potential rebuild
+    my @all_exits = keys %{$room->{exits}};
+    
+    # IMPROVED: More lenient filtering - only require defined destination
+    @all_exits = grep { 
+        defined($room->{exits}{$_}) && $room->{exits}{$_} > 0 
+    } @all_exits;
+    
+    # Additional check: if we still have empty string keys but valid destinations, use them
+    if (!@all_exits) {
+        my @empty_key_exits = grep { $_ eq '' && defined($room->{exits}{$_}) && $room->{exits}{$_} > 0 } keys %{$room->{exits}};
+        if (@empty_key_exits) {
+            debug_log("[EXITS] Using empty-string exit keys as fallback (data loading issue)");
+            @all_exits = @empty_key_exits;
+        }
+    }
+    
+    if ($DEBUG_MONSTERAI) {
+        debug_log("[EXITS] Filtered valid exits: [" . join(", ", map { "'$_'" } @all_exits) . "]");
+    }
+    
+    # If no valid exits after filtering, return empty
+    return () unless @all_exits;
+    
+    my @preferred_exits = ();  # Exits to rooms the monster belongs in
+    my @acceptable_exits = (); # Exits to rooms the monster can tolerate
+    my @escape_exits = ();     # Exits that help escape wrong room types
+    my @blocked_exits = ();    # Track what gets blocked and why
+    
+    foreach my $exit_dir (@all_exits) {
+        my $dest_id = $room->{exits}{$exit_dir};
+        next unless defined($dest_id) && $dest_id > 0;
+        
+        my $dest_room = read_room_with_num($dest_id);
+        ensure_room_exits($dest_room);
+        $dest_room->{roomnum} = $dest_id if $dest_room && ref($dest_room) eq 'HASH' && !$dest_room->{roomnum};
+        
+        # Enhanced debug for each exit - handle empty string direction names
+        if ($DEBUG_MONSTERAI) {
+            my $dir_display = $exit_dir eq '' ? 'EMPTY_STRING' : "'$exit_dir'";
+            debug_log("[EXITS] Checking exit $dir_display -> room $dest_id");
+            if ($dest_room) {
+                debug_log("[EXITS]   Dest feature: '" . ($dest_room->{feature} // 'none') . "', region: '" . ($dest_room->{region} // 'none') . "'");
+            } else {
+                debug_log("[EXITS]   Dest room is NULL!");
+            }
+        }
+        
+        # Basic room validity check
+        unless (is_valid_monster_room($dest_room, $max_x, $max_y)) {
+            my $reason = explain_invalid_monster_room($dest_room, $max_x, $max_y);
+            my $dir_display = $exit_dir eq '' ? 'EMPTY_STRING' : $exit_dir;
+            push @blocked_exits, "$dir_display (invalid: $reason)";
+            debug_log("[EXITS]   BLOCKED: $dir_display -> $dest_id ($reason)") if $DEBUG_MONSTERAI;
+            next;
+        }
+        
+        # BOSSES: Strict movement within their region only (no escape logic needed)
+        if ($restrict) {
+            if ($dest_room->{feature} && $dest_room->{feature} eq $restrict) {
+                push @preferred_exits, $exit_dir;
+                my $dir_display = $exit_dir eq '' ? 'EMPTY_STRING' : "'$exit_dir'";
+                debug_log("[EXITS]   BOSS PREFERRED: $dir_display -> $dest_id (feature matches '$restrict')") if $DEBUG_MONSTERAI;
+            } else {
+                my $dir_display = $exit_dir eq '' ? 'EMPTY_STRING' : $exit_dir;
+                push @blocked_exits, "$dir_display (boss restriction: need '$restrict', got '" . ($dest_room->{feature} // 'none') . "')";
+                debug_log("[EXITS]   BOSS BLOCKED: $dir_display -> $dest_id (need '$restrict', got '" . ($dest_room->{feature} // 'none') . "')") if $DEBUG_MONSTERAI;
+            }
+            next;
+        }
+        
+        my $dest_room_type = normalize_monster_region($dest_room->{feature} // $dest_room->{region} // '');
+        
+        # Always block the most restrictive boss-only areas
+        if ($dest_room->{feature} && $dest_room->{feature} =~ /^(DungeonVault|Keep|ThroneRoom)$/i) {
+            my $dir_display = $exit_dir eq '' ? 'EMPTY_STRING' : $exit_dir;
+            push @blocked_exits, "$dir_display (boss-only area: $dest_room->{feature})";
+            debug_log("[EXITS]   BLOCKED: $dir_display -> $dest_id (boss-only area: $dest_room->{feature})") if $DEBUG_MONSTERAI;
+            next;
+        }
+        
+        # Categorize exits based on monster preferences
+        my $is_preferred = is_room_preferred_for_monster($mon_type, $dest_room_type, $dest_room);
+        my $is_acceptable = is_room_acceptable_for_monster($mon_type, $dest_room_type, $dest_room);
+        my $helps_escape = monster_in_wrong_region($mon_type, $current_room_type) && 
+                          is_room_preferred_for_monster($mon_type, $dest_room_type, $dest_room);
+        
+        if ($is_preferred || $helps_escape) {
+            push @preferred_exits, $exit_dir;
+            my $dir_display = $exit_dir eq '' ? 'EMPTY_STRING' : "'$exit_dir'";
+            debug_log("[EXITS]   PREFERRED: $dir_display -> $dest_id (type: $dest_room_type, helps_escape: " . ($helps_escape ? "YES" : "NO") . ")") if $DEBUG_MONSTERAI;
+        } elsif ($is_acceptable) {
+            push @acceptable_exits, $exit_dir;
+            my $dir_display = $exit_dir eq '' ? 'EMPTY_STRING' : "'$exit_dir'";
+            debug_log("[EXITS]   ACCEPTABLE: $dir_display -> $dest_id (type: $dest_room_type)") if $DEBUG_MONSTERAI;
+        } else {
+            # Even "wrong" rooms can be escape routes if we're already in the wrong place
+            if (monster_in_wrong_region($mon_type, $current_room_type)) {
+                push @escape_exits, $exit_dir;
+                my $dir_display = $exit_dir eq '' ? 'EMPTY_STRING' : "'$exit_dir'";
+                debug_log("[EXITS]   ESCAPE: $dir_display -> $dest_id (type: $dest_room_type, in wrong region)") if $DEBUG_MONSTERAI;
+            } else {
+                my $dir_display = $exit_dir eq '' ? 'EMPTY_STRING' : $exit_dir;
+                push @blocked_exits, "$dir_display (wrong type: need '$mon_type', got '$dest_room_type')";
+                debug_log("[EXITS]   REJECTED: $dir_display -> $dest_id (wrong type: need '$mon_type', got '$dest_room_type')") if $DEBUG_MONSTERAI;
+            }
+        }
+    }
+    
+    # Enhanced final logging
+    if ($DEBUG_MONSTERAI) {
+        debug_log("[EXITS] SUMMARY for $mon->{name} (id $mon->{id}):");
+        debug_log("[EXITS]   Preferred: " . (@preferred_exits ? join(", ", map { $_ eq '' ? 'EMPTY_STRING' : "'$_'" } @preferred_exits) : "none"));
+        debug_log("[EXITS]   Acceptable: " . (@acceptable_exits ? join(", ", map { $_ eq '' ? 'EMPTY_STRING' : "'$_'" } @acceptable_exits) : "none"));
+        debug_log("[EXITS]   Escape: " . (@escape_exits ? join(", ", map { $_ eq '' ? 'EMPTY_STRING' : "'$_'" } @escape_exits) : "none"));
+        debug_log("[EXITS]   Blocked: " . (@blocked_exits ? join(", ", @blocked_exits) : "none"));
+    }
+    
+    # Return exits in order of preference
+    if (@preferred_exits) {
+        debug_log("[DEBUG] Monster $mon->{name} found " . scalar(@preferred_exits) . " preferred exits: [" . join(", ", map { $_ eq '' ? 'EMPTY_STRING' : "'$_'" } @preferred_exits) . "]") if $DEBUG_MONSTERAI;
+        return @preferred_exits;
+    } elsif (@acceptable_exits) {
+        debug_log("[DEBUG] Monster $mon->{name} found " . scalar(@acceptable_exits) . " acceptable exits: [" . join(", ", map { $_ eq '' ? 'EMPTY_STRING' : "'$_'" } @acceptable_exits) . "]") if $DEBUG_MONSTERAI;
+        return @acceptable_exits;
+    } elsif (@escape_exits) {
+        debug_log("[DEBUG] Monster $mon->{name} using " . scalar(@escape_exits) . " escape exits: [" . join(", ", map { $_ eq '' ? 'EMPTY_STRING' : "'$_'" } @escape_exits) . "]") if $DEBUG_MONSTERAI;
+        return @escape_exits;
+    }
+    
+    debug_log("[DEBUG] Monster $mon->{name} has no valid exits from room $roomid") if $DEBUG_MONSTERAI;
+    return ();
+}
+
+# Helper function to check if a room type is preferred for a monster
+sub is_room_preferred_for_monster {
+    my ($mon_type, $room_type, $room) = @_;
+    
+    # No feature means generic outdoor - acceptable for most
+    return 1 if !$room->{feature} || $room->{feature} eq '';
+    
+    # Type-specific preferences
+    if ($mon_type eq 'dungeon') {
+        return 1 if $room_type eq 'dungeon' || $room_type eq 'cave';
+        return 1 if $room->{feature} =~ /^(Dungeon|Cave)$/i;
+    }
+    
+    if ($mon_type eq 'cave') {
+        return 1 if $room_type eq 'cave' || $room_type eq 'dungeon';
+        return 1 if $room->{feature} =~ /^(Cave|Dungeon)$/i;
+    }
+    
+    if ($mon_type eq 'dragon') {
+        return 1 if $room_type eq 'dragon' || $room_type eq 'outdoor';
+        return 1 if $room->{feature} =~ /^(Tower|Mountain|Hill|Cliff|Grass|Field)$/i;
+    }
+    
+    if ($mon_type eq 'forest') {
+        return 1 if $room_type eq 'forest' || $room_type eq 'outdoor';
+        return 1 if $room->{feature} =~ /^(Forest|Grove|Treehouse|Grass|Field)$/i;
+    }
+    
+    if ($mon_type eq 'swamp') {
+        return 1 if $room_type eq 'swamp' || $room_type eq 'lake';
+        return 1 if $room->{feature} =~ /^(Swamp|Marsh|Bog|Lake|River)$/i;
+    }
+    
+    if ($mon_type eq 'town') {
+        return 1 if $room_type eq 'town' || $room_type eq 'castle';
+        return 1 if $room->{feature} =~ /^(Plaza|Shop|Temple|Tavern|Inn|House|Market|Guild|Castle|Fortress)$/i;
+    }
+    
+    # Outdoor types are preferred for most monsters as fallback
+    if ($mon_type eq 'outdoor') {
+        return 1 if $room_type eq 'outdoor';
+        return 1 if $room->{feature} =~ /^(Grass|Field|Road|Valley|Plain|Hill|Mountain)$/i;
+    }
+    
+    return 0;
+}
+
+# Helper function to check if a room type is acceptable (tolerable) for a monster
+sub is_room_acceptable_for_monster {
+    my ($mon_type, $room_type, $room) = @_;
+    
+    # No feature means generic outdoor - acceptable for most
+    return 1 if !$room->{feature} || $room->{feature} eq '';
+    
+    # Most monsters can tolerate basic outdoor areas
+    return 1 if $room->{feature} =~ /^(Grass|Field|Road|Valley|Plain)$/i;
+    
+    # Type-specific tolerances
+    if ($mon_type eq 'dungeon') {
+        return 1 if $room->{feature} =~ /^(Cave|Hill|Mountain)$/i;
+    }
+    
+    if ($mon_type eq 'cave') {
+        return 1 if $room->{feature} =~ /^(Dungeon|Hill|Mountain)$/i;
+    }
+    
+    if ($mon_type eq 'forest') {
+        return 1 if $room->{feature} =~ /^(Hill|Swamp|Marsh)$/i;
+    }
+    
+    if ($mon_type eq 'town') {
+        return 1 if $room->{feature} =~ /^(Road|Plaza)$/i;
+    }
+    
+    return 0;
+}
+
+# Helper function to check if a monster is in the wrong region type
+sub monster_in_wrong_region {
+    my ($mon_type, $current_room_type) = @_;
+    
+    # Define what constitutes "wrong" for each monster type
+    my %wrong_regions = (
+        'dungeon' => [qw(town castle)],
+        'cave'    => [qw(town castle)], 
+        'forest'  => [qw(dungeon cave town castle)],
+        'swamp'   => [qw(dungeon cave town castle)],
+        'town'    => [qw(dungeon cave swamp)],
+        'castle'  => [qw(dungeon cave swamp)],
+        'dragon'  => [qw(town)],  # Dragons are more flexible
+        'outdoor' => [],  # Outdoor monsters are flexible
+    );
+    
+    my $wrong_list = $wrong_regions{$mon_type} || [];
+    return grep { $_ eq $current_room_type } @$wrong_list;
+}
+
+sub room_players_file {
+    my ($roomid) = @_;
+    return "$config{transient}/room_players/$roomid.players";
+}
+
+sub read_action_record {
+    my ($actionnum) = @_;
+    return undef unless $actionnum && $actionnum > 0;
+    my $file = "$config{'home'}/$config{'data'}/actions.dat";
+    my $reclen = 60; # 14 shorts (2 bytes each) + 1 float (4 bytes)
+    my %action;
+    if (!-e $file) {
+        debug_log("[monsterai] actions.dat not found: $file");
+        return undef;
+    }
+    open(my $fh, "<:raw", $file) or do { debug_log("[monsterai] Can't open $file: $!"); return undef; };
+    seek($fh, ($actionnum - 1) * $reclen, SEEK_SET);
+    read($fh, my $buf, $reclen);
+    close($fh);
+    return undef unless $buf && length($buf) == $reclen;
+    @action{qw(
+        attr1 attr2 encounter_rate fumble health_rate hitpoints inventory level
+        monster_talk monster_trigger restrictions rust_rate spell_trigger steal_rate teleport
+    )} = unpack("sssss ssss ssss f", $buf);
+    return \%action;
+}
+
+sub log_combat_event {
+    my ($msg, $is_critical) = @_;
+    
+    if ($is_critical) {
+        # Use yellow for combat critical events
+        log_info("\033[1;33m$msg\033[0m", 'critical');
+    } else {
+        log_info($msg, 'verbose');
+    }
+}
+
+sub monster_combat_loop {
+    my ($mon, $player_name, $player_hash) = @_;
+    $mon->{is_monster} = 1;
+    $mon->{id} //= generate_monster_id();
+
+    # Clear the handshake flag when combat is fully established
+    # This allows the monster to move again if combat ends
+    $mon->{in_combat_handshake} = 0;
+    $mon->{handshake_start_time} = 0;
+
+    # Set up critical variables
+    my $pointer      = monster_combat_pointer_path($mon->{id});
+    my $combat_file  = combat_metafile_path($player_name, $mon);
+    my $player_pointer = player_combat_pointer_path($player_name);
+    
+    # Ensure cleanup happens regardless of how function exits
+    my $cleanup = sub {
+        debug_log("[DEBUG] Cleaning up combat resources for $mon->{name} (id $mon->{id}) vs $player_name");
+        
+        # Remove any combat locks
+        remove_monster_combat_lock($mon->{id}, $player_name);
+        
+        # Clear combat flags
+        $mon->{in_combat} = 0;
+        $mon->{combat_thread_active} = 0;
+        
+        # Set a cooldown to prevent immediate re-engagement
+        $mon->{combat_cooldown_until} = time() + 30;
+        
+        # Save monster state
+        save_monster_by_id($mon->{id}, $mon);
+        
+        # Clean up handshake files
+        my $handshake_file = "$config{transient}/combat_handshake_$player_hash.txt";
+        unlink $handshake_file if -e $handshake_file;
+        
+        my $response_file = "$config{transient}/combat_response_$player_hash.txt";
+        unlink $response_file if -e $response_file;
+        
+        # Clean up combat files if they exist
+        unlink $combat_file if -e $combat_file;
+    };
+
+    # Wait for pointer file to exist and be correct with timeout
+    my $tries = 0;
+    my $sleep_time = 0.05;
+    my $pointer_data;
+    my $start_time = time();
+    my $timeout = 10; # 10 second timeout
+    
+    while ((!-e $pointer || do {
+        $pointer_data = read_pointer_file($pointer);
+        !$pointer_data || $pointer_data->{meta} ne $combat_file;
+    }) && $tries++ < 100) {
+        if (time() - $start_time > $timeout) {
+            debug_log("[ERROR] Timeout waiting for pointer file $pointer for $mon->{name} (id $mon->{id})");
+            $cleanup->();
+            return;
+        }
+        
+        debug_log("[DEBUG] Waiting for pointer file $pointer with correct content for $mon->{name} (id $mon->{id}) (try $tries)") if $tries % 10 == 0;
+        sleep($sleep_time);
+        $sleep_time = $sleep_time < 1 ? $sleep_time * 1.5 : 1;
+    }
+    
+    unless (-e $pointer) {
+        debug_log("[ERROR] Pointer file $pointer not found for $mon->{name} (id $mon->{id}), aborting combat loop.");
+        $cleanup->();
+        return;
+    }
+    
+    $pointer_data = read_pointer_file($pointer);
+    if (!$pointer_data || $pointer_data->{meta} ne $combat_file) {
+        my $creator_id = $pointer_data && $pointer_data->{creator} ? $pointer_data->{creator} : "$$-" . time . "-" . int(rand(1000000));
+        write_pointer_file($pointer, $combat_file, $creator_id);
+        debug_log("[DEBUG] Fixed pointer file $pointer for $mon->{name} (id $mon->{id})");
+    }
+    
+    # Wait for the combat metafile to exist
+    $start_time = time();
+    my $wait_tries = 0;
+    $sleep_time = 0.05;
+    
+    while (!-e $combat_file && $wait_tries++ < 100) {
+        if (time() - $start_time > $timeout) {
+            debug_log("[ERROR] Timeout waiting for combat metafile $combat_file for $mon->{name} (id $mon->{id})");
+            $cleanup->();
+            return;
+        }
+        
+        debug_log("[DEBUG] Waiting for combat metafile $combat_file for $mon->{name} (id $mon->{id}) vs $player_hash (try $wait_tries)") if $wait_tries % 10 == 0;
+        sleep($sleep_time);
+        $sleep_time = $sleep_time < 1 ? $sleep_time * 1.5 : 1;
+    }
+    
+    unless (-e $combat_file) {
+        debug_log("[ERROR] No combat metafile found for $mon->{name} (id $mon->{id}) vs $player_hash, aborting combat loop.");
+        $cleanup->();
+        return;
+    }
+    
+    # Wait for the player pointer file to exist
+    $start_time = time();
+    $wait_tries = 0;
+    $sleep_time = 0.05;
+    
+    while (!-e $player_pointer && $wait_tries++ < 100) {
+        if (time() - $start_time > $timeout) {
+            debug_log("[ERROR] Timeout waiting for player pointer file $player_pointer for $player_name");
+            $cleanup->();
+            return;
+        }
+        
+        debug_log("[DEBUG] Waiting for player pointer file $player_pointer for $player_name (try $wait_tries)") if $wait_tries % 10 == 0;
+        sleep($sleep_time);
+        $sleep_time = $sleep_time < 1 ? $sleep_time * 1.5 : 1;
+    }
+    
+    unless (-e $player_pointer) {
+        debug_log("[ERROR] Player pointer file $player_pointer not found for $player_hash, aborting combat loop.");
+        $cleanup->();
+        return;
+    }
+
+    my $creator_id = $pointer_data && $pointer_data->{creator} ? $pointer_data->{creator} : "$$-" . time . "-" . int(rand(1000000));
+
+    # --- Robust handshake: ensure both sides are ready and pointer/meta are correct ---
+    unless (combat_handshake($combat_file, $mon->{id}, $pointer, $creator_id)) {
+        debug_log("[ERROR] monster_combat_loop: handshake failed for $mon->{name} (id $mon->{id})");
+        $cleanup->();
+        return;
+    }
+
+    # Log critical combat event
+    log_combat_event("Combat initiated: $mon->{name} (id $mon->{id}) vs $player_name", 1);
+    
+    # Ensure combat flag is set properly for the duration of combat
+    $mon->{in_combat} = 1;
+    $mon->{forced_engage} = 1;
+    
+    # Set combat cooldown to prevent immediate re-engagement if combat ends
+    $mon->{combat_cooldown_until} = time() + 60;
+    
+    # Start the actual combat loop
+    my $result = undef;
+    eval {
+        $result = pvp_combat_metaloop($mon, ai => 1);
+    };
+    if ($@) {
+        debug_log("[ERROR] Exception in pvp_combat_metaloop: $@");
+    }
+
+    # --- Check combat outcome ---
+    my $monster_died = $mon->{hp} <= 0;
+    my $player_died = 0;
+    
+    # Check the metafile to determine if player died
+    if (-e $combat_file) {
+        my $meta = eval { lock_retrieve($combat_file) };
+        if ($meta && $meta->{players}) {
+            my ($p1, $p2) = keys %{ $meta->{players} };
+            my $player_key = (lc($p1) eq lc($mon->{id})) ? $p2 : $p1;
+            my $player_state = $meta->{players}{$player_key};
+            if ($player_state && $player_state->{hp} <= 0) {
+                $player_died = 1;
+            }
+        }
+    }
+    
+    # Log combat outcome
+    if ($monster_died) {
+        log_combat_event("Combat result: Monster $mon->{name} (id $mon->{id}) was defeated by $player_name", 1);
+    } elsif ($player_died) {
+        log_combat_event("Combat result: Player $player_name was defeated by $mon->{name} (id $mon->{id})", 1);
+    } else {
+        log_combat_event("Combat result: Combat between $mon->{name} and $player_name ended without defeat", 1);
+    }
+    
+    # Clear the combat flag
+    $mon->{in_combat} = 0;
+    
+    if ($monster_died) {
+        my $room = read_room_with_num($mon->{room});
+        cleanup_monster_messages($mon, $room);
+        ensure_room_exits($room);
+        $room->{roomnum} = $mon->{room} if $room && ref($room) eq 'HASH' && !$room->{roomnum};
+        if ($room && $mon->{name}) {
+            remove_monster_from_room($mon, $room);
+            remove_monster_wakeup_flag($mon);
+            my $death_msg = $config{'usercolor'} . "$mon->{name} collapses and vanishes from the realm." . $config{'themecolor'};
+            broadcast_room_message($room->{roomnum}, undef, $death_msg);
+            debug_log("[DEBUG] $mon->{name} (id $mon->{id}) removed from room $room->{roomnum} after death.");
+        }
+        delete $monster_last_taunt{$mon->{name}};
+    } else {
+        # If the monster survived, save its state
+        save_monster_by_id($mon->{id}, $mon);
+        
+        # Remove combat lock if it exists
+        remove_monster_combat_lock($mon->{id}, $player_name);
+        
+        debug_log("[DEBUG] $mon->{name} (id $mon->{id}) survived combat with $player_name, updated state");
+    }
+
+    # Remove pointer file if we are the creator
+    delete_pointer_file_if_creator($pointer, $creator_id);
+
+    # Boss kill tracking
+    if ($player_died && $mon->{is_boss}) {
+        record_boss_kill($mon->{name}, $mon->{room});
+        debug_log("[DEBUG] Boss $mon->{name} (id $mon->{id}) killed $player_name in room $mon->{room}");
+    }
+    
+    # Final cleanup of any remaining files
+    eval {
+        unlink $combat_file if -e $combat_file;
+    };
+    if ($@) {
+        debug_log("[ERROR] Failed to remove combat file $combat_file: $@");
+    }
+    
+    debug_log("[DEBUG] monster_combat_loop completed for $mon->{name} (id $mon->{id}) vs $player_name");
+    return $result;
+}
+
+sub attempt_monster_move {
+    my ($mon, $from_room, $to_room, $direction) = @_;
+    
+    # Basic validation
+    return 0 unless ($mon && $mon->{id} && $from_room && $from_room->{roomnum} && $to_room && $to_room->{roomnum});
+    
+    my $now = time();
+    my $from_roomnum = $from_room->{roomnum};
+    my $to_roomnum = $to_room->{roomnum};
+
+    debug_log("[MOVE] Attempting move: $mon->{name} (id $mon->{id}) from $from_roomnum to $to_roomnum via $direction") if $DEBUG_MONSTERAI;
+
+    # Combat status checks
+    if ($mon->{in_combat} || $mon->{in_combat_handshake}) {
+        debug_log("[MOVE] BLOCKED: $mon->{name} (id $mon->{id}) in combat/handshake") if $DEBUG_MONSTERAI;
+        return 0;
+    }
+
+    # Check for active combat locks
+    if (monster_in_combat($mon->{id}) || monster_in_group_combat($mon->{id})) {
+        debug_log("[MOVE] BLOCKED: $mon->{name} (id $mon->{id}) has active combat") if $DEBUG_MONSTERAI;
+        return 0;
+    }
+
+    # Respect move rate cooldown
+    if ($mon->{last_move_time} && $now - $mon->{last_move_time} < ($mon->{move_rate} // 6)) {
+        debug_log("[MOVE] BLOCKED: $mon->{name} (id $mon->{id}) move rate cooldown") if $DEBUG_MONSTERAI;
+        return 0;
+    }
+
+    # Relaxed bidirectional check - allow movement if destination has ANY exits
+    my $dest_has_exits = 0;
+    if ($to_room->{exits} && ref($to_room->{exits}) eq 'HASH') {
+        $dest_has_exits = scalar(grep { defined($to_room->{exits}{$_}) && $to_room->{exits}{$_} > 0 } keys %{$to_room->{exits}});
+    }
+    
+    unless ($dest_has_exits) {
+        debug_log("[MOVE] BLOCKED: $mon->{name} (id $mon->{id}) destination room $to_roomnum has no exits") if $DEBUG_MONSTERAI;
+        return 0;
+    }
+
+    # Check if players are present and might initiate combat
+    my @players_here = players_in_room($from_roomnum);
+    if (@players_here) {
+        debug_log("[MOVE] Players present, checking for combat initiation...") if $DEBUG_MONSTERAI;
+        sleep(0.1);
+        # Recheck combat status
+        if (monster_in_combat($mon->{id}) || monster_in_group_combat($mon->{id}) || 
+            $mon->{in_combat} || $mon->{in_combat_handshake}) {
+            debug_log("[MOVE] BLOCKED: $mon->{name} (id $mon->{id}) combat initiated during move attempt") if $DEBUG_MONSTERAI;
+            return 0;
+        }
+    }
+
+    # Proceed with the move
+    return perform_monster_move($mon, $from_room, $to_room, $direction);
+}
+
+sub perform_monster_move {
+    my ($mon, $from_room, $to_room, $direction) = @_;
+    
+    my $now = time();
+    my $from_roomnum = $from_room->{roomnum};
+    my $to_roomnum = $to_room->{roomnum};
+    
+    # Format movement direction
+    my %dirmap = (
+        n  => 'north',  s  => 'south',  e  => 'east',   w  => 'west',
+        N  => 'north',  S  => 'south',  E  => 'east',   W  => 'west',
+        ne => 'northeast', nw => 'northwest', se => 'southeast', sw => 'southwest',
+        NE => 'northeast', NW => 'northwest', SE => 'southeast', SW => 'southwest',
+        u  => 'up',     d  => 'down',   i => 'in',     o => 'out',
+        U  => 'up',     D  => 'down',   I => 'in',     O => 'out',
+        up => 'up', down => 'down', in => 'in', out => 'out',
+        UP => 'up', DOWN => 'down', IN => 'in', OUT => 'out',
+        teleport => 'magically'
+    );
+    my $dirword = $direction ? ($dirmap{$direction} // $direction) : undef;
+    
+    # Write movement tracking flags
+    my $last_flag = monster_lastroom_flag_path($mon, $from_roomnum);
+    eval {
+        open(my $lfh, '>', $last_flag);
+        print $lfh $now;
+        close($lfh);
+    };
+    
+    my $cur_flag = monster_currentroom_flag_path($mon);
+    eval {
+        open(my $cfh, '>', $cur_flag);
+        print $cfh $to_roomnum;
+        close($cfh);
+    };
+    
+    # Notify players in origin room
+    my $leave_msg = "$mon->{name} leaves" . 
+                    ($dirword ? " heading $dirword" : "") . ".";
+    broadcast_room_message($from_roomnum, undef, $leave_msg);
+    
+    # Update monster location
+    eval {
+        remove_monster_from_room($mon, $from_room);
+        $mon->{room} = $to_roomnum;
+        $mon->{last_move_time} = $now;
+        save_monster_to_room($mon, $to_room);
+        save_monster_by_id($mon->{id}, $mon);
+    };
+    if ($@) {
+        debug_log("[MOVE] ERROR: Failed to update monster location: $@");
+        return 0;
+    }
+    
+    # Notify players in destination room
+    my $enter_msg = "$mon->{name} enters" . 
+                    ($dirword ? " from the $dirword" : "") . ".";
+    broadcast_room_message($to_roomnum, undef, $enter_msg);
+
+    debug_log("[MOVE] SUCCESS: $mon->{name} (id $mon->{id}) moved from $from_roomnum to $to_roomnum") if $DEBUG_MONSTERAI;
+    return 1;
+}
+
+sub find_any_valid_exit {
+    my ($room, $mon) = @_;
+    return undef unless ($room && $room->{exits} && ref($room->{exits}) eq 'HASH');
+    
+    my $max_x = $config{width}  // 100;
+    my $max_y = $config{height} // 100;
+    
+    # Try all exits, pick the first valid one
+    for my $dir (keys %{$room->{exits}}) {
+        my $dest_id = $room->{exits}{$dir};
+        next unless (defined($dest_id) && $dest_id > 0);
+        
+        my $dest_room = read_room_with_num($dest_id);
+        next unless $dest_room;
+        
+        ensure_room_exits($dest_room);
+        $dest_room->{roomnum} = $dest_id if $dest_room && ref($dest_room) eq 'HASH' && !$dest_room->{roomnum};
+        
+        # Check if destination is valid for monsters
+        if (is_valid_monster_room($dest_room, $max_x, $max_y)) {
+            # Check if destination has any exits at all
+            my $has_exits = 0;
+            if ($dest_room->{exits} && ref($dest_room->{exits}) eq 'HASH') {
+                $has_exits = scalar(grep { defined($dest_room->{exits}{$_}) && $dest_room->{exits}{$_} > 0 } keys %{$dest_room->{exits}});
+            }
+            
+            if ($has_exits) {
+                return {
+                    dir => $dir,
+                    dest_room => $dest_room,
+                    dest_id => $dest_id
+                };
+            }
+        }
+    }
+    
+    return undef;
+}
+
+sub monster_currentroom_flag_path {
+    my ($mon) = @_;
+    return "$config{transient}/monster_currentroom_$mon->{id}.flag";
+}
+
+sub monster_lastroom_flag_path {
+    my ($mon, $roomnum) = @_;
+    return File::Spec->catfile($config{transient}, "monster_lastroom_" . $mon->{id} . "_$roomnum.flag");
+}
+
+sub monster_in_group_combat {
+    my ($monster_id) = @_;
+    unless (defined $monster_id && $monster_id =~ /^\d+$/) {
+        warn "[BUG] monster_in_group_combat called with undef or name '$monster_id' instead of ID!";
+        return;
+    }
+    
+    # Check for group combat files that include this monster
+    my $transient = $config{transient};
+    opendir(my $dh, $transient) or return;
+    
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^group_combat_(.+)\.storable$/;
+        my $group_id = $1;
+        
+        my $group_file = "$transient/$file";
+        my $group_data = eval { lock_retrieve($group_file) };
+        next unless $group_data && ref($group_data) eq 'HASH';
+        
+        # Check if monster is a participant in this group combat
+        if (exists $group_data->{participants}{$monster_id} ||
+            grep { $_ eq $monster_id } @{$group_data->{monsters} || []}) {
+            
+            # Verify the group combat is still active
+            if ($group_data->{status} && $group_data->{status} eq 'active') {
+                closedir($dh);
+                return $group_file;
+            }
+        }
+    }
+    
+    closedir($dh);
+    return; # Not in any group combat
+}
+
+sub cleanup_stale_monster_threads {
+    my @running_tids = map { $_->tid } threads->list(threads::running);
+    my %running_lookup = map { $_ => 1 } @running_tids;
+    
+    # Clean up stale thread references
+    my $cleaned = 0;
+    foreach my $monster_key (keys %active_monster_threads) {
+        my $tid = $active_monster_threads{$monster_key};
+        unless ($running_lookup{$tid}) {
+            delete $active_monster_threads{$monster_key};
+            $cleaned++;
+        }
+    }
+    
+    if ($cleaned > 0) {
+        debug_log("[CLEANUP] Removed $cleaned stale monster thread references");
+    }
+}
+
+# --- monster_thread to use PvP combat loop for PvE ---
+sub monster_thread {
+    my ($mon) = @_;
+
+    $mon->{id} //= generate_monster_id();
+    my $monster_key = $mon->{id};
+    
+    # Cleanup function to remove thread tracking
+    my $cleanup = sub {
+        # Remove from active threads tracking
+        delete $active_monster_threads{$monster_key};
+        
+        my $room = read_room_with_num($mon->{room});
+        ensure_room_exits($room);
+        $room->{roomnum} = $mon->{room} if $room && ref($room) eq 'HASH' && !$room->{roomnum};
+        if ($room) {
+            remove_monster_from_room($mon, $room);
+            debug_log("[CLEANUP] $mon->{name} (id $mon->{id}) removed from room $mon->{room} on thread exit.");
+        }
+        remove_monster_wakeup_flag($mon);
+        delete $monster_last_taunt{$mon->{name}};
+        
+        # Clean up any remaining handshake files
+        my $data_dir = $config{transient};
+        if (opendir(my $dh, $data_dir)) {
+            while (my $file = readdir($dh)) {
+                if ($file =~ /^combat_handshake_.*\.txt$/) {
+                    my $full_path = "$data_dir/$file";
+                    my $age = time() - (stat($full_path))[9];
+                    unlink $full_path if $age > 30; # Clean up old handshake files
+                }
+            }
+            closedir($dh);
+        }
+        
+        debug_log("[CLEANUP] Thread cleanup completed for $mon->{name} (id $mon->{id})");
+    };
+    
+    # Initialize combat handshake flag to prevent movement during combat initialization
+    $mon->{in_combat_handshake} = 0;
+    $mon->{handshake_start_time} = 0;
+    $mon->{_handshake_logged} = 0;
+    $mon->{combat_thread_active} = 0;
+    
+    # Initialize combat cooldown if not set
+    $mon->{combat_cooldown_until} //= 0;
+
+    debug_log("[DEBUG] monster_thread started for $mon->{name} (id $mon->{id}) in room $mon->{room} (HP: $mon->{hp}/" . ($mon->{hits} // '?') . ")");
+    
+    my $room;
+    my $err;
+
+    eval {
+        while ($mon->{hp} > 0) {
+            my $now = time();
+            
+            # CRITICAL: If we're in a handshake or have a combat thread active, 
+            # completely skip all processing until the situation resolves
+            if ($mon->{in_combat_handshake} || $mon->{combat_thread_active}) {
+                # Check for handshake timeout (30 seconds max for safety)
+                if ($mon->{in_combat_handshake}) {
+                    if (!$mon->{handshake_start_time}) {
+                        $mon->{handshake_start_time} = $now;
+                    }
+                    elsif ($now - $mon->{handshake_start_time} > 30) {
+                        debug_log("[DEBUG] $mon->{name} (id $mon->{id}) handshake timeout after 30 seconds, resetting");
+                        $mon->{in_combat_handshake} = 0;
+                        $mon->{handshake_start_time} = 0;
+                        $mon->{current_target} = undef;
+                        $mon->{combat_thread_active} = 0;
+                        $mon->{_handshake_logged} = 0;
+                        
+                        # CRITICAL: Save the monster state immediately to persist the flag changes
+                        save_monster_by_id($mon->{id}, $mon);
+                        
+                        # Set cooldown to prevent immediate re-engagement
+                        $mon->{combat_cooldown_until} = $now + 60;
+                        
+                        # Clean up any stale handshake files
+                        my @players_here = players_in_room($mon->{room});
+                        foreach my $player (@players_here) {
+                            my $player_hash = safe_name($player->{name});
+                            my $handshake_file = "$config{transient}/combat_handshake_$player_hash.txt";
+                            unlink $handshake_file if -e $handshake_file;
+                        }
+                    }
+                }
+                
+                # Only log once per handshake session to avoid spam
+                if (!$mon->{_handshake_logged}) {
+                    monster_ai_debug("$mon->{name} (id $mon->{id}) is in combat handshake/thread, waiting for resolution");
+                    $mon->{_handshake_logged} = 1;
+                }
+                
+                sleep(1);  # Longer sleep during handshake
+                next;  # Skip ALL other processing
+            }
+
+            # Clear handshake logging flag when not in handshake
+            if ($mon->{_handshake_logged} && !$mon->{in_combat_handshake} && !$mon->{combat_thread_active}) {
+                $mon->{_handshake_logged} = 0;
+            }
+
+            $room = read_room_with_num($mon->{room});
+            ensure_room_exits($room);
+            $room->{roomnum} = $mon->{room} if $room && ref($room) eq 'HASH' && !$room->{roomnum};
+            my $max_x = $config{width}  // 100;
+            my $max_y = $config{height} // 100;
+            unless ($room && $room->{roomnum} && is_valid_monster_room($room, $max_x, $max_y)) {
+                my $reason = explain_invalid_monster_room($room, $max_x, $max_y);
+                my $type = normalize_monster_region($room->{feature} // $room->{region} // '');
+                debug_log("[DEBUG] $mon->{name} (id $mon->{id}) is in invalid room ($reason, type=$type), ending thread.");
+                last;
+            }
+
+            # --- Group combat support ---
+            if (my $group_file = monster_in_group_combat($mon->{id})) {
+                debug_log("[DEBUG] $mon->{name} (id $mon->{id}) detected group combat ($group_file), joining as AI.");
+                # Set combat flag to prevent movement
+                $mon->{in_combat} = 1;
+                
+                # Clear handshake flags before entering group combat
+                $mon->{in_combat_handshake} = 0;
+                $mon->{handshake_start_time} = 0;
+                $mon->{_handshake_logged} = 0;
+                $mon->{combat_thread_active} = 0;
+                
+                group_combat_metaloop($mon, ai => 1);
+                $mon->{hp} = 0 if $mon->{hp} <= 0;
+                
+                # Clear combat flag after combat ends
+                $mon->{in_combat} = 0;
+                
+                last if $mon->{hp} <= 0;
+                next;
+            }
+
+            # Check if monster is already in regular combat
+            if (monster_in_combat($mon->{id})) {
+                # Set combat flag to prevent movement
+                $mon->{in_combat} = 1;
+                
+                # Clear handshake flags since we're in active combat
+                $mon->{in_combat_handshake} = 0;
+                $mon->{handshake_start_time} = 0;
+                $mon->{_handshake_logged} = 0;
+                $mon->{combat_thread_active} = 0;
+                
+                # CRITICAL: Don't call monster_ai_tick while in combat
+                # The combat system will handle the monster's actions
+                sleep(0.5);
+                next;
+            } else {
+                # Clear combat flag if not in combat
+                $mon->{in_combat} = 0;
+            }
+
+            # --- ENHANCED: Check if monster has a combat lock that should be respected ---
+            if (monster_has_active_combat_lock($mon->{id})) {
+                # Double-check that we're not actually in combat
+                if (!monster_in_combat($mon->{id}) && !monster_in_group_combat($mon->{id}) && 
+                    !$mon->{in_combat} && !$mon->{in_combat_handshake} && !$mon->{combat_thread_active}) {
+                    
+                    # We have a combat lock but no active combat - this is a stale lock
+                    debug_log("[CLEANUP] Detected stale combat lock for $mon->{name} (id $mon->{id}), cleaning up");
+                    
+                    # Force cleanup of all combat locks for this monster
+                    my $data_dir = $config{transient};
+                    if (opendir(my $dh, $data_dir)) {
+                        while (my $file = readdir($dh)) {
+                            if ($file =~ /^monster_player_combat_lock_$mon->{id}_/) {
+                                unlink "$data_dir/$file";
+                                debug_log("[CLEANUP] Removed stale lock file: $file");
+                            }
+                        }
+                        closedir($dh);
+                    }
+                    
+                    # Reset all combat-related flags
+                    $mon->{in_combat_handshake} = 0;
+                    $mon->{handshake_start_time} = 0;
+                    $mon->{combat_thread_active} = 0;
+                    $mon->{current_target} = undef;
+                    $mon->{combat_cooldown_until} = time() + 30; # Set a brief cooldown
+                    
+                    save_monster_by_id($mon->{id}, $mon);
+                    next; # Skip this iteration to allow the cleanup to take effect
+                }
+                
+                debug_log("[DEBUG] $mon->{name} (id $mon->{id}) has active combat lock, waiting");
+                sleep(0.2);
+                next;
+            }
+
+            # --- Sleep logic based on player presence and combat ---
+            my $players_online = scalar(get_online_players());
+            my $move_rate = $mon->{move_rate} // 6;
+            my $last_move = $mon->{last_move_time} // 0;
+            my $time_until_move = $move_rate - ($now - $last_move);
+
+            if (!$players_online) {
+                # Only call AI tick if not in any handshake/combat state
+                if (!$mon->{in_combat_handshake} && !$mon->{combat_thread_active}) {
+                    monster_ai_tick($mon, $room, undef);
+                }
+                sleep(8 + rand(4)); # 8–12s
+                next;
+            }
+
+            my @players_here = players_in_room($room->{roomnum});
+            
+            # Skip movement/AI if in combat or handshake
+            if ($mon->{in_combat} || $mon->{in_combat_handshake} || $mon->{combat_thread_active}) {
+                monster_ai_debug("$mon->{name} (id $mon->{id}) is in combat/handshake, skipping normal AI cycle");
+                sleep(0.5);
+                next;
+            }
+
+            if (!@players_here) {
+                monster_ai_tick($mon, $room, undef);
+                sleep(4 + rand(2)); # 4–6s
+                next;
+            }
+
+            if ($time_until_move > 0.2) {
+                monster_ai_tick($mon, $room, undef);
+                my $flag = monster_wakeup_flag_path($mon->{name});
+                my $slept = 0;
+                while ($slept < $time_until_move && !-e $flag && !$mon->{in_combat} && !$mon->{in_combat_handshake} && !$mon->{combat_thread_active}) {
+                    sleep 0.2;
+                    $slept += 0.2;
+                }
+                unlink $flag if -e $flag;
+                next;
+            }
+
+            # Only call monster_ai_tick if we're not in any combat state
+            if (!$mon->{in_combat} && !$mon->{in_combat_handshake} && !$mon->{combat_thread_active} && !monster_in_combat($mon->{id})) {
+                monster_ai_tick($mon, $room, undef);
+            }
+            
+            my $flag = monster_wakeup_flag_path($mon->{name});
+            my $slept = 0;
+            my $max_tick = 0.5 + rand(0.2); # 0.5–0.7s
+            while ($slept < $max_tick && !-e $flag && !$mon->{in_combat} && !$mon->{in_combat_handshake} && !$mon->{combat_thread_active}) {
+                sleep 0.1;
+                $slept += 0.1;
+            }
+            unlink $flag if -e $flag;
+        }
+    };
+    $err = $@ if $@;
+
+    # --- Always cleanup, even on crash or normal exit ---
+    $cleanup->();
+
+    if ($err) {
+        log_info("ERROR: monster_thread crashed for $mon->{name} (id $mon->{id}): $err", 'critical');
+    } else {
+        log_info("$mon->{name} (id $mon->{id}) has died and its thread will end.", 'critical');
+    }
+
+    # --- Boss defeat notification - make it stand out
+    if ($mon->{is_boss}) {
+        my $boss_state = load_boss_persistence();
+        $boss_state->{lc($mon->{name})} = {
+            %{$boss_state->{lc($mon->{name})} // {}},
+            name     => $mon->{name},
+            room     => $mon->{room},
+            hp       => 0,
+            defeated => 1,
+            movement_region => $mon->{movement_region},
+        };
+        save_boss_persistence($boss_state);
+        
+        # Clear, bold, bright red text for boss death - makes it very visible
+        log_info("\033[1;31m!!! BOSS DEFEATED: $mon->{name} (id $mon->{id}) has been vanquished !!!\033[0m", 'critical');
+        
+        write_state_of_realm_file($boss_state);
+    }
+
+    # --- Respawn logic for regular monsters ---
+    unless ($mon->{is_boss}) {
+        my $rooms = get_valid_monster_rooms();
+        my $monsters = load_all_monsters();
+        my @regulars = grep { !is_boss_monster($_) } @$monsters;
+        if (@regulars && @$rooms) {
+            my $tries = 0;
+            my ($new_mon, $room);
+            my $max_x = $config{width}  // 100;
+            my $max_y = $config{height} // 100;
+            while ($tries++ < 100) {
+                $new_mon = dclone($regulars[int(rand(@regulars))]);
+                $room    = $rooms->[int(rand(@$rooms))];
+                $room    = read_room_with_num($room->{roomnum}) if $room;
+                next if $new_mon->{name} eq $mon->{name} && $room->{roomnum} == $mon->{room};
+                next if room_has_monster_name($room, $new_mon->{name});
+                last if $new_mon && $room && is_valid_monster_room($room, $max_x, $max_y);
+            }
+            if ($new_mon && $room && $room->{roomnum}) {
+                assign_monster_move_rate($new_mon);
+                $new_mon->{room} = $room->{roomnum};
+                $new_mon->{hp}   = $new_mon->{hits};
+                $new_mon->{ai_bonus} = $new_mon->{ai_bonus} // int(rand(6)) + 5;
+                $new_mon->{is_monster} = 1;
+                $new_mon->{movement_region} = $room->{feature} // $new_mon->{region};
+                $new_mon->{id} //= generate_monster_id();
+                $new_mon->{in_combat_handshake} = 0;
+                $new_mon->{handshake_start_time} = 0;
+                $new_mon->{_handshake_logged} = 0;
+                $new_mon->{combat_thread_active} = 0;
+                $new_mon->{combat_cooldown_until} = 0;
+                save_monster_to_room($new_mon, $room);
+                log_info("Monster respawned: $new_mon->{name} (lvl " . ($new_mon->{level} // '?') . ") in room $room->{roomnum}");
+                spawn_monster_thread($new_mon);
+            }
+        }
+    }
+}
+
+sub remove_monster_combat_lock {
+    my ($monster_id, $player_name) = @_;
+    
+    # Clean up both directions of the lock
+    my $player_hash = safe_name($player_name);
+    
+    # Remove the specific lock file
+    my $lock_file = "$config{transient}/monster_player_combat_lock_${monster_id}_${player_hash}";
+    unlink $lock_file if -e $lock_file;
+    
+    # Also clean up any other lock files for this monster that might be stale
+    my $data_dir = $config{transient};
+    opendir(my $dh, $data_dir) or return;
+    
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^monster_player_combat_lock_${monster_id}_/;
+        my $full_path = "$data_dir/$file";
+        
+        # Check if the lock has expired (older than 2 minutes)
+        my $age = time() - (stat($full_path))[9];
+        if ($age > 120) {
+            unlink $full_path;
+            debug_log("[CLEANUP] Removed expired combat lock: $file (age: $age seconds)");
+        }
+    }
+    closedir($dh);
+    
+    debug_log("[CLEANUP] Removed combat lock for monster $monster_id vs player $player_name");
+}
+
+# Helper function to check if monster has any active combat locks
+sub monster_has_active_combat_lock {
+    my ($monster_id) = @_;
+    my $data_dir = $config{transient};
+    
+    opendir(my $dh, $data_dir) or return 0;
+    my $has_active_lock = 0;
+    
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^monster_player_combat_lock_${monster_id}_/;
+        my $path = "$data_dir/$file";
+        my $now = time();
+        my $age = $now - (stat($path))[9];
+        
+        # If the lock is older than 2 minutes, it's stale - remove it
+        if ($age > 120) {
+            unlink $path;
+            debug_log("[CLEANUP] Removed stale combat lock: $file (age: $age seconds)");
+            next;
+        }
+        
+        # If the lock is less than 2 minutes old, consider it active
+        if ($age < 120) {
+            $has_active_lock = 1;
+            # But let's also check if there's actually an active combat pointer
+            my $pointer_file = "$config{transient}/monster_${monster_id}.combat";
+            unless (-e $pointer_file) {
+                # No combat pointer, so this lock is probably stale
+                unlink $path;
+                debug_log("[CLEANUP] Removed combat lock without active pointer: $file");
+                $has_active_lock = 0;
+            }
+        }
+    }
+    closedir($dh);
+    
+    return $has_active_lock;
+}
+
+sub monster_ai_debug {
+    my ($msg) = @_;
+    return unless $DEBUG_MONSTERAI;
+    debug_log($msg);
+}
+
+sub find_surface_landmark {
+    my ($start_room) = @_;
+    my $realm_name = load_realm_name();
+    return $realm_name unless $start_room && $start_room->{roomnum};
+
+    my %seen;
+    my $cur = $start_room;
+    my $max_updown = 30;
+    my $structure_type = '';
+
+    # Step 1: Move UP (for dungeons/caves/vaults) or DOWN (for towers/keeps/thronerooms) until out of structure
+    if ($cur->{feature} && $cur->{feature} =~ /Dungeon|Cave|Vault/i) {
+        $structure_type = 'underground';
+        my $steps = 0;
+        while ($cur && $steps++ < $max_updown) {
+            last unless $cur->{exits} && $cur->{exits}{'UP'};
+            my $next = read_room_with_num($cur->{exits}{'UP'});
+            last unless $next && $next->{feature} && $next->{feature} =~ /Dungeon|Cave|Vault/i;
+            $cur = $next;
+        }
+        # Move one more UP if possible (to exit the structure)
+        if ($cur && $cur->{exits} && $cur->{exits}{'UP'}) {
+            my $next = read_room_with_num($cur->{exits}{'UP'});
+            $cur = $next if $next;
+        }
+    } elsif ($cur->{feature} && $cur->{feature} =~ /Tower|Keep|ThroneRoom/i) {
+        $structure_type = 'aboveground';
+        my $steps = 0;
+        while ($cur && $steps++ < $max_updown) {
+            last unless $cur->{exits} && $cur->{exits}{'DOWN'};
+            my $next = read_room_with_num($cur->{exits}{'DOWN'});
+            last unless $next && $next->{feature} && $next->{feature} =~ /Tower|Keep|ThroneRoom/i;
+            $cur = $next;
+        }
+        # Move one more DOWN if possible (to exit the structure)
+        if ($cur && $cur->{exits} && $cur->{exits}{'DOWN'}) {
+            my $next = read_room_with_num($cur->{exits}{'DOWN'});
+            $cur = $next if $next;
+        }
+    }
+
+    # Step 2: BFS from the exit room for a recognizable landmark
+    my @queue = ($cur);
+    my %bfs_seen;
+    my $max_bfs_depth = 50;
+    my $bfs_depth = 0;
+
+    while (@queue && $bfs_depth++ < $max_bfs_depth) {
+        my @next_queue;
+        foreach my $room (@queue) {
+            next unless $room && $room->{roomnum};
+            next if $bfs_seen{$room->{roomnum}}++;
+            # Prefer town or castle names
+            if ($room->{town_name} && $room->{town_name} ne '') {
+                return "the town of $room->{town_name}";
+            }
+            if ($room->{castle_name} && $room->{castle_name} ne '') {
+                return "$room->{castle_name} Castle";
+            }
+            # Prefer surface features that are NOT dungeon/cave/tower
+            if ($room->{feature}
+                && $room->{feature} !~ /Dungeon|Cave|Vault|Tower|ThroneRoom|Keep/i
+                && $room->{feature} =~ /Plaza|Shop|Temple|Tavern|Inn|Market|Guild|House|Forest|Grove|Treehouse|Swamp|Marsh|Bog|Lake|River|Waterfall|Mountain|Hill|Cliff|Grass|Field|Road|Valley|Plain/i
+            ) {
+                return lc($room->{feature});
+            }
+            # Add all adjacent rooms to the next search layer
+            if ($room->{exits}) {
+                for my $dir (keys %{ $room->{exits} }) {
+                    my $dest = $room->{exits}{$dir};
+                    next unless $dest && !$bfs_seen{$dest};
+                    my $dest_room = read_room_with_num($dest);
+                    push @next_queue, $dest_room if $dest_room;
+                }
+            }
+        }
+        @queue = @next_queue;
+    }
+
+    # Fallback: region, but not dungeon/cave/tower
+    if ($cur->{region} && $cur->{region} !~ /dungeon|cave|tower|vault|throneroom|keep/i) {
+        return $cur->{region};
+    }
+
+    # --- Context-sensitive fallback ---
+    if ($cur->{feature}) {
+        if ($cur->{feature} =~ /Dungeon|Vault/i) {
+            my @dungeon_msgs = (
+                "a hidden dungeon somewhere within $realm_name",
+                "an ancient vault lost beneath the earth",
+                "a labyrinthine dungeon shrouded in mystery",
+                "a forgotten vault sealed by magic",
+                "a cursed dungeon where few return",
+                "a secret labyrinth deep underground",
+                "a forsaken dungeon whispered of in legend",
+                "a shadowy vault untouched by sunlight",
+                "a maze of tunnels lost to time",
+                "a perilous dungeon where heroes vanish"
+            );
+            return $dungeon_msgs[int(rand(@dungeon_msgs))];
+        }
+        if ($cur->{feature} =~ /Cave/i) {
+            my @cave_msgs = (
+                "a forgotten cave lost to time",
+                "a winding cavern beneath the hills",
+                "a shadowy cave echoing with secrets",
+                "a deep cavern where darkness reigns",
+                "a hidden grotto far from the sun",
+                "a mysterious cave veiled in mist",
+                "a silent cavern carved by ancient waters",
+                "a lonely cave where only echoes dwell",
+                "a secret cavern known to none",
+                "a haunted cave feared by all"
+                       );
+            return $cave_msgs[int(rand(@cave_msgs))];
+        }
+        if ($cur->{feature} =~ /Tower/i) {
+            my @tower_msgs = (
+                "a mysterious tower rising above the land",
+                "an ancient spire lost in the clouds",
+                "a lonely tower looming over the plains",
+                "a crumbling tower of forgotten kings",
+                "a haunted spire where storms gather",
+                "a twisted tower reaching for the sky",
+                "a silent tower shrouded in fog",
+                "a black tower feared by travelers",
+                "a ruined spire on a distant hill",
+                "a watchful tower standing alone"
+            );
+            return $tower_msgs[int(rand(@tower_msgs))];
+        }
+        if ($cur->{feature} =~ /Keep/i) {
+            my @keep_msgs = (
+                "a shadowy keep looming in the distance",
+                "an ancient keep lost to memory",
+                "a ruined keep atop a lonely hill",
+                "a forbidding keep surrounded by mist",
+                "a forgotten keep where ghosts linger",
+                "a silent keep with crumbling walls",
+                "a haunted keep shunned by villagers",
+                "a mighty keep now fallen to ruin",
+                "a dark keep where secrets are kept",
+                "a battered keep standing against time"
+            );
+            return $keep_msgs[int(rand(@keep_msgs))];
+        }
+        if ($cur->{feature} =~ /ThroneRoom/i) {
+            my @throne_msgs = (
+                "an ancient throneroom of legend",
+                "a forgotten throne hall echoing with power",
+                "a regal throneroom lost to history",
+                "a silent throne chamber veiled in dust",
+                "a grand throneroom where rulers once sat",
+                "a cursed throneroom haunted by shadows",
+                "a majestic hall now claimed by darkness",
+                "a shattered throne in a ruined palace",
+                "a secret throneroom hidden from the world",
+                "a legendary hall where destinies were forged"
+            );
+            return $throne_msgs[int(rand(@throne_msgs))];
+        }
+    }
+
+    return $realm_name;
+}
+
+# --- When a boss kills a player, increment their kill count ---
+sub record_boss_kill {
+    my ($boss_name, $roomnum) = @_;
+    my $boss_state = load_boss_persistence();
+    my $bname = lc($boss_name);
+    $boss_state->{$bname}{kills}++;
+    $boss_state->{$bname}{last_room} = $roomnum if defined $roomnum;
+    save_boss_persistence($boss_state);
+    
+    # Highlight boss kills with bright red text
+    log_info("\033[1;31m!!! BOSS VICTORY: $boss_name has claimed another victim !!!\033[0m", 'critical');
+    
+    write_state_of_realm_file($boss_state);
+}
+
+sub load_realm_name {
+    my $file = "$config{'home'}/$config{'data'}/realm.txt";
+    if (-e $file) {
+        open(my $fh, "<:utf8", $file);
+        my $name = <$fh>;
+        close($fh);
+        $name =~ s/[\r\n]+$// if defined $name;
+        return $name if defined $name && $name ne '';
+    }
+    return "the realm";
+}
+
+sub generate_state_of_realm {
+    my $boss_state = load_boss_persistence();
+    my $realm_name = load_realm_name();
+    my @lines;
+    push @lines, $config{'systemcolor'} . "News from around $realm_name:" . $config{'themecolor'};
+
+    # --- Unique news templates with placeholders ---
+    my @active_msgs = (
+        "%BOSS% is rumored to guard %LANDMARK%.",
+        "Adventurers whisper of %BOSS% lurking in %LANDMARK%.",
+        "%BOSS%'s presence is felt in %LANDMARK%.",
+        "The air in %LANDMARK% crackles with the power of %BOSS%.",
+        "No one dares approach %LANDMARK% while %BOSS% remains.",
+        "The gates of %LANDMARK% are sealed by %BOSS%'s command.",
+        "A dark cloud hangs over %LANDMARK%, where %BOSS% waits.",
+        "The bravest speak of %BOSS%'s challenge in %LANDMARK%.",
+        "Legends say %BOSS% cannot be bested in %LANDMARK%.",
+        "The ground trembles when %BOSS% stirs in %LANDMARK%.",
+        "A fortune awaits any who can defeat %BOSS% in %LANDMARK%.",
+        "The eyes of %BOSS% watch all who enter %LANDMARK%.",
+        "The people of %LANDMARK% live in fear of %BOSS%.",
+        "A mysterious force protects %LANDMARK%-could it be %BOSS%?",
+        "The wind carries the name of %BOSS% across %LANDMARK%.",
+        "%BOSS%'s laughter echoes through %LANDMARK%.",
+        "Travelers avoid %LANDMARK%, dreading an encounter with %BOSS%.",
+        "The shadows in %LANDMARK% seem to move with %BOSS%'s will.",
+        "The night is darkest in %LANDMARK%, where %BOSS% dwells.",
+        "The bravest heroes have vanished in %LANDMARK%, seeking %BOSS%.",
+        "The legend of %BOSS% grows with each passing day in %LANDMARK%.",
+        "The silence in %LANDMARK% is broken only by %BOSS%'s roar.",
+        "The wind howls through %LANDMARK%, carrying tales of %BOSS%.",
+        "The ground shakes beneath %LANDMARK% as %BOSS% awakens.",
+        "The sky above %LANDMARK% darkens when %BOSS% is near.",
+        "The people of %LANDMARK% whisper prayers for protection from %BOSS%.",
+        "The rivers near %LANDMARK% run cold at the mention of %BOSS%.",
+        "The trees in %LANDMARK% seem to bend away from %BOSS%'s path.",
+        "The animals of %LANDMARK% flee when %BOSS% approaches.",
+        "The fires in %LANDMARK% burn low in fear of %BOSS%.",
+        "Children in %LANDMARK% are warned never to speak %BOSS%'s name.",
+        "Old legends in %LANDMARK% tell of the wrath of %BOSS%.",
+        "The bells of %LANDMARK% toll in warning of %BOSS%'s presence.",
+        "No bard in %LANDMARK% dares sing of %BOSS%.",
+        "The moon over %LANDMARK% seems dimmer since %BOSS% arrived.",
+        "Merchants in %LANDMARK% whisper of vanished caravans-blaming %BOSS%.",
+        "The crops in %LANDMARK% wither when %BOSS% is near.",
+        "Hunters in %LANDMARK% return empty-handed, fearing %BOSS%.",
+        "The roads to %LANDMARK% are deserted, all fearing %BOSS%.",
+        "The elders of %LANDMARK% remember a time before %BOSS%.",
+        "The shadows in %LANDMARK% lengthen at the approach of %BOSS%.",
+        "The waters near %LANDMARK% are said to boil when %BOSS% is angered.",
+        "The sky above %LANDMARK% flashes with lightning when %BOSS% roars.",
+        "The ruins near %LANDMARK% are said to be the work of %BOSS%.",
+        "The bravest knights of %LANDMARK% have fallen to %BOSS%.",
+        "The silence in %LANDMARK% is a warning: %BOSS% is near.",
+        "The wind in %LANDMARK% carries the scent of fear-fear of %BOSS%.",
+        "The banners of %LANDMARK% hang limp in the presence of %BOSS%.",
+        "The forges of %LANDMARK% burn day and night, preparing for %BOSS%.",
+        "The priests of %LANDMARK% pray for deliverance from %BOSS%.",
+        "The walls of %LANDMARK% are said to tremble when %BOSS% passes.",
+        "The dreams of those in %LANDMARK% are haunted by %BOSS%.",
+        "The laughter of %BOSS% echoes through the empty streets of %LANDMARK%.",
+        "The market in %LANDMARK% is quiet, merchants wary of %BOSS%.",
+        "The old stones of %LANDMARK% remember the fury of %BOSS%.",
+        "The forests near %LANDMARK% are silent, the animals fled from %BOSS%.",
+        "The rivers of %LANDMARK% run red in tales of %BOSS%'s wrath.",
+        "The stars above %LANDMARK% seem to vanish when %BOSS% awakens.",
+        "The gates of %LANDMARK% are barred each night against %BOSS%.",
+        "The minstrels of %LANDMARK% have no songs for the age of %BOSS%.",
+        "The people of %LANDMARK% light candles at dusk, hoping to ward off %BOSS%.",
+        "The wind in %LANDMARK% whispers only one name: %BOSS%.",
+        "The bravest in %LANDMARK% have vanished, seeking to challenge %BOSS%.",
+        "The crops in %LANDMARK% fail, and the people blame %BOSS%.",
+        "The bells of %LANDMARK% ring out warnings of %BOSS%'s approach.",
+        "The old roads to %LANDMARK% are overgrown, unused since %BOSS% arrived.",
+        "The children of %LANDMARK% dare each other to speak %BOSS%'s name.",
+        "The sky over %LANDMARK% is always stormy when %BOSS% is near.",
+        "The legends of %LANDMARK% grow darker with each tale of %BOSS%.",
+        "The silence in %LANDMARK% is broken only by the distant roar of %BOSS%.",
+        "The people of %LANDMARK% have learned to fear the night-and %BOSS%.",
+        "The ruins near %LANDMARK% are said to be cursed by %BOSS%.",
+        "The old wells of %LANDMARK% are dry, and the elders blame %BOSS%.",
+        "The wind in %LANDMARK% brings chills and whispers of %BOSS%.",
+        "The bravest warriors of %LANDMARK% have fallen to %BOSS%'s might.",
+        "The moon over %LANDMARK% hides behind clouds when %BOSS% prowls.",
+        "The forges of %LANDMARK% work overtime, crafting arms against %BOSS%.",
+        "The prayers of %LANDMARK% go unanswered while %BOSS% reigns.",
+        "The banners of %LANDMARK% are lowered in mourning for those lost to %BOSS%.",
+        "The laughter of %BOSS% is said to drive the people of %LANDMARK% mad.",
+        "The old forests near %LANDMARK% are avoided, for fear of %BOSS%.",
+        "The bells of %LANDMARK% toll at midnight, warning of %BOSS%.",
+        "The people of %LANDMARK% speak only in whispers about %BOSS%.",
+        "The sky above %LANDMARK% is darkest when %BOSS% is near.",
+        "The legends of %LANDMARK% will never forget the terror of %BOSS%.",
+    );
+    my @used_active_msgs = shuffle(@active_msgs);
+
+    my $active_idx = 0;
+
+    foreach my $bname (sort keys %$boss_state) {
+        my $b = $boss_state->{$bname};
+        my $boss_name = $config{'usercolor'} . ucfirst($b->{name} // $bname) . $config{'themecolor'};
+        my $roomnum = $b->{room};
+        my $room = $roomnum ? read_room_with_num($roomnum) : undef;
+        my $landmark = $b->{landmark} // ($room ? find_surface_landmark($room) : "an unknown place");
+        $landmark = $config{'datacolor'} . $landmark . $config{'themecolor'};
+        my $kills = $b->{kills} // 0;
+        my $kills_colored = $kills > 0 ? $config{'errorcolor'} . $kills . $config{'themecolor'} : $config{'datacolor'} . $kills . $config{'themecolor'};
+
+        if ($b->{defeated}) {
+            # ...existing defeat_msgs logic...
+        } else {
+            if ($kills > 0) {
+                # ...existing kill_msgs logic...
+            } else {
+                # Use a unique template for each boss
+                my $msg_template = $used_active_msgs[$active_idx++ % @used_active_msgs];
+                $msg_template =~ s/%BOSS%/$boss_name/g;
+                $msg_template =~ s/%LANDMARK%/$landmark/g;
+                push @lines, $config{'datacolor'} . "- " . $msg_template . $config{'themecolor'};
+            }
+        }
+    }
+    return join("\n", @lines) . "\n";
+}
+
+sub write_state_of_realm_file {
+    my $text = generate_state_of_realm();
+    my $file = "$config{'home'}/$config{'data'}/state_of_realm.txt";
+    open(my $fh, ">", $file) or return;
+    print $fh $text;
+    close($fh);
+}
+
+
+# Add this helper to detect monster crowding in a room
+sub is_room_crowded {
+    my ($room) = @_;
+    my @monsters = get_room_monsters($room);
+    return scalar(@monsters) >= ($MAX_MONSTERS_PER_ROOM - 1); # "crowded" if nearly full
+}
+
+# Add this helper to pick a less crowded exit
+sub pick_least_crowded_exit {
+    my ($room, $mon) = @_;
+    my @exits = keys %{ $room->{exits} };
+    my @candidates;
+    foreach my $exit (@exits) {
+        my $dest_id = $room->{exits}{$exit};
+        my $dest_room = read_room_with_num($dest_id);
+        ensure_room_exits($dest_room);
+        next unless $dest_room;
+        next unless is_valid_monster_room($dest_room, $config{width}, $config{height});
+        my @monsters_in_dest = get_room_monsters($dest_room);
+        push @candidates, { exit => $exit, dest_room => $dest_room, count => scalar(@monsters_in_dest) };
+    }
+    @candidates = sort { $a->{count} <=> $b->{count} } @candidates;
+    return $candidates[0] if @candidates;
+    return undef;
+}
+
+# --- Combat service helper functions ---
+
+# Initiate combat via the message broker (if available)
+# Returns: 1 if combat initiated via broker, 0 if fallback to file-based needed
+sub initiate_combat_via_broker {
+    my ($mon, $target_name, $room_id) = @_;
+    
+    return 0 unless $broker_sock && broker_connected($broker_sock);
+    
+    debug_log("Initiating combat via broker: $mon->{name} ($mon->{id}) -> $target_name in room $room_id");
+    
+    # Send monster_attack to broker
+    my $combat_id = broker_monster_attack(
+        $broker_sock,
+        $mon->{id},
+        $mon->{name},
+        $target_name,
+        $room_id
+    );
+    
+    unless ($combat_id) {
+        debug_log("Failed to initiate attack via broker");
+        return 0;
+    }
+    
+    debug_log("Broker accepted attack, combat_id: $combat_id");
+    $mon->{broker_combat_id} = $combat_id;
+    $mon->{broker_combat_pending} = 1;
+    return 1;
+}
+
+# Poll broker for combat messages
+sub poll_broker {
+    return () unless $broker_sock && broker_connected($broker_sock);
+    return broker_poll($broker_sock);
+}
+
+sub log_warn {
+    my ($msg) = @_;
+    print STDERR "[monsterai] WARN: $msg\n";
+}
+
+# --- General logging utility ---
+sub log_info {
+    my ($msg, $level) = @_;
+    $level //= 'normal';
+    
+    return if $enable_stats; # Suppress if stats dashboard is enabled
+    
+    # Only show critical and normal messages by default
+    # Verbose messages are suppressed unless DEBUG_MONSTERAI is enabled
+    return if ($level eq 'verbose' && !$DEBUG_MONSTERAI);
+    
+    print "[monsterai] $msg\n";
+}
+
+sub debug_log {
+    my ($msg) = @_;
+    return unless $DEBUG_MONSTERAI;
+    my $ts = scalar(localtime);
+    print STDERR "[$ts] [monsterai] $msg\n";
+}
+
+sub all_monster_statuses {
+    my $data_dir = $config{transient};;
+    opendir(my $dh, $data_dir);
+    my @files = grep { /^monster_status_.*\.stor$/ } readdir($dh);
+    closedir($dh);
+    my @statuses;
+    for my $file (@files) {
+        my $status = eval { retrieve("$data_dir/$file") };
+        push @statuses, $status if $status && ref($status) eq 'HASH';
+    }
+    return @statuses;
+}
+
+sub stats_thread {
+    my $interval = 180; # every 3 minutes
+    while (1) {
+        my %class_count;
+        my %active_count;
+        my %blocked_count;
+        my %combat_count;
+        my $total = 0;
+        my @statuses = all_monster_statuses();
+        foreach my $s (@statuses) {
+            # Defensive: ensure %ROOM_TYPE_TO_MONSTER is a hash and populated
+            unless (%ROOM_TYPE_TO_MONSTER) {
+                warn "[monsterai] ROOM_TYPE_TO_MONSTER is empty!";
+                next;
+            }
+            # Class is based on movement_region, fallback to 'unknown'
+            my $mr = (defined $s->{movement_region} && $s->{movement_region} ne '') ? $s->{movement_region} : '';
+            my $class;
+            if (defined $mr && $mr ne '' && exists $ROOM_TYPE_TO_MONSTER{$mr}) {
+                $class = $ROOM_TYPE_TO_MONSTER{$mr};
+            } elsif (defined $mr && $mr ne '') {
+                $class = $mr;
+            } else {
+                $class = 'unknown';
+            }
+            $class_count{$class}++;
+            $total++;
+            if ($s->{state} && $s->{state} eq 'engaged') {
+                $combat_count{$class}++;
+            }
+            if ($s->{state} && $s->{state} eq 'moving' && $s->{action} && $s->{action} =~ /blocked/) {
+                $blocked_count{$class}++;
+            }
+            if ($s->{state} && $s->{state} ne 'idle' && $s->{state} ne 'stuck') {
+                $active_count{$class}++;
+            }
+        }
+        foreach my $class (sort keys %class_count) {
+            print "[monsterai] Stats for class $class: spawned=$class_count{$class}, active=" .
+                  ($active_count{$class} // 0) . ", blocked=" . ($blocked_count{$class} // 0) .
+                  ", in_combat=" . ($combat_count{$class} // 0) . "\n";
+        }
+        print "[monsterai] Total monsters: $total\n";
+        print "[monsterai] Stats updated: " . scalar(localtime) . "\n";
+        sleep $interval;
+    }
+}
+
+sub dashboard_thread {
+    return unless $enable_stats;
+    threads->create(\&stats_thread)->detach;
+    while (1) {
+        my @statuses = all_monster_statuses();
+        my $monster_total = scalar @statuses;
+        print "\e[2J\e[H";
+        print "PhotonMUD Monster AI Daemon - Status Dashboard\n";
+        print "-" x 78 . "\n";
+        printf "%-14s %-6s %-6s %-22s %-10s %-10s %-12s\n", "Monster", "HP", "Room", "Room Name", "State", "Target", "Action";
+        print "-" x 78 . "\n";
+        my $row = 0;
+        foreach my $s (sort { ($a->{name} // '') cmp ($b->{name} // '') } @statuses) {
+            last if $row++ >= 20;
+            printf "%-14s %-6s %-6s %-22s %-10s %-10s %-12s\n",
+                $s->{name} // "",
+                $s->{hp} // "",
+                $s->{room} // "",
+                substr($s->{rname} // "", 0, 22),
+                $s->{state} // "",
+                $s->{target} // "",
+                $s->{action} // "";
+        }
+        print "-" x 78 . "\n";
+        print "Spawned monsters: $monster_total\n";
+        print "Updated: " . scalar(localtime) . "\n";
+        sleep 2;
+    }
+}
+
+# Set max monsters dynamically based on map size (valid rooms)
+sub calculate_max_monsters {
+    my ($room_count) = @_;
+    # Scale: 64 monsters per 10,000 rooms (100x100), proportional for larger maps
+    my $scale = ($config{width}  // 100) * ($config{height} // 100);
+    my $base = 64;
+    my $max = int(($room_count / $scale) * $base);
+    $max = $base if $max < $base; # minimum for small maps
+    return $max;
+}
+
+sub monitor_idle_state {
+    my $last_state = 1; # Start as idle
+    my $idle_counter = 0;
+    my $idle_threshold = 20; # 2 seconds if sleep 0.1
+    while (1) {
+        my $any_active = 0;
+        my @statuses = all_monster_statuses();
+        foreach my $s (@statuses) {
+            if ($s->{state} && $s->{state} ne "idle" && $s->{state} ne "stuck") {
+                $any_active = 1;
+                last;
+            }
+        }
+        if ($any_active) {
+            $idle_counter = 0;
+            $last_state = 0;
+        } else {
+            $idle_counter++;
+            if (!$last_state && $idle_counter >= $idle_threshold) {
+                $last_state = 1;
+            }
+        }
+        sleep 0.25;
+    }
+}
+
+sub cleanup_stale_monster_combat_files {
+    my $data_dir = $config{transient};
+    opendir(my $dh, $data_dir);
+
+    # Clean up player and monster pointer files
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^(player|monster)_[a-z0-9_]+\.combat$/;
+        my $full = "$data_dir/$file";
+        unlink $full;
+    }
+    closedir($dh);
+
+    # Clean up combat metafiles (combat_*.storable) if no corresponding pointer file exists and file is old
+    opendir($dh, $data_dir);
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^combat_([a-z0-9_]+)_([a-z0-9_]+)\.storable$/;
+        my $full = "$data_dir/$file";
+        my $age = time() - (stat($full))[9];
+        next if $age < 300; # Only clean up files older than 10 seconds
+        if ($file =~ /^combat_(.+?)_(.+?)\.storable$/) {
+            my ($p1, $p2) = ($1, $2);
+            my $p1_pointer = "$data_dir/player_$p1.combat";
+            my $p2_pointer = "$data_dir/monster_$p2.combat";
+            my $p2_pointer_alt = "$data_dir/player_$p2.combat";
+            my $p1_pointer_alt = "$data_dir/monster_$p1.combat";
+            unless (-e $p1_pointer || -e $p2_pointer || -e $p1_pointer_alt || -e $p2_pointer_alt) {
+                unlink $full;
+                debug_log("[CLEANUP] Removed stale combat metafile $full (age $age s)");
+            }
+        }
+    }
+    closedir($dh);
+}
+
+# --- Add this helper to clean up all permmon_*.dat files ---
+sub cleanup_permmon_files {
+    my $data_dir = $config{transient};
+    opendir(my $dh, $data_dir);
+    while (my $file = readdir($dh)) {
+        next unless $file =~ /^permmon_\d+\.dat$/;
+        unlink "$data_dir/$file";
+    }
+    closedir($dh);
+    log_info("Cleaned up all permmon_*.dat files.");
+}
+
+sub spawn_monster_thread {
+    my ($mon) = @_;
+    $mon->{id} //= generate_monster_id();
+    
+    # CRITICAL: Prevent duplicate threads for the same monster
+    my $monster_key = $mon->{id};
+    
+    # Check if thread already exists and is still running
+    if (exists $active_monster_threads{$monster_key}) {
+        my $existing_tid = $active_monster_threads{$monster_key};
+        
+        # Check if the thread is still running
+        my @running_threads = threads->list(threads::running);
+        my $thread_still_running = grep { $_->tid == $existing_tid } @running_threads;
+        
+        if ($thread_still_running) {
+            debug_log("[DEBUG] spawn_monster_thread: Thread already exists for $mon->{name} (id $mon->{id}), skipping");
+            return undef;
+        } else {
+            # Clean up stale thread reference
+            delete $active_monster_threads{$monster_key};
+            debug_log("[DEBUG] spawn_monster_thread: Cleaned up stale thread reference for $mon->{name} (id $mon->{id})");
+        }
+    }
+    
+    # Wait if we're at thread limit
+    while (threads->list(threads::running) >= $MAX_MONSTER_THREADS) {
+        sleep 0.25;
+    }
+    
+    # Create the thread
+    my $thread = threads->create(\&monster_thread, $mon);
+    
+    if ($thread) {
+        # Track the thread
+        $active_monster_threads{$monster_key} = $thread->tid;
+        debug_log("[DEBUG] spawn_monster_thread: Created thread " . $thread->tid . " for $mon->{name} (id $mon->{id})");
+        
+        # Set up cleanup when thread ends
+        $thread->detach();
+        
+        return $thread;
+    } else {
+        debug_log("[ERROR] spawn_monster_thread: Failed to create thread for $mon->{name} (id $mon->{id})");
+        return undef;
+    }
+}
+
+sub monster_hash {
+    my ($name) = @_;
+    my $sum = 0;
+    $sum += ord($_) for split //, $name;
+    return $sum;
+}
+
+sub assign_monster_move_rate {
+    my ($mon) = @_;
+    my $name = lc($mon->{name} // '');
+    my $type = normalize_monster_region($mon->{region} // $mon->{movement_region} // '');
+    
+    # Initialize combat cooldown if not set
+    $mon->{combat_cooldown_until} //= 0;
+    
+    # Fast monsters
+    if ($name =~ /wolf|goblin|bandit|kobold|bat|rat|snake|centipede|spider|lizard/i) {
+        $mon->{move_rate} = 1 + rand(1); # 1–2 sec
+    }
+    # Average monsters
+    elsif ($name =~ /orc|troll|ogre|bugbear|gnoll|bear|lurcher|pirate|elf|dwarf/i) {
+        $mon->{move_rate} = 2 + rand(2); # 2–4 sec
+    }
+    # Slow monsters
+    elsif ($name =~ /zombie|mummy|giant|ooze|slime|cube|golem|elemental|titan/i) {
+        $mon->{move_rate} = 5 + rand(3); # 5–8 sec
+    }
+    # Bosses
+    elsif ($mon->{is_boss}) {
+        $mon->{move_rate} = 4 + rand(4); # 4–8 sec
+    }
+    # Default
+    else {
+        $mon->{move_rate} = 2 + rand(2); # 2–4 sec
+    }
+}
+
+sub cleanup_thread {
+    while (1) {
+        cleanup_stale_monster_combat_files();
+        cleanup_permmon_files();
+        cleanup_stale_monster_threads();
+        sleep 60;
+    }
+}
+
+sub run_monster_worker {
+    my ($worker_id, $num_workers, $enable_stats) = @_;
+
+    # Connect to message broker (each worker needs its own connection)
+    if (broker_available()) {
+        my $monsterai_id = "monsterai_${$}_worker_$worker_id";
+        $broker_sock = broker_connect_monsterai($monsterai_id);
+        if ($broker_sock) {
+            log_info("Worker $worker_id: Connected to message broker");
+        } else {
+            log_info("Worker $worker_id: Broker not available, using file-based combat");
+        }
+    }
+
+    # threads->create(\&cleanup_thread)->detach if $worker_id == 1;
+
+    my $rooms = get_valid_monster_rooms();
+    my $room_count = scalar @$rooms;
+    my $MAX_MONSTERS = calculate_max_monsters($room_count);
+    my $monster_count = int($room_count * $MONSTER_PER_ROOM);
+    $monster_count = $MAX_MONSTERS if $monster_count > $MAX_MONSTERS;
+
+    log_info("Worker $worker_id: Map has $room_count valid rooms.");
+    log_info("Worker $worker_id: Configured to spawn $monster_count monsters (max allowed: $MAX_MONSTERS).");
+
+    my $monsters = load_all_monsters();
+
+    threads->create(\&dashboard_thread) if $enable_stats && $worker_id == 1;
+    threads->create(\&monitor_idle_state) unless $enable_stats;
+
+    # --- Place Boss Monsters First (only in worker 1) ---
+    my $bosses_placed = 0;
+    $bosses_placed = place_boss_monsters($rooms, $monsters) if $worker_id == 1;
+
+    # --- Assign monsters to this worker ---
+    my @my_monsters = grep {
+        (monster_hash($_->{name}) % $num_workers) == ($worker_id - 1)
+    } @$monsters;
+
+    # --- Balanced regular monster placement by class/type and room spread ---
+    balanced_monster_spread($rooms, \@my_monsters, $monster_count, $bosses_placed);
+
+    # --- Main loop: maintain monster count (respawn logic is handled in monster_thread) ---
+    $SIG{INT} = $SIG{TERM} = sub {
+        log_info("Worker $worker_id: Shutting down...");
+        broker_disconnect($broker_sock) if $broker_sock;
+        cleanup_permmon_files(); # Clean up on shutdown
+        exit 0;
+    };
+
+    while (1) {
+        # Check for and process combat request files
+        my $data_dir = $config{transient};;
+        opendir(my $dh, $data_dir);
+        while (my $file = readdir($dh)) {
+            next unless $file =~ /^combatreq_([a-z0-9_]+)_([a-z0-9_]+)\.req$/;
+            my ($mon_name, $player_name) = ($1, $2);
+            my $full_path = "$data_dir/$file";
+            open(my $fh, "<", $full_path);
+            my $line = <$fh>;
+            close($fh);
+            unlink $full_path;
+            next unless defined $line && $line ne "";
+
+            my ($mon_name_real, $player_name_real, $roomnum) = split(/\|/, $line);
+            # Only handle if this worker owns the monster
+            next unless (monster_hash($mon_name_real) % $num_workers) == ($worker_id - 1);
+
+            # Find the monster in the correct room
+            my $room = read_room_with_num($roomnum);
+            my @monsters = get_room_monsters($room);
+            my ($mon) = grep { lc($_->{name}) eq lc($mon_name_real) } @monsters;
+            next unless $mon;
+
+            # Only start if not already in combat
+            unless (monster_in_combat($mon->{id})) {
+                my $mon_copy = dclone($mon);
+                $mon_copy->{id} //= generate_monster_id();
+                my $thr = threads->create(\&monster_combat_loop, $mon_copy, $player_name_real);
+                $thr->detach if $thr;
+            }
+        }
+        closedir($dh);
+
+        sleep 0.25;
+    }
+}
+
+sub main {
+    my $num_workers = $ENV{PHOTONMUD_MONSTERAI_WORKERS} || 4;
+    GetOptions("stats" => \$enable_stats);
+
+    log_info("Starting PhotonMUD Monster AI Daemon (hybrid fork/thread) with $num_workers workers...");
+
+    cleanup_monster_state_files();
+    
+    # Note: Broker connection is handled per-worker since sockets can't be shared across forks
+
+    my @pids;
+    for my $worker_id (1..$num_workers) {
+        my $pid = fork();
+        if (!defined $pid) {
+            die "Failed to fork: $!";
+        }
+        if ($pid == 0) {
+            # CHILD: Each worker process runs its own monster threads
+            run_monster_worker($worker_id, $num_workers, $enable_stats);
+            exit 0;
+        } else {
+            push @pids, $pid;
+        }
+    }
+
+    # PARENT: Wait for children
+    $SIG{INT} = $SIG{TERM} = sub {
+        log_info("Shutting down PhotonMUD Monster AI Daemon (parent)...");
+        kill 'TERM', @pids;
+        exit 0;
+    };
+    while (1) {
+        my $kid = waitpid(-1, 0);
+        last if $kid == -1;
+    }
+}
+
+main();
+
+exit 0;

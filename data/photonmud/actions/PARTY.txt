@@ -1,0 +1,31 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR PARTY Command - Group Play & Party Management @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  PARTY INVITE <player>
+  PARTY ACCEPT <player>
+  PARTY LEAVE
+  PARTY LIST
+  PARTY SAY <message>
+
+@DATACLR What it does:@THEMECLR
+  PARTY commands let you form a group with other players for cooperative play.
+  Party members can chat privately, share combat, and coordinate actions.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only one party per player.
+  - The party leader invites; others accept.
+  - PARTY SAY sends a message to all party members.
+  - PARTY LIST shows all members.
+
+@DATACLR Example:@THEMECLR
+  PARTY INVITE Alice
+  PARTY ACCEPT Bob
+  PARTY LEAVE
+  PARTY LIST
+  PARTY SAY Let's stick together!
+
+@DATACLR See also:@THEMECLR
+  SAY, EMOTE, ATTACK, TRADE

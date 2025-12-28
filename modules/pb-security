@@ -1,0 +1,151 @@
+#!/usr/bin/perl
+#
+#  Photon BBS Security Module
+#  (C) 2025 Fewtarius
+#
+#  Provides security validation functions for input sanitization,
+#  path traversal prevention, and safe file operations.
+
+use strict;
+use warnings;
+use Cwd qw(abs_path realpath);
+use File::Spec;
+
+# Export validation functions
+our @EXPORT = qw(
+    validate_filename
+    validate_path
+    validate_username
+    validate_command_arg
+    safe_open_read
+    safe_open_write
+    safe_open_append
+    sanitize_for_shell
+);
+
+# Validate a filename (no path components, safe characters only)
+# Returns sanitized filename or undef if invalid
+sub validate_filename {
+    my ($filename) = @_;
+    return undef unless defined $filename && length($filename) > 0;
+    
+    # Remove any path components
+    $filename =~ s/.*[\/\\]//;
+    
+    # Only allow safe characters: alphanumeric, underscore, dash, dot
+    return undef unless $filename =~ /^[a-zA-Z0-9_.-]+$/;
+    
+    # Prevent hidden files and directory traversal
+    return undef if $filename =~ /^\./;
+    return undef if $filename eq '..';
+    
+    return $filename;
+}
+
+# Validate that a path is within an allowed base directory
+# Prevents path traversal attacks
+# Returns the canonicalized path or undef if invalid
+sub validate_path {
+    my ($path, $allowed_base) = @_;
+    return undef unless defined $path && defined $allowed_base;
+    
+    # Get real paths (resolves symlinks and ..)
+    my $real_path = realpath($path);
+    my $real_base = realpath($allowed_base);
+    
+    return undef unless defined $real_path && defined $real_base;
+    
+    # Ensure the path starts with the allowed base
+    return undef unless $real_path =~ /^\Q$real_base\E/;
+    
+    return $real_path;
+}
+
+# Validate username (alphanumeric and limited special chars)
+sub validate_username {
+    my ($username) = @_;
+    return undef unless defined $username && length($username) > 0;
+    
+    # Only allow safe characters
+    return undef unless $username =~ /^[a-zA-Z0-9_-]{1,32}$/;
+    
+    return $username;
+}
+
+# Validate command argument for external program execution
+# Only allows safe script names
+sub validate_command_arg {
+    my ($arg) = @_;
+    return undef unless defined $arg && length($arg) > 0;
+    
+    # Only allow alphanumeric, underscore, dash, dot
+    # Must not start with dash (prevents option injection)
+    return undef unless $arg =~ /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+    
+    # Prevent common dangerous patterns
+    return undef if $arg =~ /\.\./;          # Directory traversal
+    return undef if $arg =~ /^-/;            # Option injection
+    return undef if $arg =~ /[;&|`\$(){}]/;  # Shell metacharacters
+    
+    return $arg;
+}
+
+# Safe file open for reading with three-arg open and validation
+# Returns filehandle or undef on failure
+sub safe_open_read {
+    my ($filepath, $allowed_base) = @_;
+    
+    # Validate path if base is provided
+    if (defined $allowed_base) {
+        $filepath = validate_path($filepath, $allowed_base);
+        return undef unless defined $filepath;
+    }
+    
+    # Use three-arg open
+    open(my $fh, '<', $filepath) or return undef;
+    return $fh;
+}
+
+# Safe file open for writing with three-arg open
+sub safe_open_write {
+    my ($filepath, $allowed_base) = @_;
+    
+    if (defined $allowed_base) {
+        # For writing, validate the directory exists and is within base
+        my $dir = File::Spec->catpath((File::Spec->splitpath($filepath))[0,1], '');
+        $dir = validate_path($dir, $allowed_base);
+        return undef unless defined $dir;
+    }
+    
+    open(my $fh, '>', $filepath) or return undef;
+    return $fh;
+}
+
+# Safe file open for appending
+sub safe_open_append {
+    my ($filepath, $allowed_base) = @_;
+    
+    if (defined $allowed_base) {
+        my $dir = File::Spec->catpath((File::Spec->splitpath($filepath))[0,1], '');
+        $dir = validate_path($dir, $allowed_base);
+        return undef unless defined $dir;
+    }
+    
+    open(my $fh, '>>', $filepath) or return undef;
+    return $fh;
+}
+
+# Sanitize a string for use in shell commands
+# Returns the sanitized string or empty string if too dangerous
+sub sanitize_for_shell {
+    my ($str) = @_;
+    return '' unless defined $str;
+    
+    # Remove or escape dangerous characters
+    $str =~ s/[`\$(){};\|&<>!\[\]\\]//g;
+    $str =~ s/'/'\\''/g;  # Escape single quotes
+    
+    return $str;
+}
+
+1;

@@ -1,0 +1,546 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use JSON::PP;
+use Data::Dumper;
+
+my $file = shift || 'data/photonmud/rooms.dat';
+my $outfile = shift || 'rooms_3d.html';
+my $reclen = 1096;  # Updated for elevation (4 bytes) and biome (8 bytes)
+
+# Debug flag
+my $DEBUG = 1;
+
+# Biome configuration with visual properties
+my %biome_info = (
+    Grass => { color => '#88cc66', height => 1.0, variance => 0.1 },
+    Forest => { color => '#228B22', height => 1.2, variance => 0.2 },
+    Hill => { color => '#bdb76b', height => 1.8, variance => 0.3 },
+    Swamp => { color => '#556b2f', height => 0.7, variance => 0.1 },
+    Lake => { color => '#3399ff', height => 0.5, variance => 0.0 },
+    River => { color => '#1e90ff', height => 0.5, variance => 0.0 },
+    Mountain => { color => '#888888', height => 3.0, variance => 0.5 },
+    Road => { color => '#ffffff', height => 0.8, variance => 0.0 },
+);
+
+# Structure-specific properties
+my %structure_info = (
+    # Town structures
+    Plaza => { model => 'plaza', color => '#ffcc66', height => 1.0, special => 1 },
+    Shop => { model => 'building', color => '#ffcc99', height => 1.5, roof => 1 },
+    Inn => { model => 'building', color => '#cc9966', height => 2.0, roof => 1 },
+    Temple => { model => 'temple', color => '#ffffff', height => 2.5, roof => 1 },
+    Tavern => { model => 'building', color => '#996633', height => 1.8, roof => 1 },
+    House => { model => 'house', color => '#cc9966', height => 1.2, roof => 1 },
+    Bank => { model => 'bank', color => '#e6c35c', height => 2.0, roof => 1, columns => 1 },
+    
+    # Castle structures - note model types match JavaScript exactly
+    Castle => { model => 'castle', color => '#cccccc', height => 3.0, walls => 1, towers => 1 },
+    CastleRoom => { model => 'castle', color => '#cccccc', height => 2.5, walls => 1 },
+    Keep => { model => 'castle', color => '#666666', height => 3.5, walls => 1, towers => 1 },
+    Tower => { model => 'tower', color => '#999999', height => 4.0, special => 1 },
+    ThroneRoom => { model => 'throne', color => '#ffcc99', height => 2.5, special => 1 },
+    Drawbridge => { model => 'bridge', color => '#996633', height => 1.0, special => 1 },
+    Moat => { model => 'moat', color => '#3366cc', height => 0.5, water => 1 },
+    Yard => { model => 'yard', color => '#88aa66', height => 0.8 },
+    
+    # Underground structures
+    CaveMouth => { model => 'entrance', color => '#666666', height => 1.2, connection => 'Cave' },
+    CaveTunnel => { model => 'tunnel', color => '#444444', height => 1.0, underground => 1 },
+    CaveLake => { model => 'lake', color => '#3366cc', height => 0.5, underground => 1 },
+    DungeonEntrance => { model => 'entrance', color => '#333333', height => 1.2, connection => 'Dungeon' },
+    DungeonCorridor => { model => 'corridor', color => '#222222', height => 1.0, underground => 1 },
+    DungeonVault => { model => 'vault', color => '#664422', height => 1.5, underground => 1, special => 1 },
+);
+
+# Underground connection tracking
+my %underground_links;
+
+# Height scaling factors
+my ($min_elevation, $max_elevation) = (1e9, -1e9);
+
+# Room tracking
+my %rooms;
+my ($minx, $miny, $minz, $maxx, $maxy, $maxz) = (1e9, 1e9, 1e9, -1e9, -1e9, -1e9);
+
+# Feature counting for debug
+my %feature_counts;
+
+sub parse_exits {
+    my ($exits_buf) = @_;
+    my %exits;
+    my @dirs = qw(N E S W NE SE SW NW UP DOWN IN OUT);
+    
+    for my $i (0..11) {
+        my $exit_val = unpack("f<", substr($exits_buf, $i*4, 4));
+        my $exit_idx = int($exit_val + 0.0001);
+        if ($exit_idx > 0) {
+            $exits{$dirs[$i]} = $exit_idx;
+        }
+    }
+    
+    return \%exits;
+}
+
+# Parse room data
+open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
+
+my $record_num = 1;
+while (1) {
+    seek($fh, ($record_num - 1) * $reclen, 0);
+    my $buf;
+    my $read = read($fh, $buf, $reclen);
+    last unless $read && length($buf) == $reclen;
+
+    if ($buf =~ /^\0+$/) {
+        $record_num++;
+        next;
+    }
+
+    my $idx = unpack("S<", substr($buf, 0, 2));
+    my $region = substr($buf, 980, 16); $region =~ s/[\0 ]+$//;
+    my $feature = substr($buf, 996, 16); $feature =~ s/[\0 ]+$//;
+    my $shortdesc = substr($buf, 572, 80); $shortdesc =~ s/[\0 ]+$//;
+    my $stored_elevation = unpack("f<", substr($buf, 1084, 4));
+    my $stored_biome = substr($buf, 1088, 8); $stored_biome =~ s/[\0 ]+$//;
+    
+    $feature_counts{$feature}++ if $feature;
+    
+    if (defined $stored_elevation) {
+        $min_elevation = $stored_elevation if $stored_elevation < $min_elevation;
+        $max_elevation = $stored_elevation if $stored_elevation > $max_elevation;
+    }
+    
+    my ($x, $y, $z) = (-1, -1, 0);
+    if ($shortdesc =~ /\((\d+),\s*(\d+),\s*(\d+)\)/) {
+        ($x, $y, $z) = ($1, $2, $3);
+    } elsif ($shortdesc =~ /\((\d+),\s*(\d+)\)/) {
+        ($x, $y) = ($1, $2);
+    } else {
+        my $WIDTH = 100;
+        $x = ($idx - 1) % $WIDTH;
+        $y = int(($idx - 1) / $WIDTH);
+    }
+
+    $minx = $x if $x < $minx;
+    $miny = $y if $y < $miny;
+    $minz = $z if $z < $minz;
+    $maxx = $x if $x > $maxx;
+    $maxy = $y if $y > $maxy;
+    $maxz = $z if $z > $maxz;
+
+    my $biome = $biome_info{$region} || $biome_info{Grass};
+    my $structure = $structure_info{$feature};
+    
+    my $normalized_elevation = 1.0;
+    if (defined $stored_elevation && $max_elevation > $min_elevation) {
+        $normalized_elevation = ($stored_elevation - $min_elevation) / ($max_elevation - $min_elevation);
+    }
+    
+    if ($feature eq "CaveMouth" || $feature eq "DungeonEntrance") {
+        my $exits = parse_exits(substr($buf, 2, 48));
+        if ($exits->{DOWN}) {
+            $underground_links{$idx} = $exits->{DOWN};
+        }
+    }
+
+    my $height = $normalized_elevation * ($biome->{height} || 1.0);
+    if ($structure) {
+        $height = $structure->{height};
+    }
+    $height *= (1.0 + (rand() * ($biome->{variance} || 0)));
+    $height = 0.2 if $height < 0.2;
+
+    $rooms{"$x,$y,$z"} = {
+        idx => $idx,
+        x => $x,
+        y => $y,
+        z => $z,
+        region => $region,
+        feature => $feature,
+        shortdesc => $shortdesc,
+        color => $structure ? $structure->{color} : $biome->{color},
+        height => $height,
+        raw_elevation => $stored_elevation,
+        normalized_elevation => $normalized_elevation,
+        biome_type => $stored_biome || $region,
+        model_type => $structure ? $structure->{model} : 'basic',
+        has_roof => $structure ? ($structure->{roof} || 0) : 0,
+        has_walls => $structure ? ($structure->{walls} || 0) : 0,
+        has_towers => $structure ? ($structure->{towers} || 0) : 0,
+        has_columns => $structure ? ($structure->{columns} || 0) : 0,
+    };
+
+    $record_num++;
+}
+close($fh);
+
+if ($DEBUG) {
+    print "Feature counts:\n";
+    for my $feature (sort keys %feature_counts) {
+        print "  $feature: $feature_counts{$feature}\n";
+    }
+}
+
+# Generate HTML output
+open(my $html, ">", $outfile) or die "Can't write $outfile: $!";
+my $rooms_json = JSON::PP->new->encode(\%rooms);
+
+print $html <<'HTML_HEAD';
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PhotonMUD 3D Map</title>
+    <style>
+        body { margin: 0; }
+        canvas { display: block; }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: monospace;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="info"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.7/dat.gui.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+HTML_HEAD
+
+print $html "\n<script>\nconst rooms = $rooms_json;\n";
+
+print $html <<'JAVASCRIPT';
+// Scene setup
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Controls
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.screenSpacePanning = false;
+controls.minDistance = 5;
+controls.maxDistance = 500;
+
+// GUI Controls
+const guiControls = {
+    showLevel: 0,
+    levelCount: 0,
+    showAllLevels: true,
+    elevation: true,
+    roomScale: 1.0,
+    opacity: 0.9,
+    showUnderground: false
+};
+
+// Model Geometries
+const geometries = {
+    basic: new THREE.BoxGeometry(1, 1, 1),
+    building: (() => {
+        const geo = new THREE.BoxGeometry(1, 1, 1);
+        const roof = new THREE.ConeGeometry(0.7, 0.5, 4);
+        roof.translate(0, 0.75, 0);
+        return { base: geo, roof };
+    })(),
+    castle: (() => {
+        const keep = new THREE.BoxGeometry(1.8, 2.5, 1.8);
+        const tower = new THREE.CylinderGeometry(0.3, 0.35, 3.0, 8);
+        const towers = [];
+        [-0.8, 0.8].forEach(x => 
+            [-0.8, 0.8].forEach(z => {
+                const t = tower.clone();
+                t.translate(x, 0.25, z);
+                towers.push(t);
+            })
+        );
+        const wallH = new THREE.BoxGeometry(2.2, 1.8, 0.3);
+        const wallV = new THREE.BoxGeometry(0.3, 1.8, 2.2);
+        const walls = [
+            { geo: wallH.clone(), pos: [0, -0.25, -0.9] },
+            { geo: wallH.clone(), pos: [0, -0.25, 0.9] },
+            { geo: wallV.clone(), pos: [-0.9, -0.25, 0] },
+            { geo: wallV.clone(), pos: [0.9, -0.25, 0] }
+        ];
+        return { keep, towers, walls };
+    })(),
+    moat: (() => {
+        const geo = new THREE.BoxGeometry(2.0, 0.5, 2.0);
+        geo.translate(0, -0.25, 0);
+        return geo;
+    })(),
+    bridge: (() => {
+        const base = new THREE.BoxGeometry(0.6, 0.2, 2.0);
+        const rail1 = new THREE.BoxGeometry(0.1, 0.3, 2.0);
+        const rail2 = rail1.clone();
+        rail1.translate(-0.25, 0.25, 0);
+        rail2.translate(0.25, 0.25, 0);
+        return { base, rails: [rail1, rail2] };
+    })(),
+    bank: (() => {
+        const base = new THREE.BoxGeometry(1.2, 1, 1.2);
+        const roof = new THREE.CylinderGeometry(0.8, 0.8, 0.4, 8);
+        const column = new THREE.CylinderGeometry(0.1, 0.1, 1, 8);
+        const columns = [];
+        [-0.4, 0.4].forEach(x => {
+            const c = column.clone();
+            c.translate(x, 0, 0.5);
+            columns.push(c);
+        });
+        return { base, roof, columns };
+    })(),
+    entrance: new THREE.CylinderGeometry(0.5, 0.5, 1, 8),
+    underground: new THREE.BoxGeometry(0.8, 0.8, 0.8)
+};
+
+// Room Creation Function
+function createRoomMesh(room) {
+    let mesh;
+    const material = new THREE.MeshPhongMaterial({
+        color: room.color,
+        transparent: true,
+        opacity: guiControls.opacity
+    });
+
+    switch(room.model_type) {
+        case 'castle':
+            mesh = new THREE.Group();
+            // Keep
+            const keep = new THREE.Mesh(geometries.castle.keep, material);
+            mesh.add(keep);
+            
+            // Towers - only add if room has towers flag
+            if (room.has_towers) {
+                const towerMat = material.clone();
+                towerMat.color.multiplyScalar(0.9);
+                geometries.castle.towers.forEach(towerGeo => {
+                    const tower = new THREE.Mesh(towerGeo, towerMat);
+                    mesh.add(tower);
+                });
+            }
+            
+            // Walls
+            if (room.has_walls) {
+                const wallMat = material.clone();
+                wallMat.color.multiplyScalar(0.85);
+                geometries.castle.walls.forEach(wall => {
+                    const wallMesh = new THREE.Mesh(wall.geo, wallMat);
+                    wallMesh.position.set(...wall.pos);
+                    mesh.add(wallMesh);
+                });
+            }
+            mesh.scale.multiplyScalar(1.5);
+            break;
+
+        case 'moat':
+            mesh = new THREE.Mesh(geometries.moat, material);
+            material.transparent = true;
+            material.opacity = 0.7;
+            break;
+
+        case 'bridge':
+            mesh = new THREE.Group();
+            const bridgeBase = new THREE.Mesh(geometries.bridge.base, material);
+            mesh.add(bridgeBase);
+            const railMat = material.clone();
+            railMat.color.multiplyScalar(0.8);
+            geometries.bridge.rails.forEach(railGeo => {
+                const rail = new THREE.Mesh(railGeo, railMat);
+                mesh.add(rail);
+            });
+            break;
+
+        case 'bank':
+            mesh = new THREE.Group();
+            const base = new THREE.Mesh(geometries.bank.base, material);
+            mesh.add(base);
+            
+            if (room.has_columns) {
+                const columnMat = material.clone();
+                columnMat.color.multiplyScalar(1.1);
+                geometries.bank.columns.forEach(columnGeo => {
+                    const column = new THREE.Mesh(columnGeo, columnMat);
+                    mesh.add(column);
+                });
+            }
+            
+            if (room.has_roof) {
+                const roofMat = material.clone();
+                roofMat.color.multiplyScalar(0.8);
+                const roof = new THREE.Mesh(geometries.bank.roof, roofMat);
+                roof.position.y = 0.7;
+                mesh.add(roof);
+            }
+            break;
+
+        case 'building':
+            mesh = new THREE.Group();
+            const buildingBase = new THREE.Mesh(geometries.building.base, material);
+            mesh.add(buildingBase);
+            if (room.has_roof) {
+                const roofMat = material.clone();
+                roofMat.color.multiplyScalar(0.8);
+                const roof = new THREE.Mesh(geometries.building.roof, roofMat);
+                mesh.add(roof);
+            }
+            break;
+
+        case 'entrance':
+            mesh = new THREE.Mesh(geometries.entrance, material);
+            if (room.feature === "CaveMouth" || room.feature === "DungeonEntrance") {
+                const arrow = new THREE.Mesh(
+                    new THREE.ConeGeometry(0.2, 0.4, 8),
+                    new THREE.MeshPhongMaterial({ color: 0xff0000 })
+                );
+                arrow.rotation.x = Math.PI;
+                arrow.position.y = -0.6;
+                mesh.add(arrow);
+            }
+            break;
+
+        default:
+            mesh = new THREE.Mesh(geometries.basic, material);
+            break;
+    }
+
+    mesh.position.set(room.x, room.z * 2 + room.height/2, room.y);
+    if (!(mesh instanceof THREE.Group)) {
+        mesh.scale.set(1, room.height, 1);
+    }
+    mesh.userData.room = room;
+    return mesh;
+}
+
+// Create Rooms
+const roomMeshes = [];
+let centerX = 0, centerY = 0, centerZ = 0;
+let roomCount = 0;
+
+Object.entries(rooms).forEach(([key, room]) => {
+    const mesh = createRoomMesh(room);
+    scene.add(mesh);
+    roomMeshes.push(mesh);
+    
+    centerX += room.x;
+    centerY += room.z * 2;
+    centerZ += room.y;
+    roomCount++;
+});
+
+// Center camera
+centerX /= roomCount || 1;
+centerY /= roomCount || 1;
+centerZ /= roomCount || 1;
+
+camera.position.set(centerX + 50, Math.max(centerY + 50, 50), centerZ + 50);
+camera.lookAt(centerX, centerY, centerZ);
+controls.target.set(centerX, centerY, centerZ);
+
+// Lighting
+const ambientLight = new THREE.AmbientLight(0x404040);
+scene.add(ambientLight);
+
+const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+directionalLight.position.set(1, 1, 1);
+scene.add(directionalLight);
+
+// GUI
+const gui = new dat.GUI();
+gui.add(guiControls, 'showAllLevels').name('Show All Levels').onChange(updateVisibility);
+gui.add(guiControls, 'elevation').name('Show Elevation').onChange(updateVisibility);
+gui.add(guiControls, 'roomScale', 0.5, 2.0).name('Room Scale').onChange(updateScale);
+gui.add(guiControls, 'opacity', 0.1, 1.0).name('Opacity').onChange(updateOpacity);
+gui.add(guiControls, 'showUnderground').name('Show Underground').onChange(updateVisibility);
+
+function updateVisibility() {
+    roomMeshes.forEach(mesh => {
+        const room = mesh.userData.room;
+        const isUnderground = room.region === 'Cave' || room.region === 'Dungeon';
+        mesh.visible = (guiControls.showAllLevels || room.z === guiControls.showLevel) &&
+                      (guiControls.showUnderground || !isUnderground);
+    });
+}
+
+function updateScale() {
+    roomMeshes.forEach(mesh => {
+        if (mesh instanceof THREE.Group) {
+            mesh.scale.set(guiControls.roomScale, mesh.scale.y, guiControls.roomScale);
+        } else {
+            mesh.scale.x = mesh.scale.z = guiControls.roomScale;
+        }
+    });
+}
+
+function updateOpacity() {
+    roomMeshes.forEach(mesh => {
+        if (mesh instanceof THREE.Group) {
+            mesh.children.forEach(child => child.material.opacity = guiControls.opacity);
+        } else {
+            mesh.material.opacity = guiControls.opacity;
+        }
+    });
+}
+
+// Mouse interaction
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const infoDiv = document.getElementById('info');
+
+function onMouseMove(event) {
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects(roomMeshes, true);
+    
+    if (intersects.length > 0) {
+        const mesh = intersects[0].object;
+        const room = mesh.parent?.userData.room || mesh.userData.room;
+        infoDiv.innerHTML = `Room ${room.idx}<br>` +
+            `Region: ${room.region}<br>` +
+            `Feature: ${room.feature}<br>` +
+            `Model: ${room.model_type}<br>` +
+            `Level: ${room.z}<br>` +
+            `Elevation: ${room.raw_elevation?.toFixed(2) || 'N/A'}<br>` +
+            `Height: ${room.height.toFixed(2)}<br>` +
+            `Biome: ${room.biome_type || 'N/A'}`;
+    } else {
+        infoDiv.innerHTML = '';
+    }
+}
+
+document.addEventListener('mousemove', onMouseMove);
+
+// Animation loop
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+
+animate();
+
+// Window resize handler
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}, false);
+
+// Initial update
+updateVisibility();
+JAVASCRIPT
+
+print $html "</script>\n</body>\n</html>\n";
+close($html);
+print "3D visualization written to $outfile\n";

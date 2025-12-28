@@ -4,6 +4,19 @@
 #  (C) 2002-2013 Fewtarius
 
 use Fcntl qw(:DEFAULT :flock);
+use POSIX qw(strftime);
+
+# ============================================================================
+# DATE/TIME HELPERS - Use Perl instead of forking to `date` command
+# ============================================================================
+sub get_current_time {
+    return strftime("%H:%M", localtime);
+}
+
+sub get_current_date {
+    return strftime("%Y-%b-%d", localtime);
+}
+# ============================================================================
 
 sub doevents {
   $currenttime=time;
@@ -33,13 +46,13 @@ sub section_header {
     my ($label) = @_;
     use constant BORDER_LEN => 79;
     my $pad = int((BORDER_LEN - length($label) - 4) / 2);
-    # ───┤ label ├─── using CP437 box drawing
-    return (chr(196) x $pad) . chr(180) . " $label " . chr(195) . (chr(196) x ($pad + (BORDER_LEN - length($label) - 4) % 2));
+    # ───┤ label ├─── using PETSCII for C64, CP437 for modern terminals
+    return (boxchar('horizontal') x $pad) . boxchar('tleft') . " $label " . boxchar('tright') . (boxchar('horizontal') x ($pad + (BORDER_LEN - length($label) - 4) % 2));
 }
 
 sub section_footer {
-    my $border = chr(196) x 79;
-    return chr(192) . $border . chr(217);
+    my $border = boxchar('horizontal') x 79;
+    return boxchar('bottomleft') . $border . boxchar('bottomright');
 }
 
 sub usersonline {
@@ -111,19 +124,35 @@ sub whosonline {
   # Sort by node number
   @whosonline = sort { $a->{node} <=> $b->{node} } @whosonline;
 
-  # Display the header (widen Location to 32 chars for longer descriptions)
-  writeline($config{'systemcolor'} . sprintf("%-4s %-10s %-7s %-32s %-5s %-10s", "Node", "User", "Via", "Location", "Idle", "Status"), 1);
-
-  # Display each user's data (truncate fields as needed)
-  foreach my $entry (@whosonline) {
-    my $node      = $entry->{node};
-    my $user      = substr($entry->{user}, 0, 10);
-    my $proto     = substr($entry->{proto}, 0, 7);
-    my $location  = substr($entry->{location}, 0, 32);
-    my $idle_time = substr($entry->{idle_time}, 0, 5);
-    my $status    = substr($entry->{status}, 0, 10);
-    printf "%-4s %-10s %-7s %-32s %-5s %-10s\n",
-      $node, $user, $proto, $location, $idle_time, $status;
+  # Width-aware display format
+  my $width = $config{'terminal_width'} || 80;
+  
+  if ($width == 40) {
+    # 40-column format: Node(4) User(10) Via(7) Loc(16) = 37 chars
+    writeline($config{'systemcolor'} . sprintf("%-4s %-10s %-7s %-16s", "Node", "User", "Via", "Location"), 1);
+    
+    foreach my $entry (@whosonline) {
+      my $node      = $entry->{node};
+      my $user      = substr($entry->{user}, 0, 10);
+      my $proto     = substr($entry->{proto}, 0, 7);
+      my $location  = substr($entry->{location}, 0, 16);
+      printf "%-4s %-10s %-7s %-16s\n",
+        $node, $user, $proto, $location;
+    }
+  } else {
+    # 80-column format: original spacing
+    writeline($config{'systemcolor'} . sprintf("%-4s %-10s %-7s %-32s %-5s %-10s", "Node", "User", "Via", "Location", "Idle", "Status"), 1);
+    
+    foreach my $entry (@whosonline) {
+      my $node      = $entry->{node};
+      my $user      = substr($entry->{user}, 0, 10);
+      my $proto     = substr($entry->{proto}, 0, 7);
+      my $location  = substr($entry->{location}, 0, 32);
+      my $idle_time = substr($entry->{idle_time}, 0, 5);
+      my $status    = substr($entry->{status}, 0, 10);
+      printf "%-4s %-10s %-7s %-32s %-5s %-10s\n",
+        $node, $user, $proto, $location, $idle_time, $status;
+    }
   }
 
   # If no users are online, display a message
@@ -149,9 +178,9 @@ sub iamat {
   $location = $_[1];
   $whofile = $config{'home'} . $config{'nodes'} . "/" . $info{'node'};
   lockfile("$whofile");
-  open(who, ">$whofile");
-  print who $sysinfo{'ip'} . "|" . $info{'node'} . "|" . $$ . "|" . time . "|" . $info{'handle'} . "|" . $info{'proto'} . "|" . $location;
-  close(who);
+  open(my $who_fh, '>', $whofile);
+  print $who_fh $sysinfo{'ip'} . "|" . $info{'node'} . "|" . $$ . "|" . time . "|" . $info{'handle'} . "|" . $info{'proto'} . "|" . $location;
+  close($who_fh);
   unlockfile("$whofile");
 }
 
@@ -171,20 +200,20 @@ sub bye {
   if ($config{'nodupes'} eq 1) {
     if (-e "$config{'home'}$config{'data'}/iplist") {
       lockfile("$config{'home'}$config{'data'}/iplist");
-      open (in,"<$config{'home'}$config{'data'}/iplist");
+      open (my $in_fh, '<', "$config{'home'}$config{'data'}/iplist");
       lockfile("$config{'home'}$config{'data'}/iplist_");
-      open (out,">$config{'home'}$config{'data'}/iplist_");
-       while (<in>) {
+      open (my $out_fh, '>', "$config{'home'}$config{'data'}/iplist_");
+       while (<$in_fh>) {
         chomp $_;
         if ($_ =~/$info{'connect'}/i) {
           next;
         } else {
-           print out $_."\n";
+           print $out_fh $_."\n";
         }
       }
-      close(out);
+      close($out_fh);
       unlockfile("$config{'home'}$config{'data'}/iplist_");
-      close(in);
+      close($in_fh);
       unlockfile("$config{'home'}$config{'data'}/iplist");
       unlink ("$config{'home'}$config{'data'}/iplist");
       rename ("$config{'home'}$config{'data'}/iplist_","$config{'home'}$config{'data'}/iplist");
@@ -284,19 +313,141 @@ sub colorize {
   }
 }
 
+# ============================================================================
+# TERMINAL DETECTION - Detect terminal width and height capabilities
+# ============================================================================
+sub detect_terminal_size {
+  my $width = undef;   # Start with undefined
+  my $height = undef;
+  
+  # Check environment variables only (stty causes hangs on some terminals)
+  # DEBUG: Write to temp file
+  if (open(my $fh, '>>', '/tmp/photonbbs-debug.log')) {
+    print $fh "detect_terminal_size called at " . scalar(localtime) . "\n";
+    print $fh "COLUMNS=" . ($ENV{'COLUMNS'} // 'undef') . "\n";
+    print $fh "LINES=" . ($ENV{'LINES'} // 'undef') . "\n";
+    close $fh;
+  }
+  
+  if ($ENV{'COLUMNS'} && $ENV{'COLUMNS'} =~ /^\d+$/ && $ENV{'COLUMNS'} > 0) {
+    $width = $ENV{'COLUMNS'};
+  }
+  if ($ENV{'LINES'} && $ENV{'LINES'} =~ /^\d+$/ && $ENV{'LINES'} > 0) {
+    $height = $ENV{'LINES'};
+  }
+  
+  return ($width, $height);
+}
+
+sub initialize_terminal_config {
+  my ($width, $height);
+  
+  # DEBUG: Log entry
+  open(my $dbg, '>>', '/tmp/photonbbs-perl-debug.log');
+  print $dbg "=== initialize_terminal_config called ===\n";
+  print $dbg "info{terminal_width} = " . ($info{'terminal_width'} // 'undef') . "\n";
+  close($dbg);
+  
+  # Check if user has a saved terminal preference in their profile
+  if (defined $info{'terminal_width'} && $info{'terminal_width'} > 0) {
+    $width = $info{'terminal_width'};
+    $height = ($width == 40) ? 25 : 24;
+  } else {
+    # No saved preference - try environment detection
+    ($width, $height) = detect_terminal_size();
+    
+    # If no environment vars, default to 80x24
+    $width //= 80;
+    $height //= 24;
+  }
+  
+  # Validate reasonable ranges
+  $width = 40 if ($width < 40);
+  $width = 255 if ($width > 255);
+  $height = 24 if ($height < 24);
+  $height = 66 if ($height > 66);
+  
+  # Store in config for session-wide access
+  $config{'terminal_width'} = $width;
+  $config{'terminal_height'} = $height;
+  
+  # DEBUG: Log final values
+  open($dbg, '>>', '/tmp/photonbbs-perl-debug.log');
+  print $dbg "Final width = $width\n";
+  print $dbg "Final height = $height\n";
+  print $dbg "config{terminal_width} = " . $config{'terminal_width'} . "\n";
+  close($dbg);
+  
+  # Update rows for pagination
+  $config{'rows'} = $height - 1;
+  
+  # Determine UI mode based on width
+  if ($width < 60) {
+    $config{'ui_mode'} = 'compact';
+  } elsif ($width >= 100) {
+    $config{'ui_mode'} = 'enhanced';
+  } else {
+    $config{'ui_mode'} = 'standard';
+  }
+  
+  return ($width, $height);
+}
+
+# ============================================================================
+# BOX DRAWING CHARACTERS - PETSCII vs CP437
+# ============================================================================
+# Returns appropriate box-drawing character based on terminal width
+# C64 (40-column) uses PETSCII, modern terminals (80-column) use CP437
+sub boxchar {
+  my ($type) = @_;
+  my $width = $config{'terminal_width'} || 80;
+  
+  # Character mappings: PETSCII (C64) vs CP437 (modern ANSI)
+  my %chars = (
+    # Single-line box drawing
+    'horizontal'   => { petscii => chr(64),  cp437 => chr(196) },  # ─
+    'vertical'     => { petscii => chr(93),  cp437 => chr(179) },  # │
+    'topleft'      => { petscii => chr(85),  cp437 => chr(218) },  # ┌
+    'topright'     => { petscii => chr(73),  cp437 => chr(191) },  # ┐
+    'bottomleft'   => { petscii => chr(74),  cp437 => chr(192) },  # └
+    'bottomright'  => { petscii => chr(75),  cp437 => chr(217) },  # ┘
+    'tdown'        => { petscii => chr(77),  cp437 => chr(194) },  # ┬
+    'tup'          => { petscii => chr(78),  cp437 => chr(193) },  # ┴
+    'tright'       => { petscii => chr(107), cp437 => chr(195) },  # ├
+    'tleft'        => { petscii => chr(115), cp437 => chr(180) },  # ┤
+    
+    # Double-line box drawing (CP437 only, use single-line for PETSCII)
+    'dhorizontal'  => { petscii => chr(64),  cp437 => chr(205) },  # ═
+    'dvertical'    => { petscii => chr(93),  cp437 => chr(186) },  # ║
+    'dtopleft'     => { petscii => chr(85),  cp437 => chr(201) },  # ╔
+    'dtopright'    => { petscii => chr(73),  cp437 => chr(187) },  # ╗
+    'dbottomleft'  => { petscii => chr(74),  cp437 => chr(200) },  # ╚
+    'dbottomright' => { petscii => chr(75),  cp437 => chr(188) },  # ╝
+  );
+  
+  # Return appropriate character
+  if (exists $chars{$type}) {
+    return ($width == 40) ? $chars{$type}{petscii} : $chars{$type}{cp437};
+  }
+  
+  # Fallback to space if unknown type
+  return ' ';
+}
+# ============================================================================
+
 sub applytheme {
   $thmfile=$config{'home'}.$config{'themes'}."/".$_[0];
   if (-e $thmfile) {
     lockfile("$thmfile");
-    open (atheme,"<$thmfile");
-     @themein=<atheme>;
-    close (atheme);
+    open (my $atheme_fh, '<', $thmfile);
+     @themein=<$atheme_fh>;
+    close ($atheme_fh);
     unlockfile("$thmfile");
   } else {
     errorout ("Could not load theme file [".$thmfile."] , exiting..".$RST);
   }
-  chomp ($ctime=`date +\%H:\%M`);
-  chomp ($cdate=`date +\%Y-\%h-\%d`);
+  $ctime = get_current_time();
+  $cdate = get_current_date();
   $menu=lc($menuname);
   foreach (@themein) {
     ($key,$value) = split(/\=/);
@@ -311,6 +462,25 @@ sub applytheme {
       $$key =~s/\@PROMPTCLR/$config{'promptcolor'}/g;
       $$key =~s/\@DATACLR/$config{'datacolor'}/g;
       $$key =~s/\@LINECLR/$config{'linecolor'}/g;
+      
+      # Box-drawing character macros (PETSCII-aware)
+      $$key =~s/\@BOXHORIZ\@/boxchar('horizontal')/eg;
+      $$key =~s/\@BOXVERT\@/boxchar('vertical')/eg;
+      $$key =~s/\@BOXTOPLEFT\@/boxchar('topleft')/eg;
+      $$key =~s/\@BOXTOPRIGHT\@/boxchar('topright')/eg;
+      $$key =~s/\@BOXBOTLEFT\@/boxchar('bottomleft')/eg;
+      $$key =~s/\@BOXBOTRIGHT\@/boxchar('bottomright')/eg;
+      $$key =~s/\@BOXTDOWN\@/boxchar('tdown')/eg;
+      $$key =~s/\@BOXTUP\@/boxchar('tup')/eg;
+      $$key =~s/\@BOXTLEFT\@/boxchar('tleft')/eg;
+      $$key =~s/\@BOXTRIGHT\@/boxchar('tright')/eg;
+      $$key =~s/\@DBOXHORIZ\@/boxchar('dhorizontal')/eg;
+      $$key =~s/\@DBOXVERT\@/boxchar('dvertical')/eg;
+      $$key =~s/\@DBOXTOPLEFT\@/boxchar('dtopleft')/eg;
+      $$key =~s/\@DBOXTOPRIGHT\@/boxchar('dtopright')/eg;
+      $$key =~s/\@DBOXBOTLEFT\@/boxchar('dbottomleft')/eg;
+      $$key =~s/\@DBOXBOTRIGHT\@/boxchar('dbottomright')/eg;
+      
       $$key =~s/\@USRNM/$info{'username'}/g;
       $$key =~s/\@SYSNM/$config{'systemname'}/g;
       $$key =~s/\@MENU/$menu/g;
@@ -365,22 +535,24 @@ sub lockfile {
     logger("ERROR: $info{'handle'} forced unlock on $tolock");
     unlink("$tolock.lock");
   }
-  open(out,">$tolock.lock");
-    print out $info{'handle'};
-  close(out);
+  open(my $lock_fh, '>', "$tolock.lock");
+    print $lock_fh $info{'handle'};
+  close($lock_fh);
   chmod 0777,"$tolock.lock";
+  return 1;  # Return success
 }
 
 sub unlockfile {
    $tolock=$_[0];
    unlink("$tolock.lock");
+   return 1;  # Return success
 }
 
 sub readconfig {
   $rfile=$config{'home'}.$config{'data'}."/".$_[0];
   lockfile("$rfile");
-  open (config,"<$rfile");
-  while (<config>) {
+  open (my $config_fh, '<', $rfile);
+  while (<$config_fh>) {
     $line=$_;
     chomp $line;
     unless ($line =~/^#/) {
@@ -395,11 +567,14 @@ sub readconfig {
       $config{$key}=$value;
     }
   }
-  close (config);
+  close ($config_fh);
   unlockfile("$rfile");
 }
 
 sub cbreak {
+  # Skip stty commands if we don't have a valid TTY
+  return if (!defined $mytty || $mytty eq "" || $mytty =~ /not a tty/i);
+  
   if ($_[0] eq "on") {
     if ($BSD_STYLE) {
       system "stty -echo cbreak <$mytty >$mytty 2>&1";
@@ -483,11 +658,27 @@ sub getline {
   $input{'text'}=$_[2];
   $result="";
   if ($_[3]) {
-    $result=$input{'text'};
-    for (1..$input{'length'}) {
+    # Width-aware input field sizing for C64 40-column support
+    my $term_width = $config{'terminal_width'} || 80;
+    
+    # Strip ANSI escape codes from prompt to get visible length
+    my $visible_text = $input{'text'};
+    $visible_text =~ s/\e\[[0-9;]*m//g;  # Remove ANSI color codes
+    my $prompt_len = length($visible_text);
+    
+    my $max_field = $term_width - $prompt_len - 2;  # Leave 2 chars margin
+    
+    # Cap input field width to available space
+    my $field_width = $input{'length'};
+    if ($field_width > $max_field && $max_field > 0) {
+      $field_width = $max_field;
+    }
+    
+    # Draw input field with white background
+    for (1..$field_width) {
       print "\e[0;47;0m ";   ### Add to theme file!
     }
-    print "\e[".$input{'length'}."D";
+    print "\e[".$field_width."D";
   }
   writeline ($config{'inputcolor'}.$input{'text'});
   for (;;) {
@@ -511,7 +702,8 @@ sub getline {
       }
       cbreak(off);
       if ($input{'type'} =~/chat/) {
-        print "\e[80D\e[2K";
+        my $width = $config{'terminal_width'} || 80;
+        print "\e[${width}D\e[2K";
       } else {
         writeline("\n");
       }
@@ -602,6 +794,25 @@ sub colorline {
   $_[0] =~s/\@PROMPTCLR/$config{'promptcolor'}/g;
   $_[0] =~s/\@DATACLR/$config{'datacolor'}/g;
   $_[0] =~s/\@LINECLR/$config{'linecolor'}/g;
+  
+  # Box-drawing character macros (PETSCII-aware)
+  $_[0] =~s/\@BOXHORIZ\@/boxchar('horizontal')/eg;
+  $_[0] =~s/\@BOXVERT\@/boxchar('vertical')/eg;
+  $_[0] =~s/\@BOXTOPLEFT\@/boxchar('topleft')/eg;
+  $_[0] =~s/\@BOXTOPRIGHT\@/boxchar('topright')/eg;
+  $_[0] =~s/\@BOXBOTLEFT\@/boxchar('bottomleft')/eg;
+  $_[0] =~s/\@BOXBOTRIGHT\@/boxchar('bottomright')/eg;
+  $_[0] =~s/\@BOXTDOWN\@/boxchar('tdown')/eg;
+  $_[0] =~s/\@BOXTUP\@/boxchar('tup')/eg;
+  $_[0] =~s/\@BOXTLEFT\@/boxchar('tleft')/eg;
+  $_[0] =~s/\@BOXTRIGHT\@/boxchar('tright')/eg;
+  $_[0] =~s/\@DBOXHORIZ\@/boxchar('dhorizontal')/eg;
+  $_[0] =~s/\@DBOXVERT\@/boxchar('dvertical')/eg;
+  $_[0] =~s/\@DBOXTOPLEFT\@/boxchar('dtopleft')/eg;
+  $_[0] =~s/\@DBOXTOPRIGHT\@/boxchar('dtopright')/eg;
+  $_[0] =~s/\@DBOXBOTLEFT\@/boxchar('dbottomleft')/eg;
+  $_[0] =~s/\@DBOXBOTRIGHT\@/boxchar('dbottomright')/eg;
+  
   $_[0] =~s/\@RST/$RST/g;
   $_[0] =~s/\@BLK/$BLK/g;
   $_[0] =~s/\@RED/$RED/g;
@@ -623,20 +834,85 @@ sub colorline {
 }
 
 sub readfile {
-  if ($_[2]) {
-    $filename=$_[0];
-  } else {
-      $filename=$config{'home'}.$config{'text'}."/".$_[0];
+  my $requested_file = $_[0];
+  my $pause = $_[1];
+  my $absolute = $_[2];
+  my $filename;
+  
+  # Auto-select width-specific file variant if terminal width is 40
+  unless ($absolute) {
+    my $width = $config{'terminal_width'} || 80;
+    if ($width == 40) {
+      # Try width-specific file first (e.g., welcome.asc -> welcome-40.asc)
+      my $width_specific = $requested_file;
+      $width_specific =~ s/(\.\w+)$/-40$1/;  # Insert -40 before extension
+      my $width_file = $config{'home'} . $config{'text'} . "/" . $width_specific;
+      
+      if (-e $width_file && -r $width_file) {
+        $requested_file = $width_specific;  # Use the 40-column version
+      }
+    }
   }
-  $pause=$_[1];
+  
+  if ($absolute) {
+    $filename = $requested_file;
+  } else {
+    $filename = $config{'home'} . $config{'text'} . "/" . $requested_file;
+  }
+  
+  # SECURITY: Basic path traversal protection
+  # Check for directory traversal patterns
+  if ($requested_file =~ /\.\./) {
+    errorout("Security: Invalid file path requested: $requested_file");
+    return;
+  }
+  
+  # For relative paths, reject absolute path injection attempts
+  if (!$absolute && $requested_file =~ /^\//) {
+    errorout("Security: Invalid file path requested: $requested_file");
+    return;
+  }
+  
+  # Verify file exists and is readable before further processing
+  unless (-e $filename && -r $filename) {
+    # File doesn't exist - not a security error, just missing file
+    return;
+  }
+  
+  # SECURITY: Canonicalize and verify path is within allowed directories
+  # Note: We check against multiple allowed bases since data dir may be a symlink
+  use Cwd qw(realpath abs_path);
+  my $real_path = realpath($filename);
+  
+  # Define allowed base directories (resolve symlinks in data paths too)
+  my @allowed_bases = (
+    realpath($config{'home'}),                    # /opt/photonbbs
+    realpath($config{'home'} . $config{'data'}),  # data directory (may be symlink)
+    realpath($config{'home'} . $config{'text'}),  # text directory
+  );
+  
+  # Verify path is within at least one allowed base directory
+  my $path_valid = 0;
+  for my $base (@allowed_bases) {
+    if (defined $real_path && defined $base && $real_path =~ /^\Q$base\E/) {
+      $path_valid = 1;
+      last;
+    }
+  }
+  
+  unless ($path_valid) {
+    errorout("Security: Path outside allowed directory: $requested_file");
+    return;
+  }
+  
   usersonline();
   lockfile("$filename") || errorout ("Unable to open $filename");
-  open (file,"<$filename") || errorout ("Unable to open $filename");
-  $linecount=1;
-  $menu=lc($menuname);
-  chomp ($ctime=`date +\%H:\%M`);
-  chomp ($cdate=`date +\%Y-\%h-\%d`);
-  while (<file>) {
+  open (my $file_fh, '<', $filename) || errorout ("Unable to open $filename");
+  my $linecount=1;
+  my $menu=lc($menuname);
+  my $ctime = get_current_time();
+  my $cdate = get_current_date();
+  while (<$file_fh>) {
     s/\@SYSTEMCLR/$config{'systemcolor'}/g;
     s/\@USERCLR/$config{'usercolor'}/g;
     s/\@INPUTCLR/$config{'inputcolor'}/g;
@@ -645,6 +921,27 @@ sub readfile {
     s/\@PROMPTCLR/$config{'promptcolor'}/g;
     s/\@DATACLR/$config{'datacolor'}/g;
     s/\@LINECLR/$config{'linecolor'}/g;
+    
+    # Box-drawing character macros (PETSCII-aware)
+    s/\@BOXHORIZ\@/boxchar('horizontal')/eg;
+    s/\@BOXVERT\@/boxchar('vertical')/eg;
+    s/\@BOXTOPLEFT\@/boxchar('topleft')/eg;
+    s/\@BOXTOPRIGHT\@/boxchar('topright')/eg;
+    s/\@BOXBOTLEFT\@/boxchar('bottomleft')/eg;
+    s/\@BOXBOTRIGHT\@/boxchar('bottomright')/eg;
+    s/\@BOXTDOWN\@/boxchar('tdown')/eg;
+    s/\@BOXTUP\@/boxchar('tup')/eg;
+    s/\@BOXTLEFT\@/boxchar('tleft')/eg;
+    s/\@BOXTRIGHT\@/boxchar('tright')/eg;
+    
+    # Double-line box-drawing macros
+    s/\@DBOXHORIZ\@/boxchar('dhorizontal')/eg;
+    s/\@DBOXVERT\@/boxchar('dvertical')/eg;
+    s/\@DBOXTOPLEFT\@/boxchar('dtopleft')/eg;
+    s/\@DBOXTOPRIGHT\@/boxchar('dtopright')/eg;
+    s/\@DBOXBOTLEFT\@/boxchar('dbottomleft')/eg;
+    s/\@DBOXBOTRIGHT\@/boxchar('dbottomright')/eg;
+    
     s/\@SYSNM/$config{'systemname'}/g;
     s/\@NODE/$info{'node'}/g;
     s/\@CONNECT/$info{'connect'}/g;
@@ -699,7 +996,8 @@ sub readfile {
     } else {
       chomp $_;
       unless ($_ eq "") {
-        print "\e[80D\e[2K".$_."\n";
+        my $width = $config{'terminal_width'} || 80;
+        print "\e[${width}D\e[2K".$_."\n";
         $gotapage="1";
       }
     }
@@ -723,8 +1021,8 @@ sub readfile {
       }
     }
   }
-  close (file);
-  unlockfile("$filename") || errorout ("Unable to open $filename");
+  close ($file_fh);
+  unlockfile("$filename") || errorout ("Unable to close $filename");
 }
 
 sub pause {
@@ -733,7 +1031,8 @@ sub pause {
   $key=waitkey();
   $noevents="";
   $key=uc($key);
-  print "\e[2K\e[80D";
+  my $width = $config{'terminal_width'} || 80;
+  print "\e[2K\e[${width}D";
   unless ($key =~/C/ || $key =~/N/ || $key =~/Q/) {
     $key="N";
   }
@@ -791,15 +1090,15 @@ sub hi {
 
   if ($config{'nodupes'} eq 1) {
     unless (-e "$config{'home'}$config{'data'}/iplist") {
-      open (out,">$config{'home'}$config{'data'}/iplist");
-       print out "UNKNOWNUSER\n";
-      close(out);
+      open (my $out_fh, '>', "$config{'home'}$config{'data'}/iplist");
+       print $out_fh "UNKNOWNUSER\n";
+      close($out_fh);
     }
     # Always lock before reading or writing
     lockfile("$config{'home'}$config{'data'}/iplist");
-    open (in,"<$config{'home'}$config{'data'}/iplist");
-    my @lines = <in>;
-    close(in);
+    open (my $in_fh, '<', "$config{'home'}$config{'data'}/iplist");
+    my @lines = <$in_fh>;
+    close($in_fh);
 
     # Check for duplicates
     foreach my $line (@lines) {
@@ -815,9 +1114,9 @@ sub hi {
     }
 
     # Add this session
-    open (out,">>$config{'home'}$config{'data'}/iplist");
-    print out getppid.":".$info{'connect'}."\n";
-    close(out);
+    open (my $out_fh, '>>', "$config{'home'}$config{'data'}/iplist");
+    print $out_fh getppid.":".$info{'connect'}."\n";
+    close($out_fh);
     unlockfile("$config{'home'}$config{'data'}/iplist");
   }
 
@@ -888,34 +1187,34 @@ sub hi {
 
   if (-e "$config{'home'}$config{'data'}/banned_ip") {
     lockfile("$config{'home'}$config{'data'}/banned_ip");
-    open (in,"<$config{'home'}$config{'data'}/banned_ip");
-      while(<in>) {
+    open (my $banned_fh, '<', "$config{'home'}$config{'data'}/banned_ip");
+      while(<$banned_fh>) {
         chomp $_;
           if ($info{'connect'} =~/$_/i) {
             writeline ($config{'systemcolor'}."\nHost ".$config{'usercolor'}.$info{'connect'}.$config{'systemcolor'}." has been ".$config{'errorcolor'}."banned".$config{'systemcolor'}.", terminating connection ..",1);
               logger("WARN: Banned User connected from".$config{'promptcolor'}.": ".$info{'connect'});
-              close(in);
+              close($banned_fh);
             unlockfile("$config{'home'}$config{'data'}/banned_ip");
             bye();
           }
       }
-    close(in);
+    close($banned_fh);
     unlockfile("$config{'home'}$config{'data'}/banned_ip");
   }
 
   if (-e "$config{'home'}/$config{'data'}/totalcalls") {
     lockfile("$config{'home'}/$config{'data'}/totalcalls");
-    open (tcalls,"<$config{'home'}/$config{'data'}/totalcalls");
-    $config{'totcalls'}=<tcalls>;
+    open (my $tcalls_fh, '<', "$config{'home'}/$config{'data'}/totalcalls");
+    $config{'totcalls'}=<$tcalls_fh>;
     chomp ($config{'totcalls'});
-    close (tcalls);
+    close ($tcalls_fh);
     unlockfile("$config{'home'}/$config{'data'}/totalcalls");
   }
   ++$config{'totcalls'};
   lockfile("$config{'home'}/$config{'data'}/totalcalls");
-  open (tcalls,">$config{'home'}/$config{'data'}/totalcalls");
-   print tcalls $config{'totcalls'};
-  close (tcalls);
+  open (my $tcalls_out, '>', "$config{'home'}/$config{'data'}/totalcalls");
+   print $tcalls_out $config{'totcalls'};
+  close ($tcalls_out);
   unlockfile("$config{'home'}/$config{'data'}/totalcalls");
 }
 
@@ -960,9 +1259,9 @@ sub bulletins {
   $bullidx=$config{'home'}.$config{'data'}."/bullidx.dat";
   if (-e $bullidx) {
     lockfile("$bullidx");
-    open (in,"<$bullidx");
-    @bulls=<in>;
-    close (in);
+    open (my $bull_fh, '<', $bullidx);
+    @bulls=<$bull_fh>;
+    close ($bull_fh);
   }
   unlockfile("$bullidx");
   if (scalar(@bulls) > "0") {
@@ -1005,9 +1304,9 @@ sub bullmenu {
 
     $bullidx=$config{'home'}.$config{'data'}."/bullidx.dat";
     lockfile("$bullidx");
-    open (in,"<$bullidx");
-    @bulls=<in>;
-    close (in);
+    open (my $bull_fh, '<', $bullidx);
+    @bulls=<$bull_fh>;
+    close ($bull_fh);
     unlockfile("$bullidx");
 
     unless($readit eq 1) {

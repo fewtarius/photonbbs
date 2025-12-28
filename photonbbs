@@ -165,23 +165,16 @@ if ($LOCAL) {
 our $TELNETD_BIN;
 our @TELNETD_ARGS_TEMPLATE;
 
-my @telnetd_bins = (
-    "/usr/sbin/telnetd",
-    "/usr/sbin/in.telnetd",
-    "/sbin/in.telnetd",
-    "/bin/telnetd",
-    "/usr/bin/telnetd",
-);
-foreach my $bin (@telnetd_bins) {
-    if (-x $bin) {
-        $TELNETD_BIN = $bin;
-        last;
-    }
+# Use our secure TTY replacement instead of system telnetd
+$TELNETD_BIN = "$config{'home'}/sbin/photonbbs-tty";
+
+# Verify our TTY replacement exists
+unless (-x $TELNETD_BIN) {
+    die "[bbsd] [ERROR] PhotonBBS TTY replacement not found: $TELNETD_BIN\n";
 }
-unless ($TELNETD_BIN) {
-    die "[bbsd] [ERROR] Could not find a suitable telnetd binary.\n";
-}
-my $version_output = `$TELNETD_BIN -v 2>&1 || $TELNETD_BIN -h 2>&1 || $TELNETD_BIN 2>&1`;
+
+# No need to detect telnetd version since we control our own implementation
+my $version_output = "photonbbs-tty"; # Our implementation supports all argument styles
 
 # Ensure photonbbs directory and its contents are owned by root with 755 permissions
 if (-d $photonbbs_dir) {
@@ -489,27 +482,27 @@ sub cleanup_iplist {
 }
 
 # --- services.d support: launch each executable in its own thread at startup ---
-sub run_startupd_programs {
-    my $startupd_dir = $config{'home'} . "/services.d";
-    unless (-d $startupd_dir) {
-        print "[bbsd] [INFO] Creating missing $startupd_dir\n" unless $QUIET;
-        make_path($startupd_dir) or do {
-            print "[bbsd] [WARN] Could not create $startupd_dir: $!\n" unless $QUIET;
+sub run_servicesd_programs {
+    my $servicesd_dir = $config{'home'} . "/services.d";
+    unless (-d $servicesd_dir) {
+        print "[bbsd] [INFO] Creating missing $servicesd_dir\n" unless $QUIET;
+        make_path($servicesd_dir) or do {
+            print "[bbsd] [WARN] Could not create $servicesd_dir: $!\n" unless $QUIET;
             return;
         };
     }
-    opendir(my $sdh, $startupd_dir) or do {
-        print "[bbsd] [WARN] Could not open $startupd_dir: $!\n" unless $QUIET;
+    opendir(my $sdh, $servicesd_dir) or do {
+        print "[bbsd] [WARN] Could not open $servicesd_dir: $!\n" unless $QUIET;
         return;
     };
     while (my $file = readdir($sdh)) {
         next if $file =~ /^\./;
-        my $full = "$startupd_dir/$file";
+        my $full = "$servicesd_dir/$file";
         next unless -f $full && -x $full;
         my $thr = threads->create(sub {
-            print "[bbsd] [STARTUPD] Launching $full as nobody\n" unless $QUIET;
+            print "[bbsd] [SERVICESD] Launching $full as nobody\n" unless $QUIET;
             system("su -s /bin/sh nobody -c '$full'");
-            print "[bbsd] [STARTUPD] $full exited with code $?\n" unless $QUIET;
+            print "[bbsd] [SERVICESD] $full exited with code $?\n" unless $QUIET;
         });
         $thr->detach;
     }
@@ -603,7 +596,7 @@ my $server = IO::Socket::INET->new(
 print "[bbsd] [INFO] Listening on port $PORT.\n" unless $QUIET;
 
 # --- services.d: launch programs before initial maintenance ---
-run_startupd_programs();
+run_servicesd_programs();
 
 # --- Initial maintenance ---
 print "[bbsd] [SUPERVISOR] Performing initial session maintenance...\n" unless $QUIET;
@@ -857,18 +850,10 @@ while (1) {
         my $remote_ip = $peerhost;
         my $protocol = "TELNET";
         my $nodeid = $ENV{PHOTONBBS_NODEID}; # Use nodeid from parent
-        my $client_cmd = "$config{'home'}/sbin/photonbbs-client $protocol $remote_ip $nodeid";
-        my @telnetd_args;
-        if ($version_output =~ /telnetd \[-debug/) {
-            # in.telnetd (Rocky/RHEL)
-            my @client_parts = split(/\s+/, $client_cmd);
-            @telnetd_args = ("-N", "-h", "-n", "-L", $client_parts[0], $protocol, $remote_ip, $nodeid);
-        } elsif ($version_output =~ /BusyBox/) {
-            @telnetd_args = ("-l", $client_cmd);
-        } else {
-            # BSD/Arch telnetd
-            @telnetd_args = ("-E", $client_cmd, "-h");
-        }
+        my $client_cmd = "$config{'home'}/sbin/photonbbs-client";
+        
+        # Use consistent -L argument format for our TTY replacement
+        my @telnetd_args = ("-L", $client_cmd, $protocol, $remote_ip, $nodeid);
 
         exec { $TELNETD_BIN } $TELNETD_BIN, @telnetd_args
             or do {

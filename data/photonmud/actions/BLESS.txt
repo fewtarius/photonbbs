@@ -1,0 +1,42 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR BLESS Command - Bless Items or Yourself @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  BLESS <item>
+  BLESS
+
+@DATACLR What it does:@THEMECLR
+  BLESS allows you to bless an item or yourself, removing curses or
+  granting temporary bonuses. Clerics and Paladins are most effective
+  at blessing, but anyone can attempt it at a temple.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only items in your inventory can be blessed.
+  - Blessing removes curses or grants +1 bonus for a short time.
+  - Clerics and Paladins have a higher chance of success.
+  - Blessing yourself may grant a temporary AC or save bonus.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - d20 + WIS mod (+class bonus) vs. DC 15 for success.
+
+@DATACLR Outcome:@THEMECLR
+  - Success: Item is blessed or curse is removed.
+  - Failure: No effect, or minor penalty if cursed.
+
+@DATACLR Class Features:@THEMECLR
+  - Clerics/Paladins: +2 to bless rolls.
+  - All classes can attempt to bless at a temple.
+
+@DATACLR Tips:@THEMECLR
+  - Bless weapons before major battles.
+  - Remove curses before equipping unknown items.
+
+@DATACLR Example:@THEMECLR
+  BLESS SHIELD
+    Shield is now blessed (+1 AC for 10 turns).
+
+@DATACLR See also:@THEMECLR
+  CURSE, IDENTIFY, STATUS
+-------------------------------------------------------------------------------

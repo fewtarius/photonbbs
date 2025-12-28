@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@RETURN <item>@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Removes an equipped or worn item and places it back in your inventory.
+Syntax: RETURN <item>
+Example: RETURN SWORD
+
+- Works for weapons, armor, rings, and other equipment.
+- Some cursed items may not be removable.
+- No roll is required; item is returned if possible.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

@@ -1,0 +1,40 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR SORT Command - Organize Your Inventory @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  SORT
+
+@DATACLR What it does:@THEMECLR
+  SORT arranges the items in your inventory for easier viewing. Items are
+  grouped by type (weapons, armor, treasures, containers, etc.) and sorted
+  alphabetically within each group.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - SORT is purely organizational; it does not affect gameplay or stats.
+  - Equipped and worn items remain marked as such.
+  - Containers and their contents are not changed, only the order in your
+    main inventory.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None. SORT is an informational/utility command.
+
+@DATACLR Outcome:@THEMECLR
+  - Your inventory is easier to read and manage.
+  - No items are lost or changed.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes benefit equally from SORT.
+
+@DATACLR Tips:@THEMECLR
+  - Use SORT after picking up or dropping items to keep your inventory tidy.
+  - Helps you quickly find items in large inventories.
+
+@DATACLR Example:@THEMECLR
+  SORT
+    Inventory is now grouped: Weapons, Armor, Potions, etc.
+
+@DATACLR See also:@THEMECLR
+  INVENTORY, EQUIP, WEAR, LOOKIN
+-------------------------------------------------------------------------------

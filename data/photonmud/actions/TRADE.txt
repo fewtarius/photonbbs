@@ -1,0 +1,27 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR TRADE Command - Player-to-Player Trading @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  TRADE <player> <item/gold> [FOR <item/gold>]
+  TRADE ACCEPT <player>
+  TRADE DECLINE <player>
+
+@DATACLR What it does:@THEMECLR
+  TRADE lets you offer an item or gold to another player in exchange for an item or gold from them.
+  The other player must accept or decline the trade. The exchange is atomic and confirmed.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Both players must be in the same room.
+  - Both must have the items/gold offered.
+  - The trade only completes if both sides confirm and have the required items/gold.
+  - Use GIVE for one-way transfers.
+
+@DATACLR Example:@THEMECLR
+  TRADE Alice Sword FOR 100 gold
+  TRADE ACCEPT Bob
+  TRADE DECLINE Bob
+
+@DATACLR See also:@THEMECLR
+  GIVE, MARKET, SELL, BUY

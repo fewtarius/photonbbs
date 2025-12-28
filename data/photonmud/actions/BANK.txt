@@ -1,0 +1,13 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@BANK@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Displays your current bank balance.
+Syntax: BANK
+Aliases: BK
+
+- Use DEPOSIT <amount> to add gold.
+- Use WITHDRAW <amount> to remove gold.
+- Bank is safer than carrying gold.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@

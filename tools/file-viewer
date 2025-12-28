@@ -1,0 +1,172 @@
+#!/usr/bin/env perl
+#
+# PhotonBBS File Viewer - Preview text/ANSI files with macro expansion
+# Usage: ./tools/file-viewer <filename>
+#
+# This tool reuses PhotonBBS framework to properly render text files
+# with all macro expansions (colors, box-drawing, etc.) without
+# requiring a telnet connection.
+
+use strict;
+use warnings;
+use FindBin;
+use lib "$FindBin::RealBin/../modules";
+
+# Set up minimal environment for framework
+use Cwd 'abs_path';
+my $script_dir = abs_path("$FindBin::RealBin/..");
+
+# Define ANSI color codes (these are used by pb-framework)
+our $RED = "\e[0;31m";
+our $GRN = "\e[0;32m";
+our $YEL = "\e[0;33m";
+our $BLU = "\e[0;34m";
+our $MAG = "\e[0;35m";
+our $CYN = "\e[0;36m";
+our $WHT = "\e[0;37m";
+our $BLD = "\e[1m";
+our $UND = "\e[4m";
+our $REV = "\e[7m";
+our $BRD = "\e[1;31m";
+our $BGR = "\e[1;32m";
+our $BYE = "\e[1;33m";
+our $BBL = "\e[1;34m";
+our $BMA = "\e[1;35m";
+our $BCY = "\e[1;36m";
+our $BWH = "\e[1;37m";
+our $CLR = "\e[0m";
+
+our %config = (
+  'home' => $script_dir,
+  'datadir' => "$script_dir/data",
+  'terminal_width' => $ENV{'COLUMNS'} || 80,
+  'terminal_type' => 'ansi',  # Force ANSI mode for preview
+);
+
+our %info = (
+  'node' => 'preview',
+  'connect' => '0',
+  'terminal_width' => $config{'terminal_width'},
+);
+
+our %sysinfo = (
+  'host' => 'localhost',
+  'ip' => '127.0.0.1',
+  'users' => 0,
+);
+
+# Load framework (for macro expansion and helpers)
+require 'pb-framework';
+require 'pb-defaults';
+
+# Apply default theme
+applytheme('photon');
+
+# Restore terminal width after theme loads
+$config{'terminal_width'} = $ENV{'COLUMNS'} || 80;
+$info{'terminal_width'} = $config{'terminal_width'};
+
+# Check usage
+if (@ARGV < 1) {
+  print STDERR "Usage: $0 <filename>\n";
+  print STDERR "Example: $0 data/text/oneltop.txt\n";
+  exit 1;
+}
+
+my $filename = $ARGV[0];
+
+# Make path absolute if needed
+unless ($filename =~ m|^/|) {
+  $filename = "$config{'home'}/$filename";
+}
+
+# Verify file exists
+unless (-f $filename) {
+  print STDERR "ERROR: File not found: $filename\n";
+  exit 1;
+}
+
+# Read and render the file with macro expansion
+print "\n";
+print "=" x $config{'terminal_width'} . "\n";
+print "Rendering: $filename\n";
+print "Terminal width: $config{'terminal_width'} columns\n";
+print "=" x $config{'terminal_width'} . "\n";
+print "\n";
+
+# Open and process file with macro expansion
+open(my $fh, '<', $filename) or die "Cannot open $filename: $!\n";
+while (my $line = <$fh>) {
+  # Apply the same macro substitutions as readfile() in pb-framework
+  $line =~ s/\@SYSTEMCLR/$config{'systemcolor'}/g;
+  $line =~ s/\@USERCLR/$config{'usercolor'}/g;
+  $line =~ s/\@INPUTCLR/$config{'inputcolor'}/g;
+  $line =~ s/\@ERRORCLR/$config{'errorcolor'}/g;
+  $line =~ s/\@THEMECLR/$config{'themecolor'}/g;
+  $line =~ s/\@PROMPTCLR/$config{'promptcolor'}/g;
+  $line =~ s/\@DATACLR/$config{'datacolor'}/g;
+  $line =~ s/\@LINECLR/$config{'linecolor'}/g;
+  
+  # Box-drawing character macros (PETSCII-aware)
+  $line =~ s/\@BOXHORIZ\@/boxchar('horizontal')/eg;
+  $line =~ s/\@BOXVERT\@/boxchar('vertical')/eg;
+  $line =~ s/\@BOXTOPLEFT\@/boxchar('topleft')/eg;
+  $line =~ s/\@BOXTOPRIGHT\@/boxchar('topright')/eg;
+  $line =~ s/\@BOXBOTLEFT\@/boxchar('bottomleft')/eg;
+  $line =~ s/\@BOXBOTRIGHT\@/boxchar('bottomright')/eg;
+  $line =~ s/\@BOXTDOWN\@/boxchar('tdown')/eg;
+  $line =~ s/\@BOXTUP\@/boxchar('tup')/eg;
+  $line =~ s/\@BOXTLEFT\@/boxchar('tleft')/eg;
+  $line =~ s/\@BOXTRIGHT\@/boxchar('tright')/eg;
+  
+  # Double-line box-drawing macros
+  $line =~ s/\@DBOXHORIZ\@/boxchar('dhorizontal')/eg;
+  $line =~ s/\@DBOXVERT\@/boxchar('dvertical')/eg;
+  $line =~ s/\@DBOXTOPLEFT\@/boxchar('dtopleft')/eg;
+  $line =~ s/\@DBOXTOPRIGHT\@/boxchar('dtopright')/eg;
+  $line =~ s/\@DBOXBOTLEFT\@/boxchar('dbottomleft')/eg;
+  $line =~ s/\@DBOXBOTRIGHT\@/boxchar('dbottomright')/eg;
+  
+  $line =~ s/\@SYSNM/$config{'systemname'}/g;
+  $line =~ s/\@NODE/$info{'node'}/g;
+  $line =~ s/\@CONNECT/$info{'connect'}/g;
+  $line =~ s/\@HOST/$sysinfo{'host'}/g;
+  $line =~ s/\@IP/$sysinfo{'ip'}/g;
+  $line =~ s/\@USERS/$sysinfo{'users'}/g;
+  $line =~ s/\@TIME/$info{'time'}/g;
+  $line =~ s/\@DATE/$info{'date'}/g;
+  $line =~ s/\@HANDLE/$info{'handle'}/g;
+  $line =~ s/\@FNAME/$info{'fname'}/g;
+  $line =~ s/\@LNAME/$info{'lname'}/g;
+  $line =~ s/\@ALIAS/$info{'alias'}/g;
+  $line =~ s/\@CLR//g;  # DISABLE clear screen for file viewing
+  
+  # Second-level color code expansion (theme colors contain @BLU etc)
+  $line =~ s/\@RED/$RED/g;
+  $line =~ s/\@GRN/$GRN/g;
+  $line =~ s/\@YEL/$YEL/g;
+  $line =~ s/\@BLU/$BLU/g;
+  $line =~ s/\@MAG/$MAG/g;
+  $line =~ s/\@CYN/$CYN/g;
+  $line =~ s/\@WHT/$WHT/g;
+  $line =~ s/\@BLD/$BLD/g;
+  $line =~ s/\@UND/$UND/g;
+  $line =~ s/\@REV/$REV/g;
+  $line =~ s/\@BRD/$BRD/g;
+  $line =~ s/\@BGR/$BGR/g;
+  $line =~ s/\@BYE/$BYE/g;
+  $line =~ s/\@BBL/$BBL/g;
+  $line =~ s/\@BMA/$BMA/g;
+  $line =~ s/\@BCY/$BCY/g;
+  $line =~ s/\@BWH/$BWH/g;
+  $line =~ s/\@CLR/$CLR/g;
+  
+  print $line;
+}
+close($fh);
+
+print "\n";
+print "=" x $config{'terminal_width'} . "\n";
+print "End of file\n";
+print "=" x $config{'terminal_width'} . "\n";
+print "\n";

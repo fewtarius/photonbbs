@@ -5,3 +5,8 @@ ln -s /opt/photonbbs/doors /opt/photonbbs/.dosemu/drive_c/doors
 ln -sf /dev/shm/photonbbs/doors/nodes /opt/photonbbs/.dosemu/drive_c/nodeinfo
 
 ** Lunatix will not work over a link, place luna in /opt/photonbbs/.dosemu/drive_c
+
+---
+To access door games from within the teleconference, type /DOORS or /MENU.
+This will display a list of available external commands and door games, filtered by your security level.
+Each entry shows the command to type and a description. Just type the command (e.g. /1, /2, etc) to launch the door.

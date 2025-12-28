@@ -1,0 +1,37 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR ABOUT Command - Learn About PhotonMUD @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  ABOUT
+
+@DATACLR What it does:@THEMECLR
+  ABOUT displays information about PhotonMUD, including its features,
+  gameplay style, and credits. Use ABOUT to learn what makes the game
+  unique and how to get started.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - ABOUT is informational and does not affect gameplay.
+  - Shows a summary of the game's world and mechanics.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - You see a summary of PhotonMUD and its features.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes use ABOUT the same way.
+
+@DATACLR Tips:@THEMECLR
+  - Use ABOUT if you are new or want to share the game with others.
+
+@DATACLR Example:@THEMECLR
+  ABOUT
+    PhotonMUD is a persistent, multiuser D&D-style adventure game for
+    PhotonBBS. Explore, battle, and trade in a living world!
+
+@DATACLR See also:@THEMECLR
+  HELP, NEWS, HINT
+-------------------------------------------------------------------------------

@@ -1,0 +1,41 @@
+@THEMECLR
+-------------------------------------------------------------------------------
+@USERCLR FUEL Command - Refill Light Sources @THEMECLR
+-------------------------------------------------------------------------------
+
+@DATACLR Usage:@THEMECLR
+  FUEL <item> WITH <fuel>
+
+@DATACLR What it does:@THEMECLR
+  FUEL allows you to refill a lantern, torch, or other light source using
+  a fuel item (oil, pitch, etc.). Keeping your light sources fueled is
+  essential for exploring dark areas.
+
+@DATACLR Rules & Mechanics:@THEMECLR
+  - Only light sources (lanterns, lamps, torches) can be fueled.
+  - You must have the correct fuel item in your inventory.
+  - Some light sources require specific fuels.
+  - FUEL is an instant action and does not use a combat turn.
+
+@DATACLR Dice Rolls:@THEMECLR
+  - None.
+
+@DATACLR Outcome:@THEMECLR
+  - The light source is refilled and can be used longer.
+  - The fuel item is consumed.
+
+@DATACLR Class Features:@THEMECLR
+  - All classes can use FUEL.
+  - Rangers and Thieves may use fuel more efficiently.
+
+@DATACLR Tips:@THEMECLR
+  - Carry extra fuel for long dungeon crawls.
+  - Use IDENTIFY to check fuel compatibility.
+
+@DATACLR Example:@THEMECLR
+  FUEL LANTERN WITH OIL
+    You refill the lantern with oil.
+
+@DATACLR See also:@THEMECLR
+  LIGHT, INVENTORY, IDENTIFY
+-------------------------------------------------------------------------------

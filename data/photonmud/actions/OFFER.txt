@@ -1,0 +1,14 @@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@USERCOLOR@OFFER <monster> <amount>@THEMECOLOR@
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@datacolor@Attempts to bribe a monster with gold to avoid combat.
+Syntax: OFFER <monster> <amount>
+Example: OFFER GOBLIN 50
+
+- Roll: 1d20 + CHA modifier; success on 16+.
+- If successful, monster leaves you alone.
+- If failed, monster may become hostile.
+- You must have enough gold.
+
+@SYSTEMCOLOR@-------------------------------------------------------------------------------
+@THEMECOLOR@
