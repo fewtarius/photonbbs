@@ -46,6 +46,7 @@ our %config = (
 our %info = (
   'node' => 'preview',
   'connect' => '0',
+  'proto' => 'PREVIEW',
   'terminal_width' => $config{'terminal_width'},
 );
 
@@ -129,6 +130,7 @@ while (my $line = <$fh>) {
   
   $line =~ s/\@SYSNM/$config{'systemname'}/g;
   $line =~ s/\@NODE/$info{'node'}/g;
+  $line =~ s/\@PROTO/$info{'proto'}/g;
   $line =~ s/\@CONNECT/$info{'connect'}/g;
   $line =~ s/\@HOST/$sysinfo{'host'}/g;
   $line =~ s/\@IP/$sysinfo{'ip'}/g;
@@ -144,7 +146,7 @@ while (my $line = <$fh>) {
   # Second-level color code expansion (theme colors contain @BLU etc)
   $line =~ s/\@RED/$RED/g;
   $line =~ s/\@GRN/$GRN/g;
-  $line =~ s/\@YEL/$YEL/g;
+  $line =~ s/\@YLW/$YEL/g;  # PhotonBBS uses @YLW not @YEL
   $line =~ s/\@BLU/$BLU/g;
   $line =~ s/\@MAG/$MAG/g;
   $line =~ s/\@CYN/$CYN/g;
@@ -159,7 +161,7 @@ while (my $line = <$fh>) {
   $line =~ s/\@BMA/$BMA/g;
   $line =~ s/\@BCY/$BCY/g;
   $line =~ s/\@BWH/$BWH/g;
-  $line =~ s/\@CLR/$CLR/g;
+  $line =~ s/\@RST/$CLR/g;  # @RST resets colors (same as @CLR in this context)
   
   print $line;
 }

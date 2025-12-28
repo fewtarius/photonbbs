@@ -1,2 +1,5 @@
-\n@SYSTEMCLRGreetings, @USERCLR@USER@SYSTEMCLR, glad to see you back again.
+
+@CYNWelcome back to the Tavern, @USERCLR@USER@CYN!
+@THEMECLRYour terminal session is established...
 @RST
+

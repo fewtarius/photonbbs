@@ -1,4 +1,4 @@
-# Menu commands file - PIPE separated
+# Terminal Tavern - Menu Commands (PIPE separated)
 #
 # Fields:
 # 1 - Key (what to type at the menu prompt)
@@ -11,17 +11,17 @@
 ########################################################################
 # KEY|DESCRIPTION|SCRIPT_OR_SUB|SECLEVEL|HIDDEN|TYPE
 ########################################################################
-A|PhotonMUD|photonmud|10|0|external|0
-#B|Tradewars 2002|tw2002.sh|10|0|external|0
-#C|LORD|lord.sh|10|0|external|0
-#D|Lunatix|luna.sh|10|0|external|0
-#E|Barren Realms Elite|bre.sh|10|0|external|0
-#F|Operation Overkill II|ooii.sh|10|0|external|0
-#G|Simpsons|simp.sh|10|0|external|0
-#H|Darkness|darkness.sh|10|0|external|0
-#I|Dopewars|dopewars.sh|10|0|external|0
-V|PhotonMUD Editor|photonmud-editor|500|1|external|0
-W|User Edit|useredit|500|1|external|0
-X|Bulletin Editor|bulledit|500|1|external|0
-Y|Dos Prompt|dosemu.sh|900|1|external|0
-Z|Bash Shell|shell.sh|900|1|external|0
+A|Enter PhotonMUD (Multi-User Dungeon)|photonmud|10|0|external|0
+B|Legend of the Red Dragon|lord.sh|10|0|external|0
+C|Lunatix|luna.sh|10|0|external|0
+D|Barren Realms Elite|bre.sh|10|0|external|0
+E|Operation Overkill II (Combat)|ooii.sh|10|0|external|0
+F|Simpsons Door|simp.sh|10|0|external|0
+G|Darkness|darkness.sh|10|0|external|0
+#H|Tradewars 2002 (Space Trading Game)|tw2002.sh|10|0|external|0
+V|PhotonMUD Editor (World Builder)|photonmud-editor|500|1|external|0
+W|User Editor (Account Management)|useredit|500|1|external|0
+X|Bulletin Editor (News Management)|bulledit|500|1|external|0
+Y|DOS Emulator (Legacy Games)|dosemu.sh|900|1|external|0
+Z|System Shell (Admin Access)|shell.sh|900|1|external|0
+

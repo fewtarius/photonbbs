@@ -103,10 +103,39 @@ then
   ln -s /appdata/.dosemu/drive_c /appdata/.dosemu/drives/c 2>/dev/null
 fi
 
+###
+### Link /opt/photonbbs/.dosemu to /appdata/.dosemu
+###
+
 if [ ! -h '/opt/photonbbs/.dosemu' ]
 then
-  ln -s /appdata/.dosemu /opt/photonbbs
+  # Remove old .dosemu directory from image if it exists
+  rm -rf /opt/photonbbs/.dosemu
+  ln -s /appdata/.dosemu /opt/photonbbs/.dosemu
 fi
+
+###
+### Create DOSEMU C: drive symlinks for door games
+###
+
+# Link doors directory so DOSEMU can access at c:\doors\
+if [ ! -h '/appdata/.dosemu/drive_c/doors' ]
+then
+  ln -sf /appdata/doors /appdata/.dosemu/drive_c/doors
+fi
+
+# Link nodeinfo directory so DOSEMU can access drop files at c:\nodeinfo\
+if [ ! -h '/appdata/.dosemu/drive_c/nodeinfo' ]
+then
+  ln -sf /dev/shm/photonbbs/doors/nodes /appdata/.dosemu/drive_c/nodeinfo
+fi
+
+###
+### Set DOSEMU directory permissions for nobody user
+###
+
+chown -R nobody:nobody /appdata/.dosemu 2>/dev/null || true
+chmod -R 755 /appdata/.dosemu 2>/dev/null || true
 
 ###
 ### Move /etc/default/photonbbs to /appdata
