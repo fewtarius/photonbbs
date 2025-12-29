@@ -5,8 +5,20 @@
 **/realm.txt
 .aider*
 sbin/photonbbs-tty
+
+# Development and temporary files
 /*.txt
 /scratch
+/scratch/
+**/scratch/
+
+# AI-assisted development context (use scratch/ instead!)
 /ai-assisted/202*
 /project-docs/
+*HANDOFF*.md
+*SESSION*.md
+*CONTINUATION*.md
+error.txt
+
+# Reference materials
 /reference
