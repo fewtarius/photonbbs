@@ -1,6 +1,7 @@
 # PhotonBBS Makefile
 # Builds the PhotonBBS TTY wrapper with telnet protocol negotiation support
 # Compatible with Linux and macOS systems
+# Also provides Docker build and deployment targets
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c99 -D_GNU_SOURCE
@@ -8,6 +9,11 @@ SRCDIR = src
 BINDIR = sbin
 TARGET = $(BINDIR)/photonbbs-tty
 SOURCE = $(SRCDIR)/photonbbs-tty.c
+
+# Docker configuration
+DOCKER_IMAGE = fewtarius/photonbbs
+DOCKER_COMPOSE = docker-compose
+DOCKER_COMPOSE_FILE = docker/docker-compose.yml
 
 # Detect operating system for proper library linking
 UNAME_S := $(shell uname -s)
@@ -28,7 +34,7 @@ INSTALL_BIN = $(PREFIX)/sbin
 INSTALL_OWNER ?= root
 INSTALL_GROUP ?= root
 
-.PHONY: all clean install uninstall help check-deps
+.PHONY: all clean install uninstall help check-deps docker-build docker-up docker-down docker-logs docker-shell docker-clean
 
 all: $(TARGET)
 
@@ -118,13 +124,12 @@ debug: $(TARGET)
 
 # Show help information
 help:
-	@echo "PhotonBBS TTY Wrapper Build System"
-	@echo "=================================="
+	@echo "PhotonBBS Build System"
+	@echo "====================="
 	@echo ""
-	@echo "This builds the PhotonBBS TTY wrapper which provides telnet protocol"
-	@echo "negotiation support, replacing traditional telnetd for PhotonBBS."
+	@echo "This builds PhotonBBS components and manages Docker deployment."
 	@echo ""
-	@echo "Targets:"
+	@echo "TTY Wrapper Targets:"
 	@echo "  all             Build photonbbs-tty (default)"
 	@echo "  clean           Remove build artifacts"
 	@echo "  check-deps      Verify build dependencies"
@@ -133,16 +138,77 @@ help:
 	@echo "  secure-install  Install with production security settings"
 	@echo "  uninstall       Remove installed files"
 	@echo "  debug           Build with debug symbols"
-	@echo "  help            Show this help"
+	@echo ""
+	@echo "Docker Targets:"
+	@echo "  docker-build    Build Docker image"
+	@echo "  docker-up       Start PhotonBBS container (docker-compose up -d)"
+	@echo "  docker-down     Stop PhotonBBS container"
+	@echo "  docker-restart  Restart PhotonBBS container"
+	@echo "  docker-logs     View container logs"
+	@echo "  docker-shell    Open shell in running container"
+	@echo "  docker-rebuild  Stop, rebuild, and restart container"
+	@echo "  docker-clean    Remove container, image, and volumes (DESTRUCTIVE)"
 	@echo ""
 	@echo "Variables:"
 	@echo "  PREFIX          Installation prefix (default: /opt/photonbbs)"
 	@echo "  CC              C compiler (default: gcc)"
 	@echo "  CFLAGS          Compiler flags"
+	@echo "  DOCKER_IMAGE    Docker image name (default: fewtarius/photonbbs)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make                          # Build the TTY wrapper"
-	@echo "  make check-deps              # Check if dependencies are available"
-	@echo "  make install-local           # Install to ~/.local/sbin"
-	@echo "  sudo make install            # System-wide installation"
-	@echo "  PREFIX=/usr/local make install  # Install to /usr/local"
+	@echo "  make docker-build             # Build Docker image"
+	@echo "  make docker-up                # Start PhotonBBS via Docker"
+	@echo "  make docker-logs              # View logs"
+	@echo "  sudo make install             # Install TTY wrapper system-wide"
+
+# Docker build targets
+docker-build:
+	@echo "Building PhotonBBS Docker image..."
+	cd docker && $(DOCKER_COMPOSE) build
+	@echo "Docker image built successfully!"
+	@echo ""
+	@echo "To start PhotonBBS, run: make docker-up"
+
+docker-up:
+	@echo "Starting PhotonBBS container..."
+	cd docker && $(DOCKER_COMPOSE) up -d
+	@echo "PhotonBBS is starting up!"
+	@echo ""
+	@echo "View logs: make docker-logs"
+	@echo "Access shell: make docker-shell"
+	@echo "Connect via: telnet localhost 23"
+
+docker-down:
+	@echo "Stopping PhotonBBS container..."
+	cd docker && $(DOCKER_COMPOSE) down
+	@echo "PhotonBBS stopped"
+
+docker-restart:
+	@echo "Restarting PhotonBBS container..."
+	cd docker && $(DOCKER_COMPOSE) restart
+	@echo "PhotonBBS restarted"
+
+docker-logs:
+	@echo "PhotonBBS container logs (Ctrl+C to exit):"
+	@echo "=========================================="
+	cd docker && $(DOCKER_COMPOSE) logs -f
+
+docker-shell:
+	@echo "Opening shell in PhotonBBS container..."
+	cd docker && $(DOCKER_COMPOSE) exec photonbbs /bin/bash
+
+docker-rebuild:
+	@echo "Rebuilding PhotonBBS (stop, build, start)..."
+	cd docker && $(DOCKER_COMPOSE) down
+	cd docker && $(DOCKER_COMPOSE) build
+	cd docker && $(DOCKER_COMPOSE) up -d
+	@echo "PhotonBBS rebuilt and restarted!"
+
+docker-clean:
+	@echo "WARNING: This will remove containers, images, and volumes!"
+	@echo "Press Ctrl+C within 5 seconds to cancel..."
+	@sleep 5
+	cd docker && $(DOCKER_COMPOSE) down -v
+	docker rmi $(DOCKER_IMAGE) 2>/dev/null || true
+	@echo "PhotonBBS Docker environment cleaned"

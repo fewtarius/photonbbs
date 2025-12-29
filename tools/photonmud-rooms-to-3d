@@ -6,7 +6,7 @@ use Data::Dumper;
 
 my $file = shift || 'data/photonmud/rooms.dat';
 my $outfile = shift || 'rooms_3d.html';
-my $reclen = 1096;  # Updated for elevation (4 bytes) and biome (8 bytes)
+my $reclen = 1108;  # Updated for x,y,z coordinates (1096 + 12 bytes)
 
 # Debug flag
 my $DEBUG = 1;

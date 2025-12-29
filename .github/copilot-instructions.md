@@ -140,6 +140,23 @@
 
 **ALWAYS ANALYZE CONFIGURATIONS FOR BOTH BBS AND MUD SYSTEMS**
 
+**CRITICAL: USE scratch/ DIRECTORY FOR ALL TRANSIENT DATA**
+
+**MANDATORY SCRATCH DIRECTORY USAGE:**
+- **ALWAYS use `scratch/` directory for temporary files, debug output, session notes**
+- **NEVER commit development notes, handoff docs, or session data to git**
+- **scratch/ is .gitignored** - safe for any transient development data
+- **Examples of what belongs in scratch/:**
+  - Session notes and continuation prompts
+  - Agent handoff documents
+  - Debug output files (error.txt, test-output.txt, etc.)
+  - Development planning documents
+  - Temporary testing scripts
+  - Any data that should NOT be public
+- **NEVER create development files in root directory**
+- **NEVER create *HANDOFF*.md or *SESSION*.md files outside scratch/**
+- **This prevents sensitive development context from being committed**
+
 ## 🚫 CRITICAL PROHIBITIONS
 
 ### DO NOT REPLACE WORKING CODE WITH BROKEN IMPLEMENTATIONS

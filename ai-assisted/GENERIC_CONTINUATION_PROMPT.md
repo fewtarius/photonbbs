@@ -27,14 +27,14 @@ cat ai-assisted/THE_UNBROKEN_METHOD.md
 
 ### 2. Check for Existing Context
 ```bash
-# Look for recent session handoffs:
-ls -lt ai-assisted/2025-*/*/CONTINUATION_PROMPT.md | head -1
+# Look for recent session handoffs in scratch/:
+ls -lt scratch/session-*/CONTINUATION_PROMPT.md | head -1
 
 # Read the most recent one if it exists
 # (It contains complete context from the previous session)
 ```
 
-**If a continuation prompt exists**: Read it FIRST before proceeding!
+**If a continuation prompt exists in scratch/**: Read it FIRST before proceeding!
 
 ### 3. Review Recent Work
 ```bash
@@ -47,8 +47,8 @@ git diff --stat HEAD~5..HEAD
 
 ### 4. Check Quick Reference
 ```bash
-# Read the agent handoff for project overview:
-cat AGENT_HANDOFF.md
+# Check for quick reference in scratch/:
+cat scratch/AGENT_HANDOFF.md 2>/dev/null || echo "No handoff found - starting fresh"
 ```
 
 ### 5. Collaborate with User IMMEDIATELY
@@ -368,22 +368,24 @@ READY TO BEGIN: What would you like me to work on today?
 
 When session ends (user says "done" or you've completed all tasks):
 
-1. **Create handoff directory**: `ai-assisted/YYYY-MM-DD/HHMM/`
-2. **Create three handoff files**:
-   - `CONTINUATION_PROMPT.md` - Complete session context (most important!)
-   - `AGENT_PLAN.md` - What was planned vs. achieved
-   - `CHANGELOG.md` - Summary of changes
-3. **Update** `AGENT_HANDOFF.md` - Quick reference for next session
-4. **Commit and push** all documentation:
+1. **Create handoff directory in scratch/**: `scratch/session-YYYY-MM-DD-HHMM/`
+2. **Create session handoff files IN SCRATCH DIRECTORY**:
+   - `scratch/session-YYYY-MM-DD-HHMM/CONTINUATION_PROMPT.md` - Complete session context
+   - `scratch/session-YYYY-MM-DD-HHMM/AGENT_PLAN.md` - What was planned vs. achieved
+   - `scratch/session-YYYY-MM-DD-HHMM/CHANGELOG.md` - Summary of changes
+3. **⚠️ CRITICAL: ALL SESSION DATA GOES IN scratch/ - NEVER COMMIT TO GIT**
+4. **Commit and push only code changes**:
    ```bash
-   git add ai-assisted/ AGENT_HANDOFF.md
-   git commit -m "Session handoff: [date/time] - [brief summary]"
+   git add <code files only - NOT scratch/>
+   git commit -m "Session work: [date/time] - [brief summary]"
    git push origin main
    ```
 5. **Final collaboration**:
    ```bash
-   scripts/user_collaboration.sh "Session complete. Handoff documentation created in ai-assisted/[date]/[time]/. All work committed and pushed. Ready for next agent."
+   scripts/user_collaboration.sh "Session complete. Handoff documentation in scratch/session-[date]-[time]/. Code changes committed and pushed. Ready for next agent."
    ```
+
+**REMEMBER: Use scratch/ for ALL development notes, session context, debugging output - it's .gitignored!**
 
 ---
 

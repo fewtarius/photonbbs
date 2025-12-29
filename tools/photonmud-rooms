@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 my $file = shift || 'data/photonmud/rooms.dat';
-my $reclen = 1096;  # Updated for elevation (4 bytes) + biome (8 bytes)
+my $reclen = 1108;  # Updated for x,y,z coordinates (1096 + 4*3 = 1108)
 
 open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
 
@@ -41,6 +41,9 @@ while (1) {
     $room{river_name}  = substr($buf, 1060, 24);
     $room{elevation}   = unpack("f<", substr($buf, 1084, 4));
     $room{biome}       = substr($buf, 1088, 8);
+    $room{coord_x}     = unpack("l<", substr($buf, 1096, 4));  # Signed 32-bit int
+    $room{coord_y}     = unpack("l<", substr($buf, 1100, 4));
+    $room{coord_z}     = unpack("l<", substr($buf, 1104, 4));
 
     # Convert all string fields to ASCII, replace non-printables with '.'
     for my $f (qw(flags shortdesc treasure trecharges region feature town_name castle_name river_name biome)) {
@@ -120,6 +123,10 @@ while (1) {
     } else {
         print "biome:       <none>\n";
     }
+
+    # Coordinates (x, y, z)
+    printf "coordinates: x=%d, y=%d, z=%d\n", 
+        $room{coord_x} // 0, $room{coord_y} // 0, $room{coord_z} // 0;
 
     print "\n";
     $record_num++;
