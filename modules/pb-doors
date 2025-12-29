@@ -18,7 +18,7 @@ sub setupdoors {
         make_path($doors_dir);
     }
 
-    # --- DORINFOx.DEF ---
+    # --- DORINFOx.DEF (node-specific) ---
     my $dorfile = "$doors_dir/dorinfo$node.def";
     lockfile($dorfile);
     open(my $out, ">", $dorfile) or die "Cannot write $dorfile: $!";
@@ -38,6 +38,28 @@ sub setupdoors {
         "$timeleft\r\n";        # 13. Minutes Left (again)
     close($out);
     unlockfile($dorfile);
+    
+    # --- DORINFO1.DEF (standard name for compatibility) ---
+    # Many DOS door games expect DORINFO1.DEF regardless of node number
+    my $dorfile1 = "$doors_dir/dorinfo1.def";
+    lockfile($dorfile1);
+    open($out, ">", $dorfile1) or die "Cannot write $dorfile1: $!";
+    print $out
+        "$system\r\n" .         # 1. BBS Name
+        "$sysop\r\n" .          # 2. SysOp Name
+        "\r\n" .                # 3. Blank
+        "COM1:\r\n" .           # 4. COM Port
+        "19200 BAUD,N,8,1\r\n". # 5. Baud/Settings
+        "$node\r\n" .           # 6. Node Number
+        "$handle\r\n" .         # 7. User Name/Handle
+        "\r\n" .                # 8. Blank
+        "$location\r\n" .       # 9. User Location
+        "$ansi\r\n" .           # 10. ANSI (Y/N)
+        "$security\r\n" .       # 11. Security Level
+        "$timeleft\r\n" .       # 12. Minutes Left
+        "$timeleft\r\n";        # 13. Minutes Left (again)
+    close($out);
+    unlockfile($dorfile1);
 
     # --- DOOR.SYS (minimal, for compatibility) ---
     my $doorsys = "$doors_dir/door.sys";

@@ -8,3 +8,5 @@ sbin/photonbbs-tty
 /*.txt
 /scratch
 /ai-assisted/202*
+/project-docs/
+/reference
