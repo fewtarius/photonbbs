@@ -22,3 +22,10 @@ error.txt
 
 # Reference materials
 /reference
+
+# Test and development scripts (keep in scratch/ if needed)
+tools/*-test*.py
+tools/test-*.py
+tools/bbs-*.py
+tools/combat-*.py
+tools/telnet-test-proxy.py
