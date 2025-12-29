@@ -5,7 +5,7 @@ use warnings;
 
 my $file = shift || 'data/photonmud/rooms.dat';
 my $svgfile = shift || 'rooms.svg';
-my $reclen = 1096;  # Updated for new format (1084 + 4 elevation + 8 biome)
+my $reclen = 1108;  # Updated for x,y,z coordinates (1096 + 12 bytes)
 
 # Color mapping for regions/features
 my %region_color = (

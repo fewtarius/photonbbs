@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 my $file = shift || 'data/photonmud/rooms.dat';
-my $reclen = 1084;
+my $reclen = 1108;  # Updated for x,y,z coordinates (1096 + 12 bytes)
 
 open(my $fh, "<:raw", $file) or die "Failed to open $file: $!";
 
