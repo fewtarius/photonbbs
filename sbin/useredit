@@ -15,7 +15,6 @@ if (-e "/etc/default/photonbbs") {
     $value=~s/^\"//;
     $value=~s/\".*$//;
     $config{$key}=$value;
-    print "$config{$key}=$value;\n";
   }
   close(in);
 } else {
