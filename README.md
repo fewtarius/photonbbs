@@ -20,6 +20,16 @@ The latest version of this software can be downloaded from:
 
 https://github.com/fewtarius/photonbbs
 
+## Live Demo
+
+Try PhotonBBS live at **Terminal Tavern**:
+
+```
+telnet bbs.terminaltavern.com
+```
+
+Experience the full BBS and PhotonMUD integration in action!
+
 ## About
 
 PhotonBBS is a simple UNIX / Linux multi-node chat server written in Perl
