@@ -130,34 +130,88 @@ to all users:
 
 ## Installation
 
-### Standard Installation
+PhotonBBS is deployed via Docker for maximum compatibility and ease of use.
 
-PhotonBBS can be deployed from Docker Hub with a single command:
+### Quick Start (Recommended)
 
+**Using docker-compose:**
+
+```bash
+git clone https://github.com/fewtarius/photonbbs.git
+cd photonbbs
+make docker-up
 ```
-docker container run -dti --restart unless-stopped --net host --device=/dev/tty0 -v appdata:/appdata:rw -v /dev:/dev -v /lib/modules:/lib/modules -v /sys/fs/cgroup:/sys/fs/cgroup --privileged fewtarius/photonbbs
+
+PhotonBBS will build and start automatically. Connect via `telnet localhost 23`.
+
+**Using Docker directly:**
+
+```bash
+docker container run -dti --restart unless-stopped --net host \
+  --device=/dev/tty0 \
+  -v appdata:/appdata:rw \
+  -v /dev:/dev \
+  -v /lib/modules:/lib/modules \
+  -v /sys/fs/cgroup:/sys/fs/cgroup \
+  --privileged \
+  fewtarius/photonbbs
 ```
 
-The BBS will be started and listening on port 23 within a minute or two.
+### Building from Source
 
-### Manual Installation
+```bash
+# Clone repository
+git clone https://github.com/fewtarius/photonbbs.git
+cd photonbbs
 
-For manual installation:
+# Build Docker image
+make docker-build
 
-1. Clone the repository
-2. Ensure all dependencies are installed (Perl modules: IO::Socket::INET, POSIX, File::Basename, Time::HiRes, File::Path, Term::ANSIColor, etc.)
-3. Copy the PhotonBBS files to `/opt/photonbbs/` or your preferred location
-4. Adjust permissions and ownership as needed
-5. Configure the system by editing `/opt/photonbbs/modules/pb-defaults`
-6. Start the PhotonBBS daemon: `/opt/photonbbs/photonbbs`
+# Start PhotonBBS
+make docker-up
+
+# View logs
+make docker-logs
+
+# Access shell
+make docker-shell
+```
+
+### Makefile Targets
+
+PhotonBBS includes a comprehensive Makefile for building and managing deployments:
+
+**Docker Targets:**
+- `make docker-build` - Build Docker image
+- `make docker-up` - Start container (runs in background)
+- `make docker-down` - Stop container
+- `make docker-restart` - Restart container
+- `make docker-logs` - View container logs (follow mode)
+- `make docker-shell` - Open shell in running container
+- `make docker-rebuild` - Full rebuild (stop, build, start)
+- `make docker-clean` - Remove all containers and images (destructive)
+
+**TTY Wrapper (for advanced users):**
+- `make` - Build photonbbs-tty wrapper
+- `make install` - Install system-wide
+- `make clean` - Clean build artifacts
+
+Run `make help` for complete documentation.
 
 ### System Requirements
 
-PhotonBBS requires:
-- Perl 5.10 or higher
-- A telnet daemon (PhotonBBS will try to locate: /usr/sbin/telnetd, /usr/sbin/in.telnetd, /sbin/in.telnetd, /bin/telnetd, /usr/bin/telnetd)
-- Standard Unix utilities: groupadd, useradd, hostname, chmod, chown
-- TCP port 23 (default) or as configured
+**For Docker deployment (recommended):**
+- Docker Engine 20.10 or higher
+- docker-compose (optional but recommended)
+- 512MB RAM minimum, 1GB+ recommended
+- TCP port 23 available (or configure alternate port)
+
+**System compatibility:**
+- Linux (any modern distribution)
+- macOS with Docker Desktop
+- Windows with Docker Desktop + WSL2
+
+**Note:** PhotonBBS runs in a Rocky Linux 9 container with all dependencies pre-installed.
 
 ### Shared Storage
 
