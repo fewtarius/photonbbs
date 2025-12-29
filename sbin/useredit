@@ -97,7 +97,7 @@ for (;;) {
   }
 
   print "\e[2J\e[0;0H";
-  writeline ($config{'themecolor'}."User Editor - ".$config{'usercolor'}." [ ".$config{'systemcolor'}.$info{'id'}.$config{'usercolor'}."/".$config{'systemcolor'}.scalar(@users).$config{'usercolor'}." ]",1);
+  writeline ($config{'themecolor'}."User Editor - ".$config{'usercolor'}." [ ".$config{'systemcolor'}.($sk+1).$config{'usercolor'}."/".$config{'systemcolor'}.scalar(@users).$config{'usercolor'}." ]",1);
   writeline ("",1);
   writeline ("",1);
   writeline ($config{'datacolor'}."A. ".$config{'usercolor'}."Handle : ".$config{'systemcolor'}.$info{'handle'},1);
