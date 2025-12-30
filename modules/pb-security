@@ -10,6 +10,8 @@ use strict;
 use warnings;
 use Cwd qw(abs_path realpath);
 use File::Spec;
+use Fcntl qw(:flock);
+use Time::HiRes qw(time);
 
 # Export validation functions
 our @EXPORT = qw(
@@ -21,6 +23,15 @@ our @EXPORT = qw(
     safe_open_write
     safe_open_append
     sanitize_for_shell
+    record_failed_login
+    check_ip_banned
+    auto_ban_ip
+    manual_ban_ip
+    unban_ip
+    get_banned_ips
+    get_failed_login_stats
+    cleanup_old_login_attempts
+    is_ip_whitelisted
 );
 
 # Validate a filename (no path components, safe characters only)
@@ -146,6 +157,401 @@ sub sanitize_for_shell {
     $str =~ s/'/'\\''/g;  # Escape single quotes
     
     return $str;
+}
+
+# ============================================================================
+# SECURITY: Failed Login Tracking and IP Banning
+# ============================================================================
+
+# Simple file locking helpers
+sub lock_file {
+    my ($fh) = @_;
+    flock($fh, LOCK_EX) or return 0;
+    return 1;
+}
+
+sub unlock_file {
+    my ($fh) = @_;
+    flock($fh, LOCK_UN);
+}
+
+# Record a failed login attempt
+# Returns 1 if IP should be auto-banned, 0 otherwise
+sub record_failed_login {
+    my ($ip, $username) = @_;
+    return 0 unless defined $ip;
+    
+    require_module("pb-defaults");
+    our %config;
+    
+    return 0 unless $config{'sec_track_failed_logins'};
+    
+    my $failed_file = "$config{'home'}$config{'data'}/failed_logins";
+    my $now = time();
+    
+    # Clean up old attempts first
+    cleanup_old_login_attempts();
+    
+    # Append new failure
+    if (open(my $fh, '>>', $failed_file)) {
+        lock_file($fh);
+        print $fh "$now|$ip|" . ($username // 'unknown') . "\n";
+        unlock_file($fh);
+        close($fh);
+        
+        # Log to syslog if enabled
+        if ($config{'sec_log_failures'}) {
+            logger("SECURITY: Failed login from $ip (user: " . ($username // 'unknown') . ")");
+        }
+    }
+    
+    # Check if IP should be auto-banned
+    my $failure_count = count_recent_failures($ip);
+    if ($failure_count >= $config{'sec_failed_threshold'}) {
+        auto_ban_ip($ip, "Auto-ban: $failure_count failed logins");
+        return 1;
+    }
+    
+    return 0;
+}
+
+# Count recent failed login attempts for an IP
+sub count_recent_failures {
+    my ($ip) = @_;
+    return 0 unless defined $ip;
+    
+    require_module("pb-defaults");
+    our %config;
+    
+    my $failed_file = "$config{'home'}$config{'data'}/failed_logins";
+    return 0 unless -e $failed_file;
+    
+    my $now = time();
+    my $window = $config{'sec_failed_window'} || 600;
+    my $count = 0;
+    
+    if (open(my $fh, '<', $failed_file)) {
+        lock_file($fh);
+        while (my $line = <$fh>) {
+            chomp $line;
+            my ($timestamp, $attempt_ip, $username) = split(/\|/, $line);
+            next unless defined $timestamp && defined $attempt_ip;
+            
+            # Count failures within time window for this IP
+            if ($attempt_ip eq $ip && ($now - $timestamp) <= $window) {
+                $count++;
+            }
+        }
+        unlock_file($fh);
+        close($fh);
+    }
+    
+    return $count;
+}
+
+# Clean up old login attempts outside the tracking window
+sub cleanup_old_login_attempts {
+    require_module("pb-defaults");
+    our %config;
+    
+    my $failed_file = "$config{'home'}$config{'data'}/failed_logins";
+    return unless -e $failed_file;
+    
+    my $now = time();
+    my $window = $config{'sec_failed_window'} || 600;
+    my @kept_lines;
+    
+    if (open(my $fh, '<', $failed_file)) {
+        lock_file($fh);
+        while (my $line = <$fh>) {
+            chomp $line;
+            my ($timestamp) = split(/\|/, $line);
+            next unless defined $timestamp;
+            
+            # Keep only recent attempts
+            if (($now - $timestamp) <= ($window * 2)) {
+                push @kept_lines, $line;
+            }
+        }
+        unlock_file($fh);
+        close($fh);
+        
+        # Rewrite file with only recent attempts
+        if (open(my $out, '>', $failed_file)) {
+            lock_file($out);
+            print $out "$_\n" for @kept_lines;
+            unlock_file($out);
+            close($out);
+        }
+    }
+}
+
+# Check if an IP is banned
+# Returns (banned, reason, expires_at) or (0, undef, undef)
+sub check_ip_banned {
+    my ($ip) = @_;
+    return (0, undef, undef) unless defined $ip;
+    
+    require_module("pb-defaults");
+    our %config;
+    
+    # Check if IP is whitelisted
+    return (0, undef, undef) if is_ip_whitelisted($ip);
+    
+    my $banned_file = "$config{'home'}$config{'data'}/banned_ip";
+    return (0, undef, undef) unless -e $banned_file;
+    
+    my $now = time();
+    
+    if (open(my $fh, '<', $banned_file)) {
+        lock_file($fh);
+        while (my $line = <$fh>) {
+            chomp $line;
+            
+            # Support both old format (just IP) and new format (IP|reason|expires)
+            my ($banned_ip, $reason, $expires) = split(/\|/, $line);
+            next unless defined $banned_ip;
+            
+            # Simple string match (supports regex patterns)
+            if ($ip =~ /$banned_ip/i) {
+                # Check if ban has expired
+                if (defined $expires && $expires > 0 && $now > $expires) {
+                    next; # Ban expired, skip
+                }
+                
+                unlock_file($fh);
+                close($fh);
+                return (1, $reason // 'Banned', $expires);
+            }
+        }
+        unlock_file($fh);
+        close($fh);
+    }
+    
+    return (0, undef, undef);
+}
+
+# Automatically ban an IP due to failed login attempts
+sub auto_ban_ip {
+    my ($ip, $reason) = @_;
+    return 0 unless defined $ip;
+    
+    require_module("pb-defaults");
+    our %config;
+    
+    $reason //= "Auto-banned for suspicious activity";
+    
+    my $duration = $config{'sec_autoban_duration'} || 3600;
+    my $expires = ($duration > 0) ? (time() + $duration) : 0;
+    
+    manual_ban_ip($ip, $reason, $expires);
+    
+    # Log the auto-ban
+    logger("SECURITY: Auto-banned IP $ip - $reason (expires: " . 
+           ($expires > 0 ? scalar(localtime($expires)) : 'never') . ")");
+    
+    return 1;
+}
+
+# Manually ban an IP
+sub manual_ban_ip {
+    my ($ip, $reason, $expires) = @_;
+    return 0 unless defined $ip;
+    
+    require_module("pb-defaults");
+    our %config;
+    
+    my $banned_file = "$config{'home'}$config{'data'}/banned_ip";
+    $reason //= "Manually banned";
+    $expires //= 0; # 0 = permanent
+    
+    # Check if already banned
+    my ($is_banned) = check_ip_banned($ip);
+    return 1 if $is_banned; # Already banned
+    
+    # Append to ban list
+    if (open(my $fh, '>>', $banned_file)) {
+        lock_file($fh);
+        print $fh "$ip|$reason|$expires\n";
+        unlock_file($fh);
+        close($fh);
+        
+        logger("SECURITY: Banned IP $ip - $reason");
+        return 1;
+    }
+    
+    return 0;
+}
+
+# Unban an IP
+sub unban_ip {
+    my ($ip) = @_;
+    return 0 unless defined $ip;
+    
+    require_module("pb-defaults");
+    our %config;
+    
+    my $banned_file = "$config{'home'}$config{'data'}/banned_ip";
+    return 0 unless -e $banned_file;
+    
+    my @kept_lines;
+    my $found = 0;
+    
+    if (open(my $fh, '<', $banned_file)) {
+        lock_file($fh);
+        while (my $line = <$fh>) {
+            chomp $line;
+            my ($banned_ip) = split(/\|/, $line);
+            
+            # Keep all lines except the one matching this IP
+            if (defined $banned_ip && $banned_ip ne $ip) {
+                push @kept_lines, $line;
+            } else {
+                $found = 1;
+            }
+        }
+        unlock_file($fh);
+        close($fh);
+        
+        # Rewrite file without the unbanned IP
+        if ($found && open(my $out, '>', $banned_file)) {
+            lock_file($out);
+            print $out "$_\n" for @kept_lines;
+            unlock_file($out);
+            close($out);
+            
+            logger("SECURITY: Unbanned IP $ip");
+            return 1;
+        }
+    }
+    
+    return 0;
+}
+
+# Get list of all banned IPs
+sub get_banned_ips {
+    require_module("pb-defaults");
+    our %config;
+    
+    my $banned_file = "$config{'home'}$config{'data'}/banned_ip";
+    return () unless -e $banned_file;
+    
+    my @bans;
+    my $now = time();
+    
+    if (open(my $fh, '<', $banned_file)) {
+        lock_file($fh);
+        while (my $line = <$fh>) {
+            chomp $line;
+            my ($ip, $reason, $expires) = split(/\|/, $line);
+            next unless defined $ip;
+            
+            # Skip expired bans
+            next if (defined $expires && $expires > 0 && $now > $expires);
+            
+            push @bans, {
+                ip => $ip,
+                reason => $reason // 'No reason given',
+                expires => $expires // 0,
+            };
+        }
+        unlock_file($fh);
+        close($fh);
+    }
+    
+    return @bans;
+}
+
+# Get failed login statistics
+sub get_failed_login_stats {
+    my ($limit) = @_;
+    $limit //= 50;
+    
+    require_module("pb-defaults");
+    our %config;
+    
+    my $failed_file = "$config{'home'}$config{'data'}/failed_logins";
+    return () unless -e $failed_file;
+    
+    my @attempts;
+    my $now = time();
+    
+    if (open(my $fh, '<', $failed_file)) {
+        lock_file($fh);
+        while (my $line = <$fh>) {
+            chomp $line;
+            my ($timestamp, $ip, $username) = split(/\|/, $line);
+            next unless defined $timestamp && defined $ip;
+            
+            push @attempts, {
+                timestamp => $timestamp,
+                ip => $ip,
+                username => $username // 'unknown',
+                ago => $now - $timestamp,
+            };
+        }
+        unlock_file($fh);
+        close($fh);
+    }
+    
+    # Sort by most recent first, limit results
+    @attempts = sort { $b->{timestamp} <=> $a->{timestamp} } @attempts;
+    @attempts = splice(@attempts, 0, $limit) if @attempts > $limit;
+    
+    return @attempts;
+}
+
+# Check if IP is whitelisted
+sub is_ip_whitelisted {
+    my ($ip) = @_;
+    return 0 unless defined $ip;
+    
+    require_module("pb-defaults");
+    our %config;
+    
+    return 0 unless $config{'sec_whitelist_enabled'};
+    
+    my $whitelist_file = "$config{'home'}$config{'data'}/whitelist_ip";
+    return 0 unless -e $whitelist_file;
+    
+    if (open(my $fh, '<', $whitelist_file)) {
+        lock_file($fh);
+        while (my $line = <$fh>) {
+            chomp $line;
+            next if $line =~ /^#/; # Skip comments
+            next unless $line =~ /\S/; # Skip empty lines
+            
+            # Support regex patterns
+            if ($ip =~ /$line/i) {
+                unlock_file($fh);
+                close($fh);
+                return 1;
+            }
+        }
+        unlock_file($fh);
+        close($fh);
+    }
+    
+    return 0;
+}
+
+# Helper to load pb-defaults if needed
+sub require_module {
+    my ($mod) = @_;
+    my $sys_path = "/opt/photonbbs/modules/$mod";
+    my $local_path = "./modules/$mod";
+    if (-e $sys_path) {
+        require $sys_path;
+    } elsif (-e $local_path) {
+        require $local_path;
+    }
+}
+
+# Helper to log messages (stub - actual logger in pb-framework)
+sub logger {
+    my ($message) = @_;
+    # This will be overridden by pb-framework's logger if loaded
+    print STDERR "[SECURITY] $message\n";
 }
 
 1;

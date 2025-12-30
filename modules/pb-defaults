@@ -71,6 +71,14 @@ our %config = (
     discorduser => "Photon BBS",              ## Discord username for notifications
     discordavatar => "",                      ## Discord avatar URL for notifications
     allow_duplicate_ips => "0",               ## Allow duplicate IPs (1 = Yes, 0 = No)
+    
+    ## Security settings
+    sec_track_failed_logins => "1",           ## Track failed login attempts (1 = Yes, 0 = No)
+    sec_failed_threshold => "5",              ## Number of failed logins before auto-ban
+    sec_failed_window => "600",               ## Time window in seconds (default: 10 minutes)
+    sec_autoban_duration => "3600",           ## Auto-ban duration in seconds (default: 1 hour, 0 = permanent)
+    sec_log_failures => "1",                  ## Log failed login attempts (1 = Yes, 0 = No)
+    sec_whitelist_enabled => "0",             ## Enable IP whitelist (1 = Yes, 0 = No)
 );
 
 unless (-d $config{'home'}) {
