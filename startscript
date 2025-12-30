@@ -6,6 +6,7 @@ export PATH="/bin:/sbin:/usr/bin:/usr/sbin:/doorexec:/usr/doorexec:$PATH"
 ### Set up the PhotonBBS data files to be persistent.
 ###
 
+# Always ensure data is linked to appdata
 if [ -d '/opt/photonbbs/data' ]
 then
   if [ ! -e '/appdata/.migrated' ]
@@ -13,7 +14,7 @@ then
     mv /opt/photonbbs/data/* /appdata
   fi
   rm -rf /opt/photonbbs/data
-  ln -s /appdata /opt/photonbbs/data
+  ln -sf /appdata /opt/photonbbs/data
   touch /appdata/.migrated
 fi
 
@@ -29,43 +30,36 @@ then
 fi
 chown -R nobody:nobody /appdata/photonmud 2>/dev/null || true
 
-if [ ! -h '/opt/photonbbs/doorexec' ]
+# Always ensure doorexec is properly linked
+if [ ! -d '/appdata/doorexec' ] && [ -d '/opt/photonbbs/doorexec' ]
 then
-  if [ ! -d '/appdata/doorexec' ]
-  then
-    mv /opt/photonbbs/doorexec /appdata
-  fi
-  rm -rf /opt/photonbbs/doorexec
-  ln -s /appdata/doorexec /opt/photonbbs
+  mv /opt/photonbbs/doorexec /appdata
 fi
+rm -rf /opt/photonbbs/doorexec
+ln -sf /appdata/doorexec /opt/photonbbs/doorexec
+chmod +x /appdata/doorexec/*.sh 2>/dev/null || true
+chown -R nobody:nobody /appdata/doorexec 2>/dev/null || true
 
-if [ ! -h '/opt/photonbbs/doors' ]
+# Always ensure doors directory is properly linked
+if [ ! -d '/appdata/doors' ] && [ -d '/opt/photonbbs/doors' ]
 then
-  if [ ! -d '/appdata/doors' ]
-  then
-    mv /opt/photonbbs/doors /appdata
-  fi
-  rm -rf /opt/photonbbs/doors
-  ln -s /appdata/doors /opt/photonbbs
+  mv /opt/photonbbs/doors /appdata
 fi
+rm -rf /opt/photonbbs/doors
+ln -sf /appdata/doors /opt/photonbbs/doors
+chown -R nobody:nobody /appdata/doors 2>/dev/null || true
 
 ###
 ### Create the nodeinfo directory, this is needed for doors to work.
 ###
 
-if [ ! -d '/dev/shm/photonbbs/doors/nodes' ]
-then
-  mkdir -p /dev/shm/photonbbs/doors/nodes
-fi
+mkdir -p /dev/shm/photonbbs/doors/nodes
 # Ensure the BBS user can write to this directory
 chown -R nobody:nobody /dev/shm/photonbbs
 chmod -R 777 /dev/shm/photonbbs
 
 # Ensure photonmud transient directory exists with proper permissions
-if [ ! -d '/dev/shm/photonmud' ]
-then
-  mkdir -p /dev/shm/photonmud/room_players
-fi
+mkdir -p /dev/shm/photonmud/room_players
 chown -R nobody:nobody /dev/shm/photonmud
 chmod -R 777 /dev/shm/photonmud
 
@@ -74,61 +68,43 @@ chmod -R 777 /dev/shm/photonmud
 ### to make it available to the doors.
 ###
 
-if [ ! -L '/appdata/doors/nodes' ]
-then
-  ln -sf /dev/shm/photonbbs/doors/nodes /appdata/doors/nodes
-fi
+# Always recreate this link
+rm -f /appdata/doors/nodes
+ln -sf /dev/shm/photonbbs/doors/nodes /appdata/doors/nodes
 
 ###
 ### Dosemu
 ###
 
-if [ ! -e '/appdata/.dosemu/drive_c' ]
-then
-  mkdir -p /appdata/.dosemu/drive_c
-fi
+mkdir -p /appdata/.dosemu/drive_c
+mkdir -p /appdata/.dosemu/drives
 
-if [ ! -e '/appdata/.dosemu/drives' ]
-then
-  mkdir -p /appdata/.dosemu/drives
-fi
+# Always recreate DOSEMU drive links
+rm -f /appdata/.dosemu/drives/d
+ln -sf /usr/share/dosemu/drive_z /appdata/.dosemu/drives/d
 
-if [ ! -h '/appdata/.dosemu/drives/d' ]
-then
-  ln -s /usr/share/dosemu/drive_z /appdata/.dosemu/drives/d
-fi
-
-if [ ! -h '/appdata/.dosemu/drives/c' ]
-then
-  ln -s /appdata/.dosemu/drive_c /appdata/.dosemu/drives/c 2>/dev/null
-fi
+rm -f /appdata/.dosemu/drives/c
+ln -sf /appdata/.dosemu/drive_c /appdata/.dosemu/drives/c
 
 ###
 ### Link /opt/photonbbs/.dosemu to /appdata/.dosemu
 ###
 
-if [ ! -h '/opt/photonbbs/.dosemu' ]
-then
-  # Remove old .dosemu directory from image if it exists
-  rm -rf /opt/photonbbs/.dosemu
-  ln -s /appdata/.dosemu /opt/photonbbs/.dosemu
-fi
+# Always recreate .dosemu link
+rm -rf /opt/photonbbs/.dosemu
+ln -sf /appdata/.dosemu /opt/photonbbs/.dosemu
 
 ###
 ### Create DOSEMU C: drive symlinks for door games
 ###
 
-# Link doors directory so DOSEMU can access at c:\doors\
-if [ ! -h '/appdata/.dosemu/drive_c/doors' ]
-then
-  ln -sf /appdata/doors /appdata/.dosemu/drive_c/doors
-fi
+# Always recreate doors link for DOSEMU
+rm -f /appdata/.dosemu/drive_c/doors
+ln -sf /appdata/doors /appdata/.dosemu/drive_c/doors
 
-# Link nodeinfo directory so DOSEMU can access drop files at c:\nodeinfo\
-if [ ! -h '/appdata/.dosemu/drive_c/nodeinfo' ]
-then
-  ln -sf /dev/shm/photonbbs/doors/nodes /appdata/.dosemu/drive_c/nodeinfo
-fi
+# Always recreate nodeinfo link for DOSEMU drop files
+rm -f /appdata/.dosemu/drive_c/nodeinfo
+ln -sf /dev/shm/photonbbs/doors/nodes /appdata/.dosemu/drive_c/nodeinfo
 
 ###
 ### Set DOSEMU directory permissions for nobody user
@@ -141,12 +117,13 @@ chmod -R 755 /appdata/.dosemu 2>/dev/null || true
 ### Move /etc/default/photonbbs to /appdata
 ###
 
-if [ ! -h "/appdata/default/photonbbs" ]
+mkdir -p /appdata/default
+if [ -f '/etc/default/photonbbs' ] && [ ! -h '/etc/default/photonbbs' ]
 then
-  mkdir /appdata/default 2>/dev/null
-  mv /etc/default/photonbbs /appdata/default 2>/dev/null
-  ln -s /appdata/default/photonbbs /etc/default 2>/dev/null
+  mv /etc/default/photonbbs /appdata/default/
 fi
+rm -f /etc/default/photonbbs
+ln -sf /appdata/default/photonbbs /etc/default/photonbbs
 
 ### The BBS won't manage this since it's a link
 chown -R nobody:nobody /appdata /opt/photonbbs/data

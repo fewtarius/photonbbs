@@ -18,7 +18,7 @@ echo -e "STATBACK 7\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
 echo -e ";COLOR1\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
 echo -e "NODIRECT\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
 echo -e ";UNUSED\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
-echo -e "BBSDROP c:\nodeinfo\$2\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
+echo -e 'BBSDROP c:\\nodeinfo\\'$2'\r' >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
 echo -e ";UNUSED\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
 echo -e ";UNUSED\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
 echo -e ";UNUSED\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
