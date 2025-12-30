@@ -130,8 +130,8 @@ require_module("pm-utils");
 require_module("pm-messaging");
 require_module("pm-broker-client");  # Message broker client
 
-my $MONSTER_PER_ROOM = 0.04; # 1 monster per 12 rooms
-our $MAX_MONSTERS_PER_ROOM = 3; # Maximum monsters allowed in a single room
+my $MONSTER_PER_ROOM = ($CPU_COUNT <= 1) ? 0.005 : 0.04;  # Single CPU: 1 per 200 rooms, Multi: 1 per 25 rooms
+our $MAX_MONSTERS_PER_ROOM = ($CPU_COUNT <= 1) ? 1 : 3;  # Single CPU: max 1 per room, Multi: max 3
 my $MAX_MONSTER_THREADS = $MAX_MONSTER_THREADS_LIMIT;  # Use CPU-aware limit
 my %active_monster_threads :shared;
 
