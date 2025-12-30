@@ -1,0 +1,530 @@
+# PhotonBBS - BBS Platform Documentation
+
+Complete guide to the PhotonBBS bulletin board system
+
+Copyright (C) 2002-present, Fewtarius
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+
+The latest version of this software can be downloaded from:
+
+https://github.com/fewtarius/photonbbs
+
+## Live Demo
+
+Try PhotonBBS live at **Terminal Tavern**:
+
+```
+telnet bbs.terminaltavern.com
+```
+
+Experience the full BBS and PhotonMUD integration in action!
+
+## About PhotonBBS
+
+PhotonBBS is a full-featured UNIX/Linux multi-node bulletin board system (BBS) written in Perl with support for chat, bulletins, oneliners, and classic BBS door games. It integrates seamlessly with PhotonMUD for a complete retro computing experience.
+
+This document covers the BBS platform specifically. For MUD gameplay, see [PHOTONMUD.md](PHOTONMUD.md). For development, see [DEVELOPER.md](DEVELOPER.md). For project overview, see [README.md](README.md).
+
+### Obligatory Screenshot
+
+![alt tag](https://imgur.com/8gGLgnC.png)
+
+## Core Components
+
+PhotonBBS consists of several key components:
+
+1. **photonbbs** - The main daemon that handles connections, node management, and session maintenance
+2. **photonbbs-client** - The client application that users interact with when connected
+3. **Utility Scripts** - Various maintenance and administration utilities
+
+### The PhotonBBS Daemon
+
+The `photonbbs` daemon is the main server component that:
+- Listens for incoming telnet connections on the configured port
+- Manages node assignments and node status
+- Performs regular maintenance and cleanup of inactive sessions
+- Launches scheduled tasks via hourly.d and daily.d directories
+- Handles session tracking and permissions
+
+Command-line options:
+```
+photonbbs [options]
+
+Options:
+  --debug      Enable debug output
+  --daemon     Run as background daemon
+  --verbose    Verbose session/user reporting
+  --quiet      Suppress all output except errors
+  --local      Run bin/photonbbs-client directly for local use
+  --help, -h   Show this help message
+```
+
+### The PhotonBBS Client
+
+The `photonbbs-client` handles user interaction including:
+- Login/authentication
+- Chat functionality
+- Menu navigation
+- Access to BBS doors and other features
+
+## User Interface
+
+Users using PhotonBBS land in a primary "channel" upon logging in and can
+begin immediately communicating with other users or they are free to create
+channels of their own. The following describes system commands available
+to all users:
+
+### User Functions
+
+    /ACTION <ACTIONS>         Perform <action>                    ...  /A
+    /WHISPER <WHO> <MESSAGE>  Send private message                ...  /W
+    /BROADCAST <MESSAGE>      Send message to all users           ...  /R
+    /INV                      Become Invisible                    ...   !
+    /QUIT                     Log off the system                  ...   x
+
+### System Commands
+
+    /USERS                    Who is logged into the system       ...   #
+    /SCAN                     Locate chat users                   ...  /S
+    /CHANNELS                 Show available channels             ...  /C
+    /ONELINERS                Write on the wall                   ...   %
+    /BULLETINS                System Bulletins                    ...   @
+
+### Room Commands
+
+    /JOIN <ROOM>              Joins room <room>                   ...  /J
+    /BAN <USER>               (UN)Bans <user> from room           ...  /B
+    /HIDE                     (UN)Hides room from channel scan    ...  /H
+    /OP <USER>                (UN)Assign a user as a ChanOp       ...  /O
+    /SSL                      (UN)Enforce SSH on room             ...  /E
+    /PRIVATE                  (UN)Sets a room PRIVATE             ...  /V
+    /ALLOW <USER>             (UN)Allow <user(s)> in Private room ...  /L
+    /TOPIC                    Set the channel topic               ...  /T
+    /STATUS                   Show room status                    ...  /$
+
+### User Settings
+
+    /INFO                     Display your user settings
+    /SET <COMMAND>            Set user preferences (SEE BELOW)    ...  /U
+      Commands:
+        NAME                    Set your full name
+        PASSWORD                Reset your password
+        EMAIL                   Change your email address
+        LOCATION                Set your call location
+        PHONE                   Set your phone number
+        DOB                     Change your DOB
+        ANSI                    Change your ANSI preference
+        DEFAULT                 Set your default channel
+        UNIXPWD                 Change your unix password if applicable
+
+## Installation
+
+PhotonBBS is deployed via Docker for maximum compatibility and ease of use.
+
+### Quick Start (Recommended)
+
+**Using docker-compose:**
+
+```bash
+git clone https://github.com/fewtarius/photonbbs.git
+cd photonbbs
+make docker-up
+```
+
+PhotonBBS will build and start automatically. Connect via `telnet localhost 23`.
+
+**Using Docker directly:**
+
+```bash
+docker container run -dti --restart unless-stopped --net host \
+  --device=/dev/tty0 \
+  -v appdata:/appdata:rw \
+  -v /dev:/dev \
+  -v /lib/modules:/lib/modules \
+  -v /sys/fs/cgroup:/sys/fs/cgroup \
+  --privileged \
+  fewtarius/photonbbs
+```
+
+### Building from Source
+
+```bash
+# Clone repository
+git clone https://github.com/fewtarius/photonbbs.git
+cd photonbbs
+
+# Build Docker image
+make docker-build
+
+# Start PhotonBBS
+make docker-up
+
+# View logs
+make docker-logs
+
+# Access shell
+make docker-shell
+```
+
+### Makefile Targets
+
+PhotonBBS includes a comprehensive Makefile for building and managing deployments:
+
+**Docker Targets:**
+- `make docker-build` - Build Docker image
+- `make docker-up` - Start container (runs in background)
+- `make docker-down` - Stop container
+- `make docker-restart` - Restart container
+- `make docker-logs` - View container logs (follow mode)
+- `make docker-shell` - Open shell in running container
+- `make docker-rebuild` - Full rebuild (stop, build, start)
+- `make docker-clean` - Remove all containers and images (destructive)
+
+**TTY Wrapper (for advanced users):**
+- `make` - Build photonbbs-tty wrapper
+- `make install` - Install system-wide
+- `make clean` - Clean build artifacts
+
+Run `make help` for complete documentation.
+
+### System Requirements
+
+**For Docker deployment (recommended):**
+- Docker Engine 20.10 or higher
+- docker-compose (optional but recommended)
+- 512MB RAM minimum, 1GB+ recommended
+- TCP port 23 available (or configure alternate port)
+
+**System compatibility:**
+- Linux (any modern distribution)
+- macOS with Docker Desktop
+- Windows with Docker Desktop + WSL2
+
+**Note:** PhotonBBS runs in a Rocky Linux 9 container with all dependencies pre-installed.
+
+### Shared Storage
+
+PhotonBBS is capable of multinode support across multiple hosts or containers. If deploying PhotonBBS using NFS for shared storage, caching must be disabled on the NFS client using mount options lookupcache=none and noac. If this is a shared mountpoint, these options could degrade performance of other applications.
+
+### Admin Account
+
+Once your BBS is configured, connect via telnet and create your sysop account. After
+logging in and successfully creating the account, use the user editor to grant
+yourself administrative rights to the BBS:
+
+```
+$ docker ps
+$ docker exec -it {CONTAINER ID} /bin/bash
+# /appdata/sbin/useredit.pl
+```
+
+Change the security level to 500 or higher. Be sure to not add any additional whitespace to the file.
+
+## Configuration
+
+### Core Configuration
+
+The main configuration is stored in `/opt/photonbbs/modules/pb-defaults`. This file defines:
+- BBS home directory
+- Data and nodes directories
+- Port number
+- Unix user for the BBS
+- Maximum nodes allowed
+- Maintenance intervals
+- Default theme
+- Various other BBS settings
+
+### Menu Configuration
+
+Menus are stored in the data directory. The main menu is defined in `main.mnu`, and external commands are in `external.mnu`.
+
+### System Maintenance
+
+PhotonBBS includes a maintenance script (`bin/maint.sh`) that:
+- Cleans up defunct processes
+- Checks for and removes stale node files
+- Handles timeout of inactive sessions
+
+This is automatically run by the daemon at regular intervals.
+
+## Customizing the BBS
+
+### Text Files
+
+  * banned_ip - List of IP addresses not allowed on the system
+  * ip_list - List of IP addresses allowed to log into a private system
+  * welcome.txt - This is the screen presented to the user at the initial connection
+  * bulletins.txt - This is a customized index screen for your bulletins
+  * lastcalltop.txt, lastcallbot.txt - Last caller customized header and footer
+  * oneltop.txt, onelbot.txt - Oneliners customized header and footer
+  * login.txt - This screen is presented just after login
+  * telehelp.txt - This is the help file presented in teleconference when the user presses the ? key
+  * account.txt - This is the user information file presented in teleconference with the INFO command
+
+An informational message can be left in the main channel for users by editing the main channel message:
+
+```
+$ vi /opt/photonbbs/data/messages/teleconf/MAIN/message
+```
+
+The BBS software will detect ANSI (.ans) and ASCII (.asc) files of the same name as any .txt used by the system, and use the ANSI or ASCII variant first if available. ANSI, ASCII, and TEXT files as well as any message sent by users of the system may contain @CODES which are converted by the BBS. A description of available @CODES is as follows:
+
+### Action Colors
+
+    @CLR    - Clear screen (For ANSI files only)  
+    @RST    - Reset terminal color
+    @BLK    - Black
+    @RED    - Red
+    @GRN    - Green
+    @YLW    - Yellow
+    @BLU    - Blue
+    @MAG    - Magenta
+    @WHT    - White (Light Grey)
+    @CYN    - Cyan
+    @BBK    - Bright Black (Grey)
+    @BRD    - Bright Red
+    @BGN    - Bright Green
+    @BYL    - Bright Yellow
+    @BBL    - Bright Blue
+    @BMG    - Bright Magenta
+    @BCN    - Bright Cyan
+    @BWH    - Bright White
+
+### System Variables
+
+    @SYSTEMCLR   - System output color
+    @USERCLR     - User metadata color
+    @INPUTCLR    - Input color
+    @ERRORCLR    - Error color
+    @THEMECLR    - General theme color
+    @PROMPTCLR   - Prompt color (:?)
+    @DATACLR     - System generated data color
+    @LINECLR     - Line color (Oneliner top/bottom)
+    @SYSNM       - BBS name
+    @SVRNM       - BBS software name
+    @MENU        - Currently selected menu
+    @NODE        - Your node number
+    @USERS       - Number of users online now
+    @CONNECT     - IP address you are connecting from
+    @HOST        - BBS hostname
+    @IP          - BBS IP Address
+    @TIME        - The current time
+    @DATE        - The current date
+    @TOTALCALLS  - Total number of calls to the BBS
+    @USER        - Your handle
+    @RNAME       - Your real name
+    @DOB         - Your date of birth
+    @PHONE       - Your phone number
+    @LOCAL       - User location
+    @ID          - Users system ID index number
+    @PRONOUN     - Your pronoun
+    @EMAIL       - Your email address
+    @DND         - Do not disturb flag
+    @BANNED      - Account ban flag
+    ~AT          - Provides @ Symbol
+
+## Themes
+
+PhotonBBS supports customizable themes in the `/opt/photonbbs/data/themes/` directory. The default theme is configurable in the main configuration file. Available themes include:
+- photon
+- mbbs
+
+## System Bulletins
+
+System Bulletins are a simple way to communicate news and information to
+your users. PhotonBBS ships with a bulletin editor (`.BULLEDIT`) to help
+create and manage system bulletins. Bulletins even support @CODES in the
+title, and in the bulletin itself.
+
+## Menu System
+
+PhotonBBS uses a menu system defined in menu files. The format of these files is:
+
+```
+Key|Command|Description|Security Level|Hidden
+```
+
+### Internal Commands
+
+PhotonBBS provides several built-in internal commands that can be included in menus:
+
+| Key  | Description             | Command Handler         |
+|------|-------------------------|------------------------|
+| &    | Teleconference          | menu_teleconference    |
+| #    | Who's online            | whosonline             |
+| %    | Write on the wall       | oneliners              |
+| @    | Read System Bulletins   | bulletins              |
+| !    | Log Off and Exit        | menu_exit              |
+
+You can add these to any menu by including the key and description.
+
+### Submenus
+
+To create a submenu, set the Type to `submenu` and the Script to the submenu filename (e.g., `utils.mnu`).  
+Users can navigate back to the previous menu by typing `^`.
+
+## Scheduled Tasks
+
+PhotonBBS supports scheduled execution of scripts in three directories:
+
+1. **services.d** - Scripts in this directory are launched at startup and run continuously
+2. **hourly.d** - Scripts here run every hour on the hour
+3. **daily.d** - Scripts here run once per day at the configured hour (default: midnight)
+
+These scripts run with reduced privileges (as the "nobody" user).
+
+## BBS Door Support
+
+PhotonBBS v1.5 and later provide support for BBS doors. The following drop file formats
+are supported:
+
+  * DOOR.SYS
+  * DORINFO1.DEF
+  * DORINFOx.DEF
+
+Multiple example configuration files are provided to help you get started. This
+includes batch files and scripts for:
+
+  * Tradewars 2002
+  * Legend of the Red Dragon
+  * Lunatix
+  * Barren Realms Elite
+  * Operation Overkill II
+  * Simpsons
+  * Darkness
+  * Dopewars
+
+### Door Configuration
+
+To configure doors, create a shell script in `/opt/photonbbs/sbin`,
+and add a line to `/opt/photonbbs/data/external.mnu`. The format of the external.mnu
+file is as follows:
+
+```
+Menu Name|Channel|Description|Executable|Security Level|Hidden|Special|Maximum Users
+```
+
+* Menu Name - This is what a user would type to execute the command
+* Channel - This is the channel that a user is changed to when the command executes
+* Description - This is what is shown to other users in the room when the command is executed
+* Executable - This is the command to execute
+* Security Level - This is the minimum security level to execute command
+* Hidden - Is this item hidden?
+* Special - Internal or External command? (Internal commands are subroutines, add-ons to photonbbs)
+* Maximum Users - Maximum number of users executing the command concurrently
+
+Example:
+
+```
+SYSLOG|HIDEOUT|heads to his favorite hideout|tailsys.sh|500|1|external|1
+```
+
+### Door Installation
+
+Door games should be placed in the `/opt/photonbbs/doors` directory. For DOS-based doors, you'll need to create symbolic links:
+
+```
+ln -s /opt/photonbbs/doors /opt/photonbbs/.dosemu/drive_c/doors
+ln -s /opt/photonbbs/doors/nodes /opt/photonbbs/.dosemu/drive_c/nodeinfo
+```
+
+Note: Lunatix will not work over a link, place luna in `/opt/photonbbs/.dosemu/drive_c`
+
+### Built-in Utilities
+
+In addition to external BBS doors support, this feature also allows for external utilities to be
+available to anyone with proper security. PhotonBBS ships with several utilities:
+
+    .USEREDIT  - BBS User editor
+    .BULLEDIT  - BBS Bulletin editor
+    .DOS       - FreeDOS Shell
+    .SHELL     - BASH Shell
+
+## Administrative Tools
+
+PhotonBBS includes several administrative tools:
+
+1. **useredit** - User editor for managing accounts, security levels, etc.
+2. **bulledit** - Bulletin editor for managing system bulletins
+3. **newpass** - Password reset utility
+4. **procmon.pl** - Process monitoring utility
+
+## Security Considerations
+
+### User Permissions
+
+PhotonBBS runs with reduced privileges for better security:
+- The daemon starts as root to bind to port 23
+- Each client connection drops privileges to the configured BBS user
+- The data directory is owned by the BBS user with restricted permissions
+- Scheduled tasks run as the "nobody" user
+
+### IP Controls
+
+PhotonBBS offers IP address controls:
+- Option to disallow duplicate IP connections
+- Support for banned IP addresses
+- Option for a whitelist of allowed IPs
+
+## Technical Architecture
+
+### Node Management
+
+PhotonBBS manages nodes through several mechanisms:
+- Each connection is assigned a node number
+- Node information is stored in `/opt/photonbbs/data/nodes/`
+- The daemon monitors node activity and cleans up stale connections
+- A maintenance thread runs periodically to check node status
+
+### Session Management
+
+Session management includes:
+- IP tracking to prevent duplicate connections
+- Session maintenance to clean up inactive users
+- Cleanup of disconnected sessions' files and resources
+
+### Modules
+
+PhotonBBS uses a modular architecture with core modules in `/opt/photonbbs/modules/`:
+- pb-defaults - System configuration
+- pb-framework - Core BBS framework
+- pb-usertools - User management functions
+- pb-main - Main BBS functionality
+- pb-doors - Door game support
+- pb-lastcallers - Last caller functionality
+- pb-oneliners - Oneliner wall functionality
+
+## Troubleshooting
+
+### Common Issues
+
+1. **No available nodes error**: The BBS has reached its maximum configured nodes. Check the `totalnodes` setting in the configuration.
+
+2. **Permission issues**: Ensure the data directory is owned by the BBS user with appropriate permissions.
+
+3. **Door games not working**: Check that the door scripts and symbolic links are correctly set up.
+
+4. **Stale sessions**: If users get stuck, the maintenance script will clean them up after the configured timeout (default: 30 minutes).
+
+### Logging
+
+PhotonBBS logs key events when not in quiet mode:
+- Connection attempts and session starts
+- User logins and logouts
+- System maintenance activities
+- Door execution
+
+For more detailed logging, use the `--debug` or `--verbose` options.

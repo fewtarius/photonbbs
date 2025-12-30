@@ -1,5 +1,7 @@
 # PhotonBBS
-A simple chat server for Unix / Linux
+
+A complete telnet BBS and MUD platform for Unix/Linux
+
 Copyright (C) 2002-present, Fewtarius
 
 This program is free software; you can redistribute it and/or modify
@@ -17,145 +19,189 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 The latest version of this software can be downloaded from:
-
 https://github.com/fewtarius/photonbbs
 
 ## Live Demo
 
-Try PhotonBBS live at **Terminal Tavern**:
+Try PhotonBBS and PhotonMUD live at **Terminal Tavern**:
 
 ```
 telnet bbs.terminaltavern.com
 ```
 
-Experience the full BBS and PhotonMUD integration in action!
+Experience the full BBS, chat system, door games, and integrated MUD gameplay!
+
+![PhotonBBS Screenshot](https://imgur.com/8gGLgnC.png)
 
 ## About
 
-PhotonBBS is a simple UNIX / Linux multi-node chat server written in Perl
-with support for BBS door games. It was designed to be modular and provides
-a built-in set of functions that allow the BBS to be extended very simply.
+PhotonBBS is a comprehensive telnet-based bulletin board system (BBS) and multi-user dungeon (MUD) platform written in Perl. Originally created as a simple multi-node chat server, it has evolved into a full-featured platform combining classic BBS functionality with a modern, procedurally-generated MUD adventure.
 
-### Obligatory Screenshot
+### What Makes PhotonBBS Unique
 
-![alt tag](https://imgur.com/8gGLgnC.png)
+**Integrated BBS and MUD**: PhotonBBS seamlessly combines traditional BBS features (chat, bulletins, door games) with PhotonMUD, a fully-featured multi-user dungeon with procedurally-generated worlds, dynamic combat, and persistent gameplay.
+
+**Modular Architecture**: Built with extensibility in mind, PhotonBBS uses a modular Perl-based architecture that makes it easy to add new features, customize behavior, and integrate external door games.
+
+**Classic BBS Revival**: Support for traditional BBS door games like Legend of the Red Dragon, Trade Wars 2002, and many others, allowing preservation of classic DOS gaming.
+
+**Modern Deployment**: Containerized deployment via Docker ensures easy installation and portability across Linux, macOS, and Windows.
 
 ## Core Components
 
-PhotonBBS consists of several key components:
+### PhotonBBS - The BBS Platform
 
-1. **photonbbs** - The main daemon that handles connections, node management, and session maintenance
-2. **photonbbs-client** - The client application that users interact with when connected
-3. **Utility Scripts** - Various maintenance and administration utilities
+The core BBS provides:
+- Multi-user chat and teleconference system
+- User account management and authentication
+- System bulletins and oneliners
+- Customizable menu system
+- Theme support with ANSI colors
+- Classic BBS door game support
+- Administrative tools and utilities
 
-### The PhotonBBS Daemon
+See [PHOTONBBS.md](PHOTONBBS.md) for complete BBS documentation.
 
-The `photonbbs` daemon is the main server component that:
-- Listens for incoming telnet connections on the configured port
-- Manages node assignments and node status
-- Performs regular maintenance and cleanup of inactive sessions
-- Launches scheduled tasks via hourly.d and daily.d directories
-- Handles session tracking and permissions
+### PhotonMUD - The Multi-User Dungeon
 
-Command-line options:
-```
-photonbbs [options]
+PhotonMUD is a fully-featured MUD with:
+- Procedurally-generated persistent worlds
+- D&D-style combat system with dice mechanics
+- Character classes, races, and progression
+- Magic system with spells and abilities
+- Monster AI with intelligent behavior
+- Dynamic economy and trading
+- Multiplayer exploration and interaction
+- Unique world generation every campaign
 
-Options:
-  --debug      Enable debug output
-  --daemon     Run as background daemon
-  --verbose    Verbose session/user reporting
-  --quiet      Suppress all output except errors
-  --local      Run bin/photonbbs-client directly for local use
-  --help, -h   Show this help message
-```
+See [PHOTONMUD.md](PHOTONMUD.md) for complete MUD game rules and documentation.
 
-### The PhotonBBS Client
+### Door Game Support
 
-The `photonbbs-client` handles user interaction including:
-- Login/authentication
-- Chat functionality
-- Menu navigation
-- Access to BBS doors and other features
+PhotonBBS supports classic BBS door games through multiple drop file formats:
+- DOOR.SYS
+- DORINFO1.DEF
+- DORINFOx.DEF
 
-## User Interface
+Pre-configured support for popular doors:
+- Trade Wars 2002 - Space trading and combat
+- Legend of the Red Dragon (LORD) - Fantasy RPG adventure
+- Barren Realms Elite (BRE) - Space strategy
+- Operation Overkill II - Post-apocalyptic combat
+- And many more
 
-Users using PhotonBBS land in a primary "channel" upon logging in and can
-begin immediately communicating with other users or they are free to create
-channels of their own. The following describes system commands available
-to all users:
+## Quick Start
 
-### User Functions
-
-    /ACTION <ACTIONS>         Perform <action>                    ...  /A
-    /WHISPER <WHO> <MESSAGE>  Send private message                ...  /W
-    /BROADCAST <MESSAGE>      Send message to all users           ...  /R
-    /INV                      Become Invisible                    ...   !
-    /QUIT                     Log off the system                  ...   x
-
-### System Commands
-
-    /USERS                    Who is logged into the system       ...   #
-    /SCAN                     Locate chat users                   ...  /S
-    /CHANNELS                 Show available channels             ...  /C
-    /ONELINERS                Write on the wall                   ...   %
-    /BULLETINS                System Bulletins                    ...   @
-
-### Room Commands
-
-    /JOIN <ROOM>              Joins room <room>                   ...  /J
-    /BAN <USER>               (UN)Bans <user> from room           ...  /B
-    /HIDE                     (UN)Hides room from channel scan    ...  /H
-    /OP <USER>                (UN)Assign a user as a ChanOp       ...  /O
-    /SSL                      (UN)Enforce SSH on room             ...  /E
-    /PRIVATE                  (UN)Sets a room PRIVATE             ...  /V
-    /ALLOW <USER>             (UN)Allow <user(s)> in Private room ...  /L
-    /TOPIC                    Set the channel topic               ...  /T
-    /STATUS                   Show room status                    ...  /$
-
-### User Settings
-
-    /INFO                     Display your user settings
-    /SET <COMMAND>            Set user preferences (SEE BELOW)    ...  /U
-      Commands:
-        NAME                    Set your full name
-        PASSWORD                Reset your password
-        EMAIL                   Change your email address
-        LOCATION                Set your call location
-        PHONE                   Set your phone number
-        DOB                     Change your DOB
-        ANSI                    Change your ANSI preference
-        DEFAULT                 Set your default channel
-        UNIXPWD                 Change your unix password if applicable
-
-## Installation
-
-PhotonBBS is deployed via Docker for maximum compatibility and ease of use.
-
-### Quick Start (Recommended)
-
-**Using docker-compose:**
+### Installation via Docker (Recommended)
 
 ```bash
+# Clone the repository
 git clone https://github.com/fewtarius/photonbbs.git
 cd photonbbs
+
+# Start PhotonBBS
 make docker-up
+
+# Connect via telnet
+telnet localhost 23
 ```
 
-PhotonBBS will build and start automatically. Connect via `telnet localhost 23`.
+That's it! PhotonBBS will build and start automatically.
 
-**Using Docker directly:**
+### System Requirements
 
-```bash
-docker container run -dti --restart unless-stopped --net host \
-  --device=/dev/tty0 \
-  -v appdata:/appdata:rw \
-  -v /dev:/dev \
-  -v /lib/modules:/lib/modules \
-  -v /sys/fs/cgroup:/sys/fs/cgroup \
-  --privileged \
-  fewtarius/photonbbs
-```
+**For Docker deployment:**
+- Docker Engine 20.10 or higher
+- 512MB RAM minimum, 1GB+ recommended
+- TCP port 23 available (or configure alternate port)
+
+**Platform support:**
+- Linux (any modern distribution)
+- macOS with Docker Desktop
+- Windows with Docker Desktop + WSL2
+
+## Documentation
+
+### For Users
+
+- **[PHOTONBBS.md](PHOTONBBS.md)** - Complete BBS user guide and commands
+- **[PHOTONMUD.md](PHOTONMUD.md)** - Complete MUD gameplay guide and rules
+
+### For Administrators
+
+- **[PHOTONBBS.md](PHOTONBBS.md)** - Installation, configuration, and administration
+- **[DEVELOPER.md](DEVELOPER.md)** - Developer guide for menu system and customization
+
+### For Developers
+
+- **[DEVELOPER.md](DEVELOPER.md)** - Extending PhotonBBS and creating custom features
+- **modules/** - Core Perl modules (pb-* for BBS, pm-* for MUD)
+- **Reference code** - See `modules/` for working examples
+
+## Key Features
+
+### BBS Platform Features
+
+- Multi-node support with concurrent users
+- Channel-based chat system
+- Private messaging and broadcasts
+- System bulletins and oneliners
+- User profiles and preferences
+- Security levels and permissions
+- Customizable themes and colors
+- ANSI terminal support
+- IP-based access control
+
+### MUD Gameplay Features
+
+- Procedurally-generated unique worlds
+- Multiple character classes and races
+- D&D-style combat with dice rolls
+- Magic system with 20+ spells
+- Dynamic monster AI
+- Equipment and inventory management
+- Player vs Environment (PvE)
+- Player vs Player (PvP) combat
+- Persistent character progression
+- Multiplayer exploration and cooperation
+
+### Door Game Integration
+
+- Support for classic DOS and Unix door games
+- Multiple drop file format support
+- Concurrent door execution limits
+- Security level restrictions
+- Easy door configuration
+
+### Administration Features
+
+- User account editor
+- Bulletin editor
+- Security management
+- Session monitoring
+- Scheduled task execution
+- Maintenance automation
+- Customizable menus
+- Theme management
+
+## Architecture
+
+PhotonBBS consists of several key components:
+
+**photonbbs** - Main daemon handling connections, node management, and sessions
+**photonbbs-client** - Client application for user interaction
+**photonmud** - MUD game engine with world generation and combat
+**photonmud-monsterai** - AI system for monster behavior and spawning
+**pb-* modules** - Core BBS functionality (framework, doors, chat, etc.)
+**pm-* modules** - MUD game logic (combat, spells, rooms, monsters, etc.)
+
+The system uses:
+- Perl for core BBS and MUD logic
+- Storable for data persistence
+- Docker for containerized deployment
+- Shell scripts for door game integration
+
+## Development
 
 ### Building from Source
 
@@ -179,350 +225,173 @@ make docker-shell
 
 ### Makefile Targets
 
-PhotonBBS includes a comprehensive Makefile for building and managing deployments:
-
-**Docker Targets:**
+**Docker operations:**
 - `make docker-build` - Build Docker image
-- `make docker-up` - Start container (runs in background)
+- `make docker-up` - Start container
 - `make docker-down` - Stop container
 - `make docker-restart` - Restart container
-- `make docker-logs` - View container logs (follow mode)
-- `make docker-shell` - Open shell in running container
-- `make docker-rebuild` - Full rebuild (stop, build, start)
-- `make docker-clean` - Remove all containers and images (destructive)
-
-**TTY Wrapper (for advanced users):**
-- `make` - Build photonbbs-tty wrapper
-- `make install` - Install system-wide
-- `make clean` - Clean build artifacts
+- `make docker-logs` - View logs
+- `make docker-shell` - Open shell in container
+- `make docker-rebuild` - Full rebuild
+- `make docker-clean` - Remove all containers and images
 
 Run `make help` for complete documentation.
 
-### System Requirements
+### Module Development
 
-**For Docker deployment (recommended):**
-- Docker Engine 20.10 or higher
-- docker-compose (optional but recommended)
-- 512MB RAM minimum, 1GB+ recommended
-- TCP port 23 available (or configure alternate port)
+PhotonBBS uses a modular architecture. Core modules are in `modules/`:
 
-**System compatibility:**
-- Linux (any modern distribution)
-- macOS with Docker Desktop
-- Windows with Docker Desktop + WSL2
+**BBS Modules (pb-*):**
+- pb-framework - Core telnet/session handling
+- pb-main - Main BBS functionality
+- pb-doors - Door game integration
+- pb-usertools - User management
+- pb-security - Security and permissions
 
-**Note:** PhotonBBS runs in a Rocky Linux 9 container with all dependencies pre-installed.
+**MUD Modules (pm-*):**
+- pm-combat - Combat system
+- pm-rooms - World and room management
+- pm-monsters - Monster AI and behavior
+- pm-spells - Magic system
+- pm-player - Character management
+- pm-objects - Items and inventory
 
-### Shared Storage
-
-PhotonBBS is capable of multinode support across multiple hosts or containers. If deploying PhotonBBS using NFS for shared storage, caching must be disabled on the NFS client using mount options lookupcache=none and noac. If this is a shared mountpoint, these options could degrade performance of other applications.
-
-### Admin Account
-
-Once your BBS is configured, connect via telnet and create your sysop account. After
-logging in and successfully creating the account, use the user editor to grant
-yourself administrative rights to the BBS:
-
-```
-$ docker ps
-$ docker exec -it {CONTAINER ID} /bin/bash
-# /appdata/sbin/useredit.pl
-```
-
-Change the security level to 500 or higher. Be sure to not add any additional whitespace to the file.
+See [DEVELOPER.md](DEVELOPER.md) for detailed module development guide.
 
 ## Configuration
 
 ### Core Configuration
 
-The main configuration is stored in `/opt/photonbbs/modules/pb-defaults`. This file defines:
-- BBS home directory
-- Data and nodes directories
+Main configuration is in `modules/pb-defaults`:
+- BBS home directory and paths
 - Port number
-- Unix user for the BBS
-- Maximum nodes allowed
-- Maintenance intervals
+- Maximum nodes
+- Maintenance settings
 - Default theme
-- Various other BBS settings
+- System preferences
 
 ### Menu Configuration
 
-Menus are stored in the data directory. The main menu is defined in `main.mnu`, and external commands are in `external.mnu`.
+Menus are defined in text files in `data/`:
+- main.mnu - Main menu
+- external.mnu - External commands and doors
 
-### System Maintenance
+See [PHOTONBBS.md](PHOTONBBS.md) for menu configuration details.
 
-PhotonBBS includes a maintenance script (`bin/maint.sh`) that:
-- Cleans up defunct processes
-- Checks for and removes stale node files
-- Handles timeout of inactive sessions
+### MUD Configuration
 
-This is automatically run by the daemon at regular intervals.
+PhotonMUD settings are in `modules/pm-defaults`:
+- World generation parameters
+- Combat balance settings
+- Monster spawn rates
+- Economic settings
 
-## Customizing the BBS
-
-### Text Files
-
-  * banned_ip - List of IP addresses not allowed on the system
-  * ip_list - List of IP addresses allowed to log into a private system
-  * welcome.txt - This is the screen presented to the user at the initial connection
-  * bulletins.txt - This is a customized index screen for your bulletins
-  * lastcalltop.txt, lastcallbot.txt - Last caller customized header and footer
-  * oneltop.txt, onelbot.txt - Oneliners customized header and footer
-  * login.txt - This screen is presented just after login
-  * telehelp.txt - This is the help file presented in teleconference when the user presses the ? key
-  * account.txt - This is the user information file presented in teleconference with the INFO command
-
-An informational message can be left in the main channel for users by editing the main channel message:
-
-```
-$ vi /opt/photonbbs/data/messages/teleconf/MAIN/message
-```
-
-The BBS software will detect ANSI (.ans) and ASCII (.asc) files of the same name as any .txt used by the system, and use the ANSI or ASCII variant first if available. ANSI, ASCII, and TEXT files as well as any message sent by users of the system may contain @CODES which are converted by the BBS. A description of available @CODES is as follows:
-
-### Action Colors
-
-    @CLR    - Clear screen (For ANSI files only)  
-    @RST    - Reset terminal color
-    @BLK    - Black
-    @RED    - Red
-    @GRN    - Green
-    @YLW    - Yellow
-    @BLU    - Blue
-    @MAG    - Magenta
-    @WHT    - White (Light Grey)
-    @CYN    - Cyan
-    @BBK    - Bright Black (Grey)
-    @BRD    - Bright Red
-    @BGN    - Bright Green
-    @BYL    - Bright Yellow
-    @BBL    - Bright Blue
-    @BMG    - Bright Magenta
-    @BCN    - Bright Cyan
-    @BWH    - Bright White
-
-### System Variables
-
-    @SYSTEMCLR   - System output color
-    @USERCLR     - User metadata color
-    @INPUTCLR    - Input color
-    @ERRORCLR    - Error color
-    @THEMECLR    - General theme color
-    @PROMPTCLR   - Prompt color (:?)
-    @DATACLR     - System generated data color
-    @LINECLR     - Line color (Oneliner top/bottom)
-    @SYSNM       - BBS name
-    @SVRNM       - BBS software name
-    @MENU        - Currently selected menu
-    @NODE        - Your node number
-    @USERS       - Number of users online now
-    @CONNECT     - IP address you are connecting from
-    @HOST        - BBS hostname
-    @IP          - BBS IP Address
-    @TIME        - The current time
-    @DATE        - The current date
-    @TOTALCALLS  - Total number of calls to the BBS
-    @USER        - Your handle
-    @RNAME       - Your real name
-    @DOB         - Your date of birth
-    @PHONE       - Your phone number
-    @LOCAL       - User location
-    @ID          - Users system ID index number
-    @PRONOUN     - Your pronoun
-    @EMAIL       - Your email address
-    @DND         - Do not disturb flag
-    @BANNED      - Account ban flag
-    ~AT          - Provides @ Symbol
+See [PHOTONMUD.md](PHOTONMUD.md) for MUD configuration.
 
 ## Themes
 
-PhotonBBS supports customizable themes in the `/opt/photonbbs/data/themes/` directory. The default theme is configurable in the main configuration file. Available themes include:
-- photon
-- mbbs
+PhotonBBS supports customizable color themes in `data/themes/`:
 
-## System Bulletins
+Available themes:
+- photon - Default theme
+- mbbs - Alternative theme
+- terminal_tavern - Terminal Tavern BBS theme
 
-System Bulletins are a simple way to communicate news and information to
-your users. PhotonBBS ships with a bulletin editor (`.BULLEDIT`) to help
-create and manage system bulletins. Bulletins even support @CODES in the
-title, and in the bulletin itself.
+Themes define system colors using @CODE variables for consistent appearance.
 
-## Menu System
+## Security
 
-PhotonBBS uses a menu system defined in menu files. The format of these files is:
+PhotonBBS implements several security features:
 
-```
-Key|Command|Description|Security Level|Hidden
-```
+**Privilege Separation:**
+- Daemon starts as root to bind port 23
+- Client connections drop to configured BBS user
+- Scheduled tasks run as "nobody" user
 
-### Internal Commands
+**Access Controls:**
+- IP-based banning and whitelisting
+- User security levels
+- Permission-based feature access
+- Optional duplicate IP prevention
 
-PhotonBBS provides several built-in internal commands that can be included in menus:
+**Data Protection:**
+- Restricted file permissions
+- Secure password storage
+- Session isolation
 
-| Key  | Description             | Command Handler         |
-|------|-------------------------|------------------------|
-| &    | Teleconference          | menu_teleconference    |
-| #    | Who's online            | whosonline             |
-| %    | Write on the wall       | oneliners              |
-| @    | Read System Bulletins   | bulletins              |
-| !    | Log Off and Exit        | menu_exit              |
+## Community and Support
 
-You can add these to any menu by including the key and description.
+- **GitHub**: https://github.com/fewtarius/photonbbs
+- **Issues**: Report bugs and feature requests via GitHub Issues
+- **Live Demo**: telnet bbs.terminaltavern.com
 
-### Submenus
+## Contributing
 
-To create a submenu, set the Type to `submenu` and the Script to the submenu filename (e.g., `utils.mnu`).  
-Users can navigate back to the previous menu by typing `^`.
+Contributions are welcome! Please:
 
-## Scheduled Tasks
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly on a live system
+5. Submit a pull request
 
-PhotonBBS supports scheduled execution of scripts in three directories:
+## License
 
-1. **services.d** - Scripts in this directory are launched at startup and run continuously
-2. **hourly.d** - Scripts here run every hour on the hour
-3. **daily.d** - Scripts here run once per day at the configured hour (default: midnight)
+PhotonBBS is released under the GNU General Public License v2.
 
-These scripts run with reduced privileges (as the "nobody" user).
+See LICENSE file for complete license text.
 
-## BBS Door Support
+## Credits
 
-PhotonBBS v1.5 and later provide support for BBS doors. The following drop file formats
-are supported:
+**Original Author**: Fewtarius
 
-  * DOOR.SYS
-  * DORINFO1.DEF
-  * DORINFOx.DEF
+**Contributors**: See GitHub contributors list
 
-Multiple example configuration files are provided to help you get started. This
-includes batch files and scripts for:
+**Special Thanks**: The BBS and MUD communities for keeping these platforms alive
 
-  * Tradewars 2002
-  * Legend of the Red Dragon
-  * Lunatix
-  * Barren Realms Elite
-  * Operation Overkill II
-  * Simpsons
-  * Darkness
-  * Dopewars
+## Roadmap
 
-### Door Configuration
+Future development plans include:
 
-To configure doors, create a shell script in `/opt/photonbbs/sbin`,
-and add a line to `/opt/photonbbs/data/external.mnu`. The format of the external.mnu
-file is as follows:
+- Expanded MUD content (more spells, monsters, items)
+- Additional character classes and races
+- Quest system and storylines
+- Enhanced multiplayer features
+- Web-based administration interface
+- RESTful API for external integrations
+- Modern client support (SSH, TLS)
 
-```
-Menu Name|Channel|Description|Executable|Security Level|Hidden|Special|Maximum Users
-```
+## Getting Help
 
-* Menu Name - This is what a user would type to execute the command
-* Channel - This is the channel that a user is changed to when the command executes
-* Description - This is what is shown to other users in the room when the command is executed
-* Executable - This is the command to execute
-* Security Level - This is the minimum security level to execute command
-* Hidden - Is this item hidden?
-* Special - Internal or External command? (Internal commands are subroutines, add-ons to photonbbs)
-* Maximum Users - Maximum number of users executing the command concurrently
+For questions and support:
 
-Example:
+1. Check the documentation:
+   - [PHOTONBBS.md](PHOTONBBS.md) - BBS usage and administration
+   - [PHOTONMUD.md](PHOTONMUD.md) - MUD gameplay guide
+   - [DEVELOPER.md](DEVELOPER.md) - Development guide
 
-```
-SYSLOG|HIDEOUT|heads to his favorite hideout|tailsys.sh|500|1|external|1
-```
+2. Try the live demo at telnet bbs.terminaltavern.com
 
-### Door Installation
+3. Open an issue on GitHub
 
-Door games should be placed in the `/opt/photonbbs/doors` directory. For DOS-based doors, you'll need to create symbolic links:
+4. Check existing issues and discussions
 
-```
-ln -s /opt/photonbbs/doors /opt/photonbbs/.dosemu/drive_c/doors
-ln -s /opt/photonbbs/doors/nodes /opt/photonbbs/.dosemu/drive_c/nodeinfo
-```
+## Version History
 
-Note: Lunatix will not work over a link, place luna in `/opt/photonbbs/.dosemu/drive_c`
+**Version 1.5+**: Current development version
+- PhotonMUD integration
+- Enhanced door game support
+- Docker containerization
+- Performance optimizations
+- Monster AI improvements
 
-### Built-in Utilities
+**Version 1.0-1.4**: Legacy versions
+- Core BBS functionality
+- Chat and teleconference
+- Basic door support
 
-In addition to external BBS doors support, this feature also allows for external utilities to be
-available to anyone with proper security. PhotonBBS ships with several utilities:
+---
 
-    .USEREDIT  - BBS User editor
-    .BULLEDIT  - BBS Bulletin editor
-    .DOS       - FreeDOS Shell
-    .SHELL     - BASH Shell
+Made with care for the BBS and MUD communities.
 
-## Administrative Tools
-
-PhotonBBS includes several administrative tools:
-
-1. **useredit** - User editor for managing accounts, security levels, etc.
-2. **bulledit** - Bulletin editor for managing system bulletins
-3. **newpass** - Password reset utility
-4. **procmon.pl** - Process monitoring utility
-
-## Security Considerations
-
-### User Permissions
-
-PhotonBBS runs with reduced privileges for better security:
-- The daemon starts as root to bind to port 23
-- Each client connection drops privileges to the configured BBS user
-- The data directory is owned by the BBS user with restricted permissions
-- Scheduled tasks run as the "nobody" user
-
-### IP Controls
-
-PhotonBBS offers IP address controls:
-- Option to disallow duplicate IP connections
-- Support for banned IP addresses
-- Option for a whitelist of allowed IPs
-
-## Technical Architecture
-
-### Node Management
-
-PhotonBBS manages nodes through several mechanisms:
-- Each connection is assigned a node number
-- Node information is stored in `/opt/photonbbs/data/nodes/`
-- The daemon monitors node activity and cleans up stale connections
-- A maintenance thread runs periodically to check node status
-
-### Session Management
-
-Session management includes:
-- IP tracking to prevent duplicate connections
-- Session maintenance to clean up inactive users
-- Cleanup of disconnected sessions' files and resources
-
-### Modules
-
-PhotonBBS uses a modular architecture with core modules in `/opt/photonbbs/modules/`:
-- pb-defaults - System configuration
-- pb-framework - Core BBS framework
-- pb-usertools - User management functions
-- pb-main - Main BBS functionality
-- pb-doors - Door game support
-- pb-lastcallers - Last caller functionality
-- pb-oneliners - Oneliner wall functionality
-
-## Troubleshooting
-
-### Common Issues
-
-1. **No available nodes error**: The BBS has reached its maximum configured nodes. Check the `totalnodes` setting in the configuration.
-
-2. **Permission issues**: Ensure the data directory is owned by the BBS user with appropriate permissions.
-
-3. **Door games not working**: Check that the door scripts and symbolic links are correctly set up.
-
-4. **Stale sessions**: If users get stuck, the maintenance script will clean them up after the configured timeout (default: 30 minutes).
-
-### Logging
-
-PhotonBBS logs key events when not in quiet mode:
-- Connection attempts and session starts
-- User logins and logouts
-- System maintenance activities
-- Door execution
-
-For more detailed logging, use the `--debug` or `--verbose` options.
+Connect, explore, and adventure at Terminal Tavern: telnet bbs.terminaltavern.com

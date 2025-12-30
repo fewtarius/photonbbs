@@ -1,5 +1,9 @@
 # PhotonMUD: Complete Game Rules Reference
 
+**Part of the PhotonBBS platform** - See [README.md](README.md) for project overview and [PHOTONBBS.md](PHOTONBBS.md) for BBS documentation.
+
+---
+
 You awaken startled, your head throbbing and your memories a haze.
 
 The ground beneath you is cold, and the air carries the scent of distant

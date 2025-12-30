@@ -1,3 +1,9 @@
+# PhotonBBS Developer Documentation
+
+**Part of the PhotonBBS platform** - See [README.md](README.md) for project overview, [PHOTONBBS.md](PHOTONBBS.md) for BBS documentation, and [PHOTONMUD.md](PHOTONMUD.md) for MUD documentation.
+
+---
+
 ## Menus and SysOp Menu Functionality
 
 PhotonBBS features a flexible, file-driven menu system that allows both users and SysOps to access internal commands, external doors, and utilities. Menus are defined in plain text files (typically `.mnu`), and can be customized or extended by the SysOp.
