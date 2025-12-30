@@ -60,6 +60,27 @@ use Fcntl qw(:flock O_WRONLY O_CREAT);
 $| = 1;
 select STDERR; $| = 1; select STDOUT;
 
+# --- CPU-Aware Timing Configuration ---
+our $CPU_COUNT = $ENV{PHOTONMUD_CPU_COUNT};
+if (!defined $CPU_COUNT) {
+    if (-f '/proc/cpuinfo') {
+        $CPU_COUNT = `grep -c ^processor /proc/cpuinfo 2>/dev/null`;
+        chomp $CPU_COUNT;
+    } elsif (`sysctl -n hw.ncpu 2>/dev/null`) {
+        $CPU_COUNT = `sysctl -n hw.ncpu 2>/dev/null`;
+        chomp $CPU_COUNT;
+    }
+    $CPU_COUNT ||= 1;
+}
+
+# Adjust timing based on CPU availability
+# Single CPU: Longer sleeps to reduce CPU load (better for small VPS)
+# Multi CPU: Faster response for better gameplay
+our $AI_TICK_SLEEP = ($CPU_COUNT <= 1) ? 2.0 : 0.5;      # Base AI tick interval (2s vs 0.5s)
+our $TIGHT_LOOP_SLEEP = ($CPU_COUNT <= 1) ? 1.0 : 0.1;   # Tight loop sleep interval (1s vs 0.1s)
+our $IDLE_SLEEP = ($CPU_COUNT <= 1) ? 15.0 : 4.0;        # Sleep when no players nearby (15s vs 4s)
+our $MAX_MONSTER_THREADS_LIMIT = ($CPU_COUNT <= 1) ? 50 : 200;  # Reduce concurrent threads on low CPU
+
 # --- Loader Logic (matches bin/photonmud) ---
 our %config;
 our @MONSTER_IGNORE_MESSAGES;
@@ -111,7 +132,7 @@ require_module("pm-broker-client");  # Message broker client
 
 my $MONSTER_PER_ROOM = 0.04; # 1 monster per 12 rooms
 our $MAX_MONSTERS_PER_ROOM = 3; # Maximum monsters allowed in a single room
-my $MAX_MONSTER_THREADS = 200;
+my $MAX_MONSTER_THREADS = $MAX_MONSTER_THREADS_LIMIT;  # Use CPU-aware limit
 my %active_monster_threads :shared;
 
 # Broker socket - NOT shared since each worker process needs its own connection
@@ -3040,7 +3061,7 @@ sub monster_thread {
 
             if (!@players_here) {
                 monster_ai_tick($mon, $room, undef);
-                sleep(4 + rand(2)); # 4–6s
+                sleep($IDLE_SLEEP + rand(2)); # 8-10s on single CPU, 4-6s on multi-CPU
                 next;
             }
 
@@ -3049,8 +3070,8 @@ sub monster_thread {
                 my $flag = monster_wakeup_flag_path($mon->{name});
                 my $slept = 0;
                 while ($slept < $time_until_move && !-e $flag && !$mon->{in_combat} && !$mon->{in_combat_handshake} && !$mon->{combat_thread_active}) {
-                    sleep 0.2;
-                    $slept += 0.2;
+                    sleep $TIGHT_LOOP_SLEEP;  # 0.5s on single CPU, 0.1s on multi-CPU
+                    $slept += $TIGHT_LOOP_SLEEP;
                 }
                 unlink $flag if -e $flag;
                 next;
@@ -3063,10 +3084,10 @@ sub monster_thread {
             
             my $flag = monster_wakeup_flag_path($mon->{name});
             my $slept = 0;
-            my $max_tick = 0.5 + rand(0.2); # 0.5–0.7s
+            my $max_tick = $AI_TICK_SLEEP + rand(0.2); # 1.0-1.2s on single CPU, 0.5-0.7s on multi-CPU
             while ($slept < $max_tick && !-e $flag && !$mon->{in_combat} && !$mon->{in_combat_handshake} && !$mon->{combat_thread_active}) {
-                sleep 0.1;
-                $slept += 0.1;
+                sleep $TIGHT_LOOP_SLEEP;  # 0.5s on single CPU, 0.1s on multi-CPU
+                $slept += $TIGHT_LOOP_SLEEP;
             }
             unlink $flag if -e $flag;
         }
@@ -3988,10 +4009,35 @@ sub run_monster_worker {
 }
 
 sub main {
-    my $num_workers = $ENV{PHOTONMUD_MONSTERAI_WORKERS} || 4;
+    # Auto-detect CPU count and adjust workers accordingly
+    my $cpu_count = $ENV{PHOTONMUD_CPU_COUNT};
+    if (!defined $cpu_count) {
+        # Try to detect CPU count
+        if (-f '/proc/cpuinfo') {
+            $cpu_count = `grep -c ^processor /proc/cpuinfo 2>/dev/null`;
+            chomp $cpu_count;
+        } elsif (`sysctl -n hw.ncpu 2>/dev/null`) {
+            $cpu_count = `sysctl -n hw.ncpu 2>/dev/null`;
+            chomp $cpu_count;
+        }
+        $cpu_count ||= 1; # Default to 1 if detection fails
+    }
+    
+    # Adjust worker count based on CPU availability
+    my $num_workers = $ENV{PHOTONMUD_MONSTERAI_WORKERS};
+    if (!defined $num_workers) {
+        if ($cpu_count <= 1) {
+            $num_workers = 1;  # Single CPU: 1 worker
+        } elsif ($cpu_count == 2) {
+            $num_workers = 2;  # Dual CPU: 2 workers
+        } else {
+            $num_workers = 4;  # 4+ CPUs: 4 workers (current default)
+        }
+    }
+    
     GetOptions("stats" => \$enable_stats);
 
-    log_info("Starting PhotonMUD Monster AI Daemon (hybrid fork/thread) with $num_workers workers...");
+    log_info("Starting PhotonMUD Monster AI Daemon (hybrid fork/thread) with $num_workers workers (detected $cpu_count CPUs)...");
 
     cleanup_monster_state_files();
     
