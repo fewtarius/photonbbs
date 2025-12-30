@@ -15,9 +15,11 @@
      7. **Learning from Failure** - Document anti-patterns to prevent recurrence
 
 2. **Check for project context**:
-   - **READ `CONTINUATION_PROMPT.md` FIRST** - Complete session context
+   - **Find latest session**: `ls -lt ai-assisted/ | head -20`
+   - **READ most recent `CONTINUATION_PROMPT.md`** - Complete session context
+   - **Example**: `cat ai-assisted/2025-12-29/2006/CONTINUATION_PROMPT.md`
    - `git log --oneline -10` - Review recent commits
-   - Check `AGENT_HANDOFF.md` for quick reference
+   - Check `AGENT_HANDOFF.md` in same directory for detailed handoff
    - Review project docs in `project-docs/` for design specs
 
 3. **Use collaboration tool IMMEDIATELY**:
@@ -138,22 +140,43 @@
 
 **ALWAYS STUDY REFERENCE CODE**
 
-**ALWAYS ANALYZE CONFIGURATIONS FOR BOTH BBS AND MUD SYSTEMS**
+**CRITICAL: ORGANIZE SESSION DOCUMENTATION CORRECTLY**
 
-**CRITICAL: USE scratch/ DIRECTORY FOR ALL TRANSIENT DATA**
+**SESSION HANDOFFS - ai-assisted/YYYY-MM-DD/HHMM/ (GITIGNORED):**
+- **ALWAYS create session handoffs in `ai-assisted/YYYY-MM-DD/HHMM/`**
+- **Directory format**: `ai-assisted/YYYYMMDD/HHMM/` (e.g., `ai-assisted/20251229/2006/`)
+- **Required files**:
+  - `CONTINUATION_PROMPT.md` - Complete standalone session context for next agent
+  - `AGENT_HANDOFF.md` - Detailed technical handoff and architecture overview
+  - Optional: `SESSION_NOTES.md`, `ROOT_CAUSE_ANALYSIS.md`, design docs
+- **These directories ARE gitignored** - safe for development context
+- **This follows the Unbroken Method's "Structured Handoffs" pillar**
 
-**MANDATORY SCRATCH DIRECTORY USAGE:**
-- **ALWAYS use `scratch/` directory for temporary files, debug output, session notes**
-- **NEVER commit development notes, handoff docs, or session data to git**
-- **scratch/ is .gitignored** - safe for any transient development data
+**TEMPORARY FILES - scratch/ (GITIGNORED):**
+- **Use `scratch/` for temporary debug output and quick notes**
 - **Examples of what belongs in scratch/:**
-  - Session notes and continuation prompts
-  - Agent handoff documents
   - Debug output files (error.txt, test-output.txt, etc.)
-  - Development planning documents
-  - Temporary testing scripts
-  - Any data that should NOT be public
-- **NEVER create development files in root directory**
+  - Quick testing scripts
+  - Temporary deployment notes
+  - Work-in-progress files that will be deleted
+- **NO SESSION HANDOFFS IN scratch/** - Use ai-assisted/ instead!
+
+**Directory Structure**:
+```
+ai-assisted/
+  GENERIC_CONTINUATION_PROMPT.md   # Template
+  THE_UNBROKEN_METHOD.md           # Methodology
+  YYYYMMDD/                        # Date-based sessions
+    HHMM/                          # Time-based (24hr format)
+      CONTINUATION_PROMPT.md       # Session context
+      AGENT_HANDOFF.md             # Technical handoff
+      SESSION_NOTES.md             # Optional notes
+
+scratch/
+  debug-output.txt                 # Temporary debug files
+  test-results.txt                 # Test output
+  # NO HANDOFF DOCUMENTS HERE!
+```
 - **NEVER create *HANDOFF*.md or *SESSION*.md files outside scratch/**
 - **This prevents sensitive development context from being committed**
 
