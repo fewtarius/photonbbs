@@ -1,13 +1,5 @@
 login=\n@THEMECLRIf you already have an account on @DATACLRTerminal Tavern@THEMECLR,\ntype your username and press ENTER.\nOtherwise, type '@DATACLRNEW@THEMECLR' to create an account@PROMPTCLR:
 prompt=@SYSTEMCLR@PROMPTCLR:
-systemclr=@WHT
-userclr=@BCN
-inputclr=@WHT
-themeclr=@BYL
-promptclr=@WHT
-errorclr=@BRD
-dataclr=@BCN
-lineclr=@BBL
 nouser=@ERRORCLR\n\nUser not found in the system database.\nPerhaps you mistyped it @PROMPTCLR?\n\n
 fstwelcome=@THEMECLR\n\nWelcome to @DATACLRTerminal Tavern@THEMECLR, @USER!\n\nInitializing your session...\n\n
 quest=@THEMECLR\n\nConnected to @SYSNM\n\nYou're viewing the "@DATACLR@MENU@THEMECLR" menu. Select an option\nand press "@DATACLRRETURN@THEMECLR". Type "@DATACLR/HELP@THEMECLR" anytime\nfor navigation assistance.\n\n
