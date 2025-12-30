@@ -5,6 +5,64 @@ use Digest::SHA qw(sha1_hex);
 # Debug configuration
 our $MONSTER_DEBUG = $ENV{PHOTON_MONSTER_DEBUG} // 0;
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PERMMON FILE CACHING LAYER - Critical for single-CPU performance
+# ═══════════════════════════════════════════════════════════════════════════
+# Problem: get_room_monsters/save_room_monsters called thousands of times/sec
+# Solution: Cache in memory, batch writes every 30s
+# Safety: Flush on shutdown, track dirty rooms
+# ═══════════════════════════════════════════════════════════════════════════
+
+our %PERMMON_CACHE = ();           # roomnum → monster array
+our %PERMMON_DIRTY = ();           # roomnum → 1 if needs writing
+our $PERMMON_CACHE_ENABLED = 1;    # Can disable for debugging
+our $PERMMON_FLUSH_INTERVAL = 30;  # Flush dirty rooms every 30 seconds
+our $PERMMON_LAST_FLUSH = time();
+
+# Flush all dirty permmon files to disk
+sub flush_permmon_cache {
+    my ($force_all) = @_;
+    monster_debug('flush_permmon_cache', sprintf("Flushing %d dirty rooms (force_all=%d)", 
+        scalar(keys %PERMMON_DIRTY), $force_all // 0));
+    
+    my $flushed = 0;
+    foreach my $roomnum ($force_all ? keys %PERMMON_CACHE : keys %PERMMON_DIRTY) {
+        next unless exists $PERMMON_CACHE{$roomnum};
+        
+        my $perm_file = "$config{transient}/permmon_$roomnum.dat";
+        my $monsters = $PERMMON_CACHE{$roomnum};
+        
+        eval {
+            lock_store($monsters, $perm_file);
+            delete $PERMMON_DIRTY{$roomnum} unless $force_all;
+            $flushed++;
+        };
+        if ($@) {
+            monster_debug('flush_permmon_cache', "ERROR flushing room $roomnum: $@");
+        }
+    }
+    
+    $PERMMON_LAST_FLUSH = time();
+    monster_debug('flush_permmon_cache', "Flushed $flushed rooms to disk");
+    return $flushed;
+}
+
+# Periodic flush check - call this from monster AI main loop
+sub maybe_flush_permmon_cache {
+    my $now = time();
+    if ($now - $PERMMON_LAST_FLUSH >= $PERMMON_FLUSH_INTERVAL) {
+        flush_permmon_cache(0);  # Flush only dirty rooms
+    }
+}
+
+# Clear cache (for testing or memory management)
+sub clear_permmon_cache {
+    flush_permmon_cache(1);  # Flush everything first
+    %PERMMON_CACHE = ();
+    %PERMMON_DIRTY = ();
+    monster_debug('clear_permmon_cache', "Cache cleared");
+}
+
 sub monster_debug {
     my ($func, $msg) = @_;
     return unless $MONSTER_DEBUG;
@@ -845,27 +903,54 @@ sub get_room_monsters {
     my $roomnum = $room->{roomnum};
     monster_debug(undef, "Getting monsters for room $roomnum");
     
+    # Check cache first
+    if ($PERMMON_CACHE_ENABLED && exists $PERMMON_CACHE{$roomnum}) {
+        monster_debug(undef, sprintf("Cache HIT for room %d (%d monsters)", 
+            $roomnum, scalar(@{$PERMMON_CACHE{$roomnum}})));
+        return @{$PERMMON_CACHE{$roomnum}};
+    }
+    
+    # Cache miss - load from disk
     my $perm_file = "$config{transient}/permmon_$roomnum.dat";
     my @monsters;
     if (-e $perm_file) {
         eval {
-            monster_debug(undef, "Loading monsters from $perm_file");
+            monster_debug(undef, "Cache MISS - loading from $perm_file");
             my $retrieved = lock_retrieve($perm_file);
             @monsters = @$retrieved if $retrieved && ref($retrieved) eq 'ARRAY';
             monster_debug(undef, sprintf("Found %d monsters in room", scalar(@monsters)));
+            
+            # Cache it
+            if ($PERMMON_CACHE_ENABLED) {
+                $PERMMON_CACHE{$roomnum} = [@monsters];
+            }
         };
         if ($@) {
             monster_debug(undef, "ERROR: Failed to load room monsters: $@");
         }
+    } elsif ($PERMMON_CACHE_ENABLED) {
+        # Room has no file - cache empty array
+        $PERMMON_CACHE{$roomnum} = [];
     }
+    
     return @monsters;
 }
 
 sub save_room_monsters {
     my ($room, $monsters) = @_;
     my $roomnum = $room->{roomnum} || $room->{_roomnum} || $room->{id};
-    my $file = room_monster_file($roomnum);
-    lock_store($monsters, $file);
+    
+    if ($PERMMON_CACHE_ENABLED) {
+        # Update cache and mark dirty - don't write to disk yet
+        $PERMMON_CACHE{$roomnum} = $monsters;
+        $PERMMON_DIRTY{$roomnum} = 1;
+        monster_debug(undef, sprintf("Cached %d monsters for room %d (dirty)", 
+            scalar(@$monsters), $roomnum));
+    } else {
+        # Cache disabled - write immediately (old behavior)
+        my $file = room_monster_file($roomnum);
+        lock_store($monsters, $file);
+    }
 }
 
 sub update_monster_in_room {
