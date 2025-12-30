@@ -3,6 +3,18 @@
 # User authentication module for PhotonBBS
 #
 
+# Helper to load modules
+sub require_module {
+    my ($mod) = @_;
+    my $sys_path = "/opt/photonbbs/modules/$mod";
+    my $local_path = "./modules/$mod";
+    if (-e $sys_path) {
+        require $sys_path unless $INC{$sys_path};
+    } elsif (-e $local_path) {
+        require $local_path unless $INC{$local_path};
+    }
+}
+
 sub generate_salt {
   my @chars = ('A'..'Z', 'a'..'z', 0..9, '.', '/');
   return join '', map { $chars[rand @chars] } 1..16;
@@ -67,12 +79,22 @@ sub authenticate {
           unless (check_password($result, $info{'password'})) {
             writeline($theme{'mismatch'});
             logger("WARN: ".$info{'handle'}." incorrect password on node ".$info{'tty'}." via ".$info{'connect'});
+            
+            # SECURITY: Record failed login attempt
+            require_module("pb-security");
+            my $banned = record_failed_login($info{'connect'}, $info{'handle'});
+            
             unless (defined($tries)) {
               $tries=1;
             } else {
               ++$tries;
             }
-            if ($tries eq 4) {
+            if ($tries eq 4 || $banned) {
+              if ($banned) {
+                writeline("@RED\n\nYour IP has been banned due to multiple failed login attempts.\n");
+                writeline("Contact the system administrator if you believe this is an error.\n@RST");
+                logger("SECURITY: IP ".$info{'connect'}." auto-banned after failed logins");
+              }
               bye();
             }
             goto testpasswd;

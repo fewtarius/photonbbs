@@ -793,16 +793,17 @@ while (1) {
         # --- BBS client logic (unchanged) ---
         my $banned_ip_file = "$config{'home'}$config{'data'}/banned_ip";
         if (-e $banned_ip_file) {
-            open(my $fh, '<', $banned_ip_file);
-            while (my $line = <$fh>) {
-                chomp $line;
-                if ($peerhost =~ /$line/i) {
-                    print "[bbsd] [ERROR] [$$] Connection from banned IP $peerhost. Terminating.\n" unless $QUIET;
-                    close($fh);
-                    exit 1;
+            # Load pb-security for enhanced ban checking
+            require_module("pb-security");
+            my ($is_banned, $reason, $expires) = check_ip_banned($peerhost);
+            if ($is_banned) {
+                my $msg = "Connection from banned IP $peerhost. Reason: $reason.";
+                if ($expires && $expires > 0) {
+                    $msg .= " Ban expires: " . scalar(localtime($expires));
                 }
+                print "[bbsd] [ERROR] [$$] $msg\n" unless $QUIET;
+                exit 1;
             }
-            close($fh);
         }
         my $iplist_file = "$config{'home'}$config{'data'}/iplist";
         if (($config{'nodupes'} // "0") eq "1") {

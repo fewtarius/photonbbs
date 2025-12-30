@@ -1,0 +1,262 @@
+#!/usr/bin/perl
+#
+#  Photon BBS Security Administration Module
+#  (C) 2025 Fewtarius
+#
+#  Provides sysop commands for managing IP bans, viewing security logs,
+#  and monitoring failed login attempts.
+#
+#  SECURITY LEVEL REQUIRED: sec_sysop (default 500)
+
+use strict;
+use warnings;
+
+# Helper to load modules
+sub require_module {
+    my ($mod) = @_;
+    my $sys_path = "/opt/photonbbs/modules/$mod";
+    my $local_path = "./modules/$mod";
+    if (-e $sys_path) {
+        require $sys_path unless $INC{$sys_path};
+    } elsif (-e $local_path) {
+        require $local_path unless $INC{$local_path};
+    }
+}
+
+# Security dashboard - show recent attacks and bans
+sub security_dashboard {
+    require_module("pb-framework");
+    require_module("pb-security");
+    require_module("pb-defaults");
+    our %config;
+    our %info;
+    our $RST;
+    
+    # Check sysop permissions
+    unless ($info{'security'} >= $config{'sec_sysop'}) {
+        writeline($config{'errorcolor'}."Access denied. Sysop privileges required.".$RST, 1);
+        return;
+    }
+    
+    clearscreen();
+    writeline($config{'systemcolor'}."╔════════════════════════════════════════════════════════════════════════╗", 1);
+    writeline($config{'systemcolor'}."║              ".$config{'usercolor'}."PHOTONBBS SECURITY DASHBOARD".$config{'systemcolor'}."                         ║", 1);
+    writeline($config{'systemcolor'}."╚════════════════════════════════════════════════════════════════════════╝".$RST, 1);
+    writeline("", 1);
+    
+    # Show currently banned IPs
+    my @bans = get_banned_ips();
+    writeline($config{'themecolor'}."═══ BANNED IPS ═══".$RST, 1);
+    if (@bans) {
+        writeline($config{'datacolor'}."IP Address          Reason                           Expires".$RST, 1);
+        writeline($config{'linecolor'}."─────────────────────────────────────────────────────────────────────", 1);
+        foreach my $ban (@bans) {
+            my $ip = sprintf("%-18s", $ban->{ip});
+            my $reason = sprintf("%-32s", substr($ban->{reason}, 0, 32));
+            my $expires = $ban->{expires} > 0 ? 
+                scalar(localtime($ban->{expires})) : "Never";
+            writeline($config{'datacolor'}."$ip $reason $expires".$RST, 1);
+        }
+    } else {
+        writeline($config{'datacolor'}."No banned IPs".$RST, 1);
+    }
+    writeline("", 1);
+    
+    # Show recent failed login attempts
+    my @attempts = get_failed_login_stats(20);
+    writeline($config{'themecolor'}."═══ RECENT FAILED LOGINS (Last 20) ═══".$RST, 1);
+    if (@attempts) {
+        writeline($config{'datacolor'}."Time Ago    IP Address          Username".$RST, 1);
+        writeline($config{'linecolor'}."─────────────────────────────────────────────────────────", 1);
+        foreach my $attempt (@attempts) {
+            my $ago = format_time_ago($attempt->{ago});
+            my $ip = sprintf("%-18s", $attempt->{ip});
+            my $user = sprintf("%-16s", substr($attempt->{username}, 0, 16));
+            writeline($config{'datacolor'}."$ago $ip $user".$RST, 1);
+        }
+    } else {
+        writeline($config{'datacolor'}."No recent failed logins".$RST, 1);
+    }
+    writeline("", 1);
+    
+    # Show statistics
+    my $total_bans = scalar(@bans);
+    my $total_failures = scalar(@attempts);
+    writeline($config{'themecolor'}."═══ STATISTICS ═══".$RST, 1);
+    writeline($config{'datacolor'}."Active bans: $total_bans".$RST, 1);
+    writeline($config{'datacolor'}."Recent failed logins: $total_failures".$RST, 1);
+    writeline("", 1);
+    
+    writeline($config{'promptcolor'}."Commands: (B)an IP, (U)nban IP, (W)hitelist, (R)efresh, (Q)uit".$RST, 1);
+    writeline($config{'promptcolor'}."Enter command: ".$RST);
+    
+    my $cmd = uc(getline(text, 1, "", 1));
+    
+    if ($cmd eq 'B') {
+        ban_ip_command();
+    } elsif ($cmd eq 'U') {
+        unban_ip_command();
+    } elsif ($cmd eq 'W') {
+        manage_whitelist();
+    } elsif ($cmd eq 'R') {
+        security_dashboard();
+    } elsif ($cmd eq 'Q') {
+        return;
+    } else {
+        security_dashboard();
+    }
+}
+
+# Ban an IP address
+sub ban_ip_command {
+    require_module("pb-framework");
+    require_module("pb-security");
+    require_module("pb-defaults");
+    our %config;
+    our $RST;
+    
+    writeline("", 1);
+    writeline($config{'themecolor'}."═══ BAN IP ADDRESS ═══".$RST, 1);
+    writeline($config{'promptcolor'}."Enter IP address or pattern to ban: ".$RST);
+    my $ip = getline(text, 50, "", 1);
+    
+    return security_dashboard() unless $ip;
+    
+    writeline($config{'promptcolor'}."Enter reason (optional): ".$RST);
+    my $reason = getline(text, 100, "", 1);
+    $reason ||= "Manually banned by sysop";
+    
+    writeline($config{'promptcolor'}."Ban duration in seconds (0 for permanent): ".$RST);
+    my $duration = getline(text, 10, "", 1);
+    $duration = 0 unless $duration =~ /^\d+$/;
+    
+    my $expires = ($duration > 0) ? (time() + $duration) : 0;
+    
+    if (manual_ban_ip($ip, $reason, $expires)) {
+        writeline($config{'systemcolor'}."✓ Successfully banned IP: $ip".$RST, 1);
+        writeline($config{'datacolor'}."Reason: $reason".$RST, 1);
+        writeline($config{'datacolor'}."Expires: " . 
+            ($expires > 0 ? scalar(localtime($expires)) : "Never") . $RST, 1);
+    } else {
+        writeline($config{'errorcolor'}."✗ Failed to ban IP: $ip".$RST, 1);
+    }
+    
+    writeline("", 1);
+    writeline($config{'promptcolor'}."Press any key to continue...".$RST);
+    waitkey();
+    
+    security_dashboard();
+}
+
+# Unban an IP address
+sub unban_ip_command {
+    require_module("pb-framework");
+    require_module("pb-security");
+    require_module("pb-defaults");
+    our %config;
+    our $RST;
+    
+    writeline("", 1);
+    writeline($config{'themecolor'}."═══ UNBAN IP ADDRESS ═══".$RST, 1);
+    writeline($config{'promptcolor'}."Enter IP address to unban: ".$RST);
+    my $ip = getline(text, 50, "", 1);
+    
+    return security_dashboard() unless $ip;
+    
+    if (unban_ip($ip)) {
+        writeline($config{'systemcolor'}."✓ Successfully unbanned IP: $ip".$RST, 1);
+    } else {
+        writeline($config{'errorcolor'}."✗ IP not found in ban list: $ip".$RST, 1);
+    }
+    
+    writeline("", 1);
+    writeline($config{'promptcolor'}."Press any key to continue...".$RST);
+    waitkey();
+    
+    security_dashboard();
+}
+
+# Manage IP whitelist
+sub manage_whitelist {
+    require_module("pb-framework");
+    require_module("pb-defaults");
+    our %config;
+    our $RST;
+    
+    clearscreen();
+    writeline($config{'systemcolor'}."╔════════════════════════════════════════════════════════════════════════╗", 1);
+    writeline($config{'systemcolor'}."║                  ".$config{'usercolor'}."IP WHITELIST MANAGEMENT".$config{'systemcolor'}."                           ║", 1);
+    writeline($config{'systemcolor'}."╚════════════════════════════════════════════════════════════════════════╝".$RST, 1);
+    writeline("", 1);
+    
+    my $whitelist_file = "$config{'home'}$config{'data'}/whitelist_ip";
+    
+    writeline($config{'themecolor'}."Whitelist Status: " . 
+        ($config{'sec_whitelist_enabled'} ? 
+            $config{'systemcolor'}."ENABLED" : 
+            $config{'errorcolor'}."DISABLED") . $RST, 1);
+    writeline("", 1);
+    
+    # Show current whitelist
+    writeline($config{'themecolor'}."═══ WHITELISTED IPS ═══".$RST, 1);
+    if (-e $whitelist_file && open(my $fh, '<', $whitelist_file)) {
+        my $count = 0;
+        while (my $line = <$fh>) {
+            chomp $line;
+            next if $line =~ /^#/;
+            next unless $line =~ /\S/;
+            writeline($config{'datacolor'}."  $line".$RST, 1);
+            $count++;
+        }
+        close($fh);
+        writeline($config{'datacolor'}."Total: $count entries".$RST, 1) if $count > 0;
+        writeline($config{'datacolor'}."No whitelisted IPs".$RST, 1) if $count == 0;
+    } else {
+        writeline($config{'datacolor'}."No whitelist file found".$RST, 1);
+    }
+    writeline("", 1);
+    
+    writeline($config{'promptcolor'}."Commands: (A)dd IP, (R)emove IP, (E)nable/Disable, (B)ack".$RST, 1);
+    writeline($config{'promptcolor'}."Enter command: ".$RST);
+    
+    my $cmd = uc(getline(text, 1, "", 1));
+    
+    if ($cmd eq 'A') {
+        writeline($config{'promptcolor'}."Enter IP to whitelist: ".$RST);
+        my $ip = getline(text, 50, "", 1);
+        if ($ip && open(my $out, '>>', $whitelist_file)) {
+            print $out "$ip\n";
+            close($out);
+            writeline($config{'systemcolor'}."✓ Added $ip to whitelist".$RST, 1);
+            waitkey();
+        }
+        manage_whitelist();
+    } elsif ($cmd eq 'E') {
+        writeline($config{'systemcolor'}."Note: Whitelist enable/disable requires editing pb-defaults config file.".$RST, 1);
+        writeline($config{'datacolor'}."Set sec_whitelist_enabled = '1' to enable".$RST, 1);
+        waitkey();
+        manage_whitelist();
+    } elsif ($cmd eq 'B') {
+        security_dashboard();
+    } else {
+        manage_whitelist();
+    }
+}
+
+# Format time ago in human-readable format
+sub format_time_ago {
+    my ($seconds) = @_;
+    
+    return "Just now" if $seconds < 60;
+    
+    my $minutes = int($seconds / 60);
+    return "${minutes}m ago" if $minutes < 60;
+    
+    my $hours = int($minutes / 60);
+    return "${hours}h ago" if $hours < 24;
+    
+    my $days = int($hours / 24);
+    return "${days}d ago";
+}
+
+return 1;
