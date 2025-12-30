@@ -90,7 +90,7 @@ sub security_dashboard {
     writeline($config{'promptcolor'}."Commands: (B)an IP, (U)nban IP, (W)hitelist, (R)efresh, (Q)uit".$RST, 1);
     writeline($config{'promptcolor'}."Enter command: ".$RST);
     
-    my $cmd = uc(getline(text, 1, "", 1));
+    my $cmd = uc(getline('text', 1, "", 1));
     
     if ($cmd eq 'B') {
         ban_ip_command();
@@ -118,16 +118,16 @@ sub ban_ip_command {
     writeline("", 1);
     writeline($config{'themecolor'}."═══ BAN IP ADDRESS ═══".$RST, 1);
     writeline($config{'promptcolor'}."Enter IP address or pattern to ban: ".$RST);
-    my $ip = getline(text, 50, "", 1);
+    my $ip = getline('text', 50, "", 1);
     
     return security_dashboard() unless $ip;
     
     writeline($config{'promptcolor'}."Enter reason (optional): ".$RST);
-    my $reason = getline(text, 100, "", 1);
+    my $reason = getline('text', 100, "", 1);
     $reason ||= "Manually banned by sysop";
     
     writeline($config{'promptcolor'}."Ban duration in seconds (0 for permanent): ".$RST);
-    my $duration = getline(text, 10, "", 1);
+    my $duration = getline('text', 10, "", 1);
     $duration = 0 unless $duration =~ /^\d+$/;
     
     my $expires = ($duration > 0) ? (time() + $duration) : 0;
@@ -159,7 +159,7 @@ sub unban_ip_command {
     writeline("", 1);
     writeline($config{'themecolor'}."═══ UNBAN IP ADDRESS ═══".$RST, 1);
     writeline($config{'promptcolor'}."Enter IP address to unban: ".$RST);
-    my $ip = getline(text, 50, "", 1);
+    my $ip = getline('text', 50, "", 1);
     
     return security_dashboard() unless $ip;
     
@@ -219,11 +219,11 @@ sub manage_whitelist {
     writeline($config{'promptcolor'}."Commands: (A)dd IP, (R)emove IP, (E)nable/Disable, (B)ack".$RST, 1);
     writeline($config{'promptcolor'}."Enter command: ".$RST);
     
-    my $cmd = uc(getline(text, 1, "", 1));
+    my $cmd = uc(getline('text', 1, "", 1));
     
     if ($cmd eq 'A') {
         writeline($config{'promptcolor'}."Enter IP to whitelist: ".$RST);
-        my $ip = getline(text, 50, "", 1);
+        my $ip = getline('text', 50, "", 1);
         if ($ip && open(my $out, '>>', $whitelist_file)) {
             print $out "$ip\n";
             close($out);
