@@ -51,7 +51,6 @@ PhotonBBS is a comprehensive telnet-based bulletin board system (BBS) and multi-
 
 ### PhotonBBS - The BBS Platform
 
-The core BBS provides:
 - Multi-user chat and teleconference system
 - User account management and authentication
 - System bulletins and oneliners
@@ -60,11 +59,8 @@ The core BBS provides:
 - Classic BBS door game support
 - Administrative tools and utilities
 
-See [PHOTONBBS.md](PHOTONBBS.md) for complete BBS documentation.
-
 ### PhotonMUD - The Multi-User Dungeon
 
-PhotonMUD is a fully-featured MUD with:
 - Procedurally-generated persistent worlds
 - D&D-style combat system with dice mechanics
 - Character classes, races, and progression
@@ -73,8 +69,6 @@ PhotonMUD is a fully-featured MUD with:
 - Dynamic economy and trading
 - Multiplayer exploration and interaction
 - Unique world generation every campaign
-
-See [PHOTONMUD.md](PHOTONMUD.md) for complete MUD game rules and documentation.
 
 ### Door Game Support
 
@@ -122,21 +116,13 @@ That's it! PhotonBBS will build and start automatically.
 
 ## Documentation
 
-### For Users
+**For Users:**
+- [PHOTONBBS.md](PHOTONBBS.md) - BBS commands and features
+- [PHOTONMUD.md](PHOTONMUD.md) - MUD gameplay guide
 
-- **[PHOTONBBS.md](PHOTONBBS.md)** - Complete BBS user guide and commands
-- **[PHOTONMUD.md](PHOTONMUD.md)** - Complete MUD gameplay guide and rules
-
-### For Administrators
-
-- **[PHOTONBBS.md](PHOTONBBS.md)** - Installation, configuration, and administration
-- **[DEVELOPER.md](DEVELOPER.md)** - Developer guide for menu system and customization
-
-### For Developers
-
-- **[DEVELOPER.md](DEVELOPER.md)** - Extending PhotonBBS and creating custom features
-- **modules/** - Core Perl modules (pb-* for BBS, pm-* for MUD)
-- **Reference code** - See `modules/` for working examples
+**For Administrators and Developers:**
+- [PHOTONBBS.md](PHOTONBBS.md) - Installation and configuration
+- [DEVELOPER.md](DEVELOPER.md) - Extending and customizing
 
 ## Key Features
 
@@ -239,24 +225,11 @@ Run `make help` for complete documentation.
 
 ### Module Development
 
-PhotonBBS uses a modular architecture. Core modules are in `modules/`:
+PhotonBBS uses a modular architecture with core modules in the modules directory.
 
-**BBS Modules (pb-*):**
-- pb-framework - Core telnet/session handling
-- pb-main - Main BBS functionality
-- pb-doors - Door game integration
-- pb-usertools - User management
-- pb-security - Security and permissions
+**BBS Modules (pb-):** Framework, main functionality, doors, user tools, security
 
-**MUD Modules (pm-*):**
-- pm-combat - Combat system
-- pm-rooms - World and room management
-- pm-monsters - Monster AI and behavior
-- pm-spells - Magic system
-- pm-player - Character management
-- pm-objects - Items and inventory
-
-See [DEVELOPER.md](DEVELOPER.md) for detailed module development guide.
+**MUD Modules (pm-):** Combat, rooms, monsters, spells, player management, objects
 
 ## Configuration
 
@@ -276,23 +249,13 @@ Menus are defined in text files in `data/`:
 - main.mnu - Main menu
 - external.mnu - External commands and doors
 
-See [PHOTONBBS.md](PHOTONBBS.md) for menu configuration details.
+### Menu Configuration
+
+Menus are defined in text files in the data directory.
 
 ### MUD Configuration
 
-PhotonMUD settings are in `modules/pm-defaults`:
-- World generation parameters
-- Combat balance settings
-- Monster spawn rates
-- Economic settings
-
-See [PHOTONMUD.md](PHOTONMUD.md) for MUD configuration.
-
-## Themes
-
-PhotonBBS supports customizable color themes in `data/themes/`:
-
-Available themes:
+PhotonMUD settings control world generation, combat balance, and monster spawning.
 - photon - Default theme
 - mbbs - Alternative theme
 - terminal_tavern - Terminal Tavern BBS theme
@@ -348,47 +311,6 @@ See LICENSE file for complete license text.
 **Contributors**: See GitHub contributors list
 
 **Special Thanks**: The BBS and MUD communities for keeping these platforms alive
-
-## Roadmap
-
-Future development plans include:
-
-- Expanded MUD content (more spells, monsters, items)
-- Additional character classes and races
-- Quest system and storylines
-- Enhanced multiplayer features
-- Web-based administration interface
-- RESTful API for external integrations
-- Modern client support (SSH, TLS)
-
-## Getting Help
-
-For questions and support:
-
-1. Check the documentation:
-   - [PHOTONBBS.md](PHOTONBBS.md) - BBS usage and administration
-   - [PHOTONMUD.md](PHOTONMUD.md) - MUD gameplay guide
-   - [DEVELOPER.md](DEVELOPER.md) - Development guide
-
-2. Try the live demo at telnet bbs.terminaltavern.com
-
-3. Open an issue on GitHub
-
-4. Check existing issues and discussions
-
-## Version History
-
-**Version 1.5+**: Current development version
-- PhotonMUD integration
-- Enhanced door game support
-- Docker containerization
-- Performance optimizations
-- Monster AI improvements
-
-**Version 1.0-1.4**: Legacy versions
-- Core BBS functionality
-- Chat and teleconference
-- Basic door support
 
 ---
 
