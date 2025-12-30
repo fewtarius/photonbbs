@@ -215,6 +215,26 @@ sub show_menu {
         ['%',  $theme{'cmd_oneliners'}     // "Write on the wall",       sub { oneliners() } ],
         ['@',  $theme{'cmd_bulletins'}     // "Read System Bulletins",   sub { bulletins() } ],
         ['!',  $theme{'cmd_exit'}          // "Log Off and Exit",        sub { menu_exit($main_menu) } ],
+        ['S',  "Security Dashboard",       sub { 
+            # Only allow sysops
+            if ($info{'security'} >= $config{'sec_sysop'}) {
+                # Load security modules on demand
+                eval {
+                    require $config{'home'}."/modules/pb-security";
+                    require $config{'home'}."/modules/pb-security-admin";
+                };
+                if ($@) {
+                    writeline($config{'errorcolor'}."Error loading security modules: $@".$RST, 1);
+                    pause();
+                    return 0;
+                }
+                security_dashboard();
+                return 0;
+            } else {
+                # Silently ignore for non-sysops (hidden command)
+                return 0;
+            }
+        }],
     );
 
     while (1) {

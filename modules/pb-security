@@ -535,23 +535,7 @@ sub is_ip_whitelisted {
     return 0;
 }
 
-# Helper to load pb-defaults if needed
-sub require_module {
-    my ($mod) = @_;
-    my $sys_path = "/opt/photonbbs/modules/$mod";
-    my $local_path = "./modules/$mod";
-    if (-e $sys_path) {
-        require $sys_path;
-    } elsif (-e $local_path) {
-        require $local_path;
-    }
-}
-
-# Helper to log messages (stub - actual logger in pb-framework)
-sub logger {
-    my ($message) = @_;
-    # This will be overridden by pb-framework's logger if loaded
-    print STDERR "[SECURITY] $message\n";
-}
+# Note: require_module() and logger() are provided by pb-framework
+# when this module is loaded by the BBS. No need to redefine them here.
 
 1;
