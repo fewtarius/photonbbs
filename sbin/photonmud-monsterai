@@ -3965,6 +3965,16 @@ sub run_monster_worker {
     # --- Main loop: maintain monster count (respawn logic is handled in monster_thread) ---
     $SIG{INT} = $SIG{TERM} = sub {
         log_info("Worker $worker_id: Shutting down...");
+        
+        # CRITICAL: Flush cached permmon data before shutdown
+        eval {
+            flush_permmon_cache(1);  # Force flush all rooms
+            log_info("Worker $worker_id: Flushed permmon cache on shutdown");
+        };
+        if ($@) {
+            log_info("Worker $worker_id: ERROR flushing cache: $@");
+        }
+        
         broker_disconnect($broker_sock) if $broker_sock;
         cleanup_permmon_files(); # Clean up on shutdown
         exit 0;
@@ -3974,6 +3984,9 @@ sub run_monster_worker {
     my $combat_poll_interval = ($CPU_COUNT <= 1) ? 2.0 : 0.25;
 
     while (1) {
+        # Periodic flush of cached permmon files (critical for performance)
+        eval { maybe_flush_permmon_cache(); };
+        
         # Check for and process combat request files
         my $data_dir = $config{transient};;
         opendir(my $dh, $data_dir);
