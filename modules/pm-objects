@@ -790,6 +790,9 @@ sub update_room_treasure_slot {
     flock($fh, LOCK_UN);
     close($fh);
     
+    # CRITICAL: Invalidate cache after write
+    room_cache_invalidate($room_num);
+    
     return 1;
 }
 
@@ -845,6 +848,9 @@ sub update_room_object_slot {
     # Release lock and close
     flock($fh, LOCK_UN);
     close($fh);
+    
+    # CRITICAL: Invalidate cache after write
+    room_cache_invalidate($room_num);
     
     return 1;
 }
