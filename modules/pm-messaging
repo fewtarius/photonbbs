@@ -89,7 +89,7 @@ sub write_session_message {
         return;
     };
     flock($fh, 2);
-    print $fh $msg;
+    print $fh $msg . "\n";  # Add newline to separate messages
     flock($fh, 8);
     close($fh);
 }

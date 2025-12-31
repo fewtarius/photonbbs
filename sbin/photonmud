@@ -588,8 +588,16 @@ sub mud_getline {
                 writeline($config{'errorcolor'}."$attacker attacks you!".$config{'themecolor'}, 1);
                 writeline($config{'systemcolor'}."Press Enter to defend yourself or [R] to run.".$config{'themecolor'}, 0);
                 
-                my $response = uc(waitkey(""));
-                $response = "FIGHT" if $response eq "" || $response eq "\n";
+                my $response = uc(waitkey("", 30));  # 30 second timeout
+                
+                # Handle timeout
+                if (!defined $response) {
+                    # Timeout - auto-defend
+                    $response = "FIGHT";
+                    writeline($config{'systemcolor'}."\nTimeout - automatically defending!".$config{'themecolor'}, 1);
+                } elsif ($response eq "" || $response eq "\n") {
+                    $response = "FIGHT";
+                }
                 
                 if ($response eq "R") {
                     writeline($config{'systemcolor'}."\nYou attempt to flee!".$config{'themecolor'}, 1);
@@ -670,11 +678,33 @@ sub mud_getline {
                         writeline($config{'errorcolor'}."$attacker_name attacks you!".$config{'themecolor'}, 1);
                         writeline($config{'systemcolor'}."Press Enter to defend yourself or [R] to run.".$config{'themecolor'}, 0);
                         
-                        my $response = uc(waitkey(""));
-                        $response = "FIGHT" if $response eq "" || $response eq "\n";
+                        my $response = uc(waitkey("", 30));  # 30 second timeout
                         
-                        # Create response file with proper file locking and flushing
-                        my $response_file = "$config{transient}/combat_response_$player_hash.txt";
+                        # Handle timeout - check if attacker abandoned
+                        my $combat_abandoned = 0;
+                        if (!defined $response) {
+                            # Check for combat_abandoned signal
+                            my $abandoned_file = "$config{transient}/combat_abandoned_$player_hash.txt";
+                            if (-e $abandoned_file) {
+                                # Attacker timed out before us - clean up gracefully
+                                writeline($config{'systemcolor'}."\nThe attacker has fled!".$config{'themecolor'}, 1);
+                                unlink $handshake_file if -e $handshake_file;
+                                unlink $abandoned_file;
+                                photonmud_debug("Combat abandoned by attacker, cleaned up gracefully");
+                                $combat_abandoned = 1;  # Mark as abandoned
+                            } else {
+                                # No abandoned signal - auto-defend
+                                $response = "FIGHT";
+                                writeline($config{'systemcolor'}."\nTimeout - automatically defending!".$config{'themecolor'}, 1);
+                            }
+                        } elsif ($response eq "" || $response eq "\n") {
+                            $response = "FIGHT";
+                        }
+                        
+                        # Only process combat response if not abandoned
+                        unless ($combat_abandoned) {
+                            # Create response file with proper file locking and flushing
+                            my $response_file = "$config{transient}/combat_response_$player_hash.txt";
                         
                         # Use sysopen with proper flags for atomic write
                         if (sysopen(my $rf, $response_file, O_WRONLY | O_CREAT, 0666)) {
@@ -755,6 +785,7 @@ sub mud_getline {
                             # Let the combat loop take over on next input cycle
                             return "";
                         }
+                        }  # End of unless ($combat_abandoned)
                     } else {
                         photonmud_debug("Received combat handshake for wrong room ($room_id vs $player->{room})");
                         unlink $combat_handshake;

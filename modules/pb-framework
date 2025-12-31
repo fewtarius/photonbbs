@@ -595,9 +595,18 @@ sub waitkey {
   $idle=time;
   $idlenotified=0;
   $default=$_[0];
+  my $timeout=$_[1];  # Optional timeout in seconds (0 or undef = no timeout)
+  my $start_time=time;
   $key="";
   cbreak(on);
   for (;;) {
+    # Check if timeout exceeded (if timeout was specified)
+    if ($timeout && (time - $start_time) >= $timeout) {
+      # Timeout exceeded - return undef to signal timeout
+      cbreak(off);
+      return undef;
+    }
+    
     wastart: {
     eval {
       local $SIG{ALRM}=sub{$key="";doevents();goto wastart;};
