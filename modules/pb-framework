@@ -624,6 +624,53 @@ sub waitkey {
   return $key;
 }
 
+# Timeout-capable version of waitkey for combat prompts
+# Returns undef if timeout occurs, otherwise returns the key pressed
+sub waitkey_with_timeout {
+  my ($default, $timeout_seconds) = @_;
+  $timeout_seconds //= 30;  # Default 30 second timeout
+  
+  my $start_time = time;
+  my $key = "";
+  
+  $idle = time;
+  $idlenotified = 0;
+  
+  cbreak(on);
+  
+  for (;;) {
+    # Check if timeout exceeded
+    if (time - $start_time >= $timeout_seconds) {
+      return undef;  # Timeout - return undef
+    }
+    
+    wastart_timeout: {
+      eval {
+        local $SIG{ALRM} = sub { $key = ""; doevents(); goto wastart_timeout; };
+        alarm 1;
+        $key = "";
+        $key = getc(STDIN);
+        doevents();
+        alarm 0;
+      };
+    };
+
+    if ($key ne "") {
+      unless ($key eq "\n") {
+        writeline($config{'inputcolor'} . $key);
+      } else {
+        $key = $default;
+        writeline($config{'inputcolor'} . $key);
+      }
+      last;
+    } else {
+      next;
+    }
+  }
+  
+  return $key;
+}
+
 sub writeline {
   $wrline=$_[0];
   $wrline =~s/\@RST/$RST/g;

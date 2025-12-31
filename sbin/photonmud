@@ -588,14 +588,36 @@ sub mud_getline {
                 writeline($config{'errorcolor'}."$attacker attacks you!".$config{'themecolor'}, 1);
                 writeline($config{'systemcolor'}."Press Enter to defend yourself or [R] to run.".$config{'themecolor'}, 0);
                 
-                my $response = uc(waitkey(""));
-                $response = "FIGHT" if $response eq "" || $response eq "\n";
+                # Use timeout-capable waitkey (30 second timeout)
+                my $response = waitkey_with_timeout("", 30);
+                my $timed_out = 0;
+                
+                # If timeout (undef) or no input, default to FIGHT
+                if (!defined $response) {
+                    $response = "FIGHT";
+                    $timed_out = 1;
+                    writeline($config{'systemcolor'}."\nTimeout - automatically defending!".$config{'themecolor'}, 1);
+                    # Flush any pending input after timeout
+                    eval {
+                        require Term::ReadKey;
+                        Term::ReadKey::ReadMode('ultra-raw');
+                        1 while defined Term::ReadKey::ReadKey(-1);
+                        Term::ReadKey::ReadMode('restore');
+                    };
+                } elsif ($response eq "" || $response eq "\n") {
+                    $response = "FIGHT";
+                } else {
+                    $response = uc($response);
+                }
                 
                 if ($response eq "R") {
                     writeline($config{'systemcolor'}."\nYou attempt to flee!".$config{'themecolor'}, 1);
                     broker_combat_response($broker_sock, $combat_id, 'flee');
                 } else {
-                    writeline($config{'systemcolor'}."\nYou prepare to fight!".$config{'themecolor'}, 1);
+                    # Only print "prepare to fight" if not timed out (already printed timeout message)
+                    unless ($timed_out) {
+                        writeline($config{'systemcolor'}."\nYou prepare to fight!".$config{'themecolor'}, 1);
+                    }
                     broker_combat_response($broker_sock, $combat_id, 'fight');
                     
                     # Wait for combat_start
@@ -670,8 +692,27 @@ sub mud_getline {
                         writeline($config{'errorcolor'}."$attacker_name attacks you!".$config{'themecolor'}, 1);
                         writeline($config{'systemcolor'}."Press Enter to defend yourself or [R] to run.".$config{'themecolor'}, 0);
                         
-                        my $response = uc(waitkey(""));
-                        $response = "FIGHT" if $response eq "" || $response eq "\n";
+                        # Use timeout-capable waitkey (30 second timeout)
+                        my $response = waitkey_with_timeout("", 30);
+                        my $timed_out = 0;
+                        
+                        # If timeout (undef) or no input, default to FIGHT
+                        if (!defined $response) {
+                            $response = "FIGHT";
+                            $timed_out = 1;
+                            writeline($config{'systemcolor'}."\nTimeout - automatically defending!".$config{'themecolor'}, 1);
+                            # Flush any pending input after timeout
+                            eval {
+                                require Term::ReadKey;
+                                Term::ReadKey::ReadMode('ultra-raw');
+                                1 while defined Term::ReadKey::ReadKey(-1);
+                                Term::ReadKey::ReadMode('restore');
+                            };
+                        } elsif ($response eq "" || $response eq "\n") {
+                            $response = "FIGHT";
+                        } else {
+                            $response = uc($response);
+                        }
                         
                         # Create response file with proper file locking and flushing
                         my $response_file = "$config{transient}/combat_response_$player_hash.txt";
@@ -686,7 +727,10 @@ sub mud_getline {
                                     writeline($config{'systemcolor'}."\nYou attempt to flee!".$config{'themecolor'}, 1);
                                 } else {
                                     $response_data = "fight|" . time();
-                                    writeline($config{'systemcolor'}."\nYou prepare to fight!".$config{'themecolor'}, 1);
+                                    # Only print "prepare to fight" if not timed out (already printed timeout message)
+                                    unless ($timed_out) {
+                                        writeline($config{'systemcolor'}."\nYou prepare to fight!".$config{'themecolor'}, 1);
+                                    }
                                 }
                                 
                                 # Write data and force flush
@@ -744,8 +788,16 @@ sub mud_getline {
                             }
                             
                             if (!$combat_initialized) {
-                                photonmud_debug("Combat pointer never appeared after accepting combat - handshake failed");
-                                writeline($config{'errorcolor'}."Combat initialization failed. Try again later.".$config{'themecolor'}, 1);
+                                # Check for combat_abandoned signal
+                                my $abandoned_file = "$config{transient}/combat_abandoned_$player_hash.txt";
+                                if (-e $abandoned_file) {
+                                    photonmud_debug("Combat was abandoned by attacker - cleaning up");
+                                    writeline($config{'systemcolor'}."Combat negotiation timed out on opponent's side.".$config{'themecolor'}, 1);
+                                    unlink $abandoned_file;
+                                } else {
+                                    photonmud_debug("Combat pointer never appeared after accepting combat - handshake failed");
+                                    writeline($config{'errorcolor'}."Combat initialization failed. Try again later.".$config{'themecolor'}, 1);
+                                }
                                 # Clean up any remaining combat files
                                 foreach my $file ($combat_handshake, $combat_response_file, $combat_ready) {
                                     unlink $file if -e $file;
