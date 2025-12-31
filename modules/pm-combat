@@ -795,7 +795,7 @@ sub atomic_start_pvp_combat {
         # Wait for defender's response
         my $response_file = "$config{transient}/combat_response_" . safe_name($p2->{name}) . ".txt";
         my $wait_start = time();
-        my $max_wait = 30;  # 30 seconds timeout
+        my $max_wait = 45;  # 45 seconds timeout (longer than defender's 30s)
         my $defender_response = "";
         
         # Wait for response file to appear with improved file reading
@@ -907,6 +907,16 @@ sub atomic_start_pvp_combat {
         } else {
             # No or invalid response, abort combat
             combat_debug("[COMBAT] atomic_start_pvp_combat: No valid response from defender (response='$defender_response'), aborting combat");
+            
+            # Create abandoned signal for the defender so they can recover gracefully
+            my $abandoned_file = "$config{transient}/combat_abandoned_" . safe_name($p2->{name}) . ".txt";
+            eval {
+                if (open(my $af, ">", $abandoned_file)) {
+                    print $af "timeout|" . time();
+                    close($af);
+                    combat_debug("[COMBAT] atomic_start_pvp_combat: Created abandoned signal for $p2->{name}");
+                }
+            };
             
             # Clean up all created files
             unlink $handshake_file if -e $handshake_file;
@@ -4870,17 +4880,23 @@ sub handle_player_death {
     my ($player) = @_;
     return unless $player && $player->{name};
     
-    # Log the death event for debugging regardless of handled state
+    # Log the death event for debugging
     photonmud_debug("handle_player_death: Processing death for $player->{name}");
     
-    # Check if death has been handled already - return early to prevent duplicate messages
-    if ($player->{_death_handled}) {
-        photonmud_debug("handle_player_death: Death already handled for $player->{name}, skipping");
+    # Use timestamp-based duplicate check instead of boolean flag
+    # This prevents the stuck flag issue while still avoiding rapid duplicate calls
+    my $now = time();
+    my $last_death = $player->{_last_death_time} || 0;
+    my $min_interval = 5;  # Minimum 5 seconds between death processing
+    
+    if (($now - $last_death) < $min_interval) {
+        photonmud_debug("handle_player_death: Death handled recently for $player->{name} (" . 
+                       ($now - $last_death) . "s ago), skipping");
         return;
     }
     
-    # Mark death as handled to prevent future duplicate processing
-    $player->{_death_handled} = 1;
+    # Update death timestamp
+    $player->{_last_death_time} = $now;
     
     # Clear any combat flags immediately
     $player->{in_combat} = 0;
@@ -4974,18 +4990,6 @@ sub handle_player_death {
                 in_combat => 0
             });
         }
-    }
-    
-    # Reset death flag after a short delay to allow for future deaths
-    my $player_name = $player->{name};
-    if (defined &schedule_event) {
-        schedule_event(30, sub {
-            my $p = load_player($player_name);
-            if ($p) {
-                delete $p->{_death_handled};
-                save_player($p);
-            }
-        });
     }
     
     photonmud_debug("handle_player_death: Completed death handling for $player->{name}");
