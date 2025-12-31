@@ -608,7 +608,10 @@ sub get_item_from_room {
     
     # Ensure we have the correct references
     $player //= $::player;
-    $room = read_room_record($room->{roomnum} || $room) unless ref($room) eq 'HASH';
+    # CRITICAL FIX: Always re-read room record to get fresh treasure data from file
+    # The cached/passed room data may be stale
+    my $room_num = ref($room) eq 'HASH' ? ($room->{roomnum} || $room) : $room;
+    $room = read_room_record($room_num);
     
     # Normalize the item name for matching
     my $try_name = normalize_item_name($itemname);
@@ -621,7 +624,16 @@ sub get_item_from_room {
         my $treas = read_treasure_record($idx);
         next unless $treas && $treas->{name};
         
-        if (normalize_item_name($treas->{name}) eq $try_name) {
+        # Use partial matching like the LOOK command
+        my $treas_norm = normalize_item_name($treas->{name});
+        my $matches = (
+            $treas_norm eq $try_name ||
+            index($treas_norm, $try_name) >= 0 ||
+            index($try_name, $treas_norm) >= 0 ||
+            $treas_norm =~ /\Q$try_name\E/
+        );
+        
+        if ($matches) {
             # Get the charges for this treasure
             my $charges = unpack("s", substr($room->{trecharges}, $i*2, 2)) || 1;
             
@@ -675,7 +687,16 @@ sub get_item_from_room {
         my $obj = read_object_record($idx);
         next unless $obj && $obj->{name};
         
-        if (normalize_item_name($obj->{name}) eq $try_name) {
+        # Use partial matching like the LOOK command
+        my $obj_norm = normalize_item_name($obj->{name});
+        my $matches = (
+            $obj_norm eq $try_name ||
+            index($obj_norm, $try_name) >= 0 ||
+            index($try_name, $obj_norm) >= 0 ||
+            $obj_norm =~ /\Q$try_name\E/
+        );
+        
+        if ($matches) {
             # Check if it's a permanent object
             if ($obj->{permanent} && $obj->{permanent} != 0) {
                 writeline($config{'errorcolor'}."The $obj->{name} seems to be fixed in place and cannot be moved.".$config{'themecolor'}, 1);
@@ -726,7 +747,7 @@ sub update_room_treasure_slot {
     $charges //= 0;
     
     # Calculate file offsets based on room record structure
-    my $roomrec_len = 1096;
+    my $roomrec_len = 1108;  # CRITICAL: Must match read_room_record() length!
     my $treasure_base_offset = 652;  # Start of treasure array in room record
     my $trecharges_base_offset = 692; # Start of trecharges array in room record
     
@@ -782,7 +803,7 @@ sub update_room_object_slot {
     $hidden //= 0;
     
     # Calculate file offsets based on room record structure
-    my $roomrec_len = 1096;
+    my $roomrec_len = 1108;  # CRITICAL: Must match read_room_record() length!
     my $object_base_offset = 492;    # Start of object array in room record
     my $hiddenobj_base_offset = 532; # Start of hiddenobj array in room record
     

@@ -228,7 +228,7 @@ sub save_room_record {
     # Normalize roomnum if it's a reference
     $roomnum = $room->{roomnum} if ref($roomnum);
     
-    my $roomrec_len = 1096;  # Updated for elevation and biome
+    my $roomrec_len = 1108;  # CRITICAL: Must match read_room_record() length!
     my $file = "$config{'home'}/$config{'data'}/rooms.dat";
     
     # Open with exclusive lock
@@ -503,7 +503,7 @@ sub show_room_treasures {
     
     # Read directly from the file to get current state
     my $file = "$config{'home'}/$config{'data'}/rooms.dat";
-    my $roomrec_len = 1096;
+    my $roomrec_len = 1108;  # CRITICAL: Must match read_room_record() length!
     
     open(my $fh, "<:raw", $file) or return;
     flock($fh, LOCK_SH);
@@ -562,7 +562,7 @@ sub debug_room_treasures {
     
     # Read the room record directly
     my $file = "$config{'home'}/$config{'data'}/rooms.dat";
-    my $roomrec_len = 1096;
+    my $roomrec_len = 1108;  # CRITICAL: Must match read_room_record() length!
     
     open(my $fh, "<:raw", $file) or do {
         writeline($config{'errorcolor'}."Can't open room file: $!".$config{'themecolor'}, 1);
