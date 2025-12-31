@@ -795,7 +795,7 @@ sub atomic_start_pvp_combat {
         # Wait for defender's response
         my $response_file = "$config{transient}/combat_response_" . safe_name($p2->{name}) . ".txt";
         my $wait_start = time();
-        my $max_wait = 45;  # 45 seconds timeout (longer than defender's 30s input timeout)
+        my $max_wait = 30;  # 30 seconds timeout
         my $defender_response = "";
         
         # Wait for response file to appear with improved file reading
@@ -907,15 +907,6 @@ sub atomic_start_pvp_combat {
         } else {
             # No or invalid response, abort combat
             combat_debug("[COMBAT] atomic_start_pvp_combat: No valid response from defender (response='$defender_response'), aborting combat");
-            
-            # Create abandoned combat signal for defender to detect
-            my $abandoned_file = "$config{transient}/combat_abandoned_" . safe_name($p2->{name}) . ".txt";
-            eval {
-                open(my $af, ">", $abandoned_file) or die "Cannot create abandoned file: $!";
-                print $af "timeout|" . time() . "|$p1->{name}";
-                close($af);
-                combat_debug("[COMBAT] atomic_start_pvp_combat: Created combat_abandoned signal for $p2->{name}");
-            };
             
             # Clean up all created files
             unlink $handshake_file if -e $handshake_file;
