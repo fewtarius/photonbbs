@@ -6062,6 +6062,9 @@ sub remove_monster_from_room {
     if ($@) {
         combat_debug("[DEBUG] remove_monster_from_room: Failed to store updated list to $perm_file: $@");
     }
+    
+    # CRITICAL: Invalidate room cache so LOOK shows updated monster list
+    room_cache_invalidate($room->{roomnum});
 }
 
 1;
