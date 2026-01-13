@@ -1,0 +1,19 @@
+#!/bin/bash
+# PhotonBBS Daily Maintenance: Reset Last Callers
+# Runs at midnight (configurable via DAILY_RUN_HOUR in photonbbs daemon)
+
+PHOTONBBS_HOME="${PHOTONBBS_HOME:-/opt/photonbbs}"
+LASTCALLERS_FILE="${PHOTONBBS_HOME}/data/text/lastcallers"
+
+echo "[daily.d] [reset-lastcallers] Running lastcallers reset at $(date)"
+
+if [ -f "$LASTCALLERS_FILE" ]; then
+    echo "[daily.d] [reset-lastcallers] Removing $LASTCALLERS_FILE"
+    rm -f "$LASTCALLERS_FILE"
+    echo "[daily.d] [reset-lastcallers] Last callers file reset successfully"
+else
+    echo "[daily.d] [reset-lastcallers] No lastcallers file found, nothing to reset"
+fi
+
+echo "[daily.d] [reset-lastcallers] Completed at $(date)"
+exit 0
