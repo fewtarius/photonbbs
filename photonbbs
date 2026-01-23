@@ -232,19 +232,22 @@ sub run_bye_for_node {
     return if $pid && kill 0, $pid;
     my $lockfile = "$config{'home'}$config{'data'}/nodes/$nodeid.lock";
     unlink $lockfile if -e $lockfile;
-    my $cmd = <<"EOF";
-perl -Mlib=$config{'home'}/modules -e '
-    require "$framework";
-    our %info;
-    our %config;
-    \$config{home}="$config{'home'}";
-    \$info{node} = "$nodeid";
-    \$info{handle} = "$user";
-    \$info{connect} = "$ip";
-    bye();
-'
-EOF
-    system($cmd);
+    
+    # SECURITY FIX: Use array form of system() to prevent command injection
+    # Use quotemeta to safely escape any special characters in user-controlled data
+    my $perlscript = qq{
+        require "$framework";
+        our %info;
+        our %config;
+        \$config{home}="$config{'home'}";
+        \$info{node} = } . quotemeta($nodeid) . qq{;
+        \$info{handle} = } . quotemeta($user) . qq{;
+        \$info{connect} = } . quotemeta($ip) . qq{;
+        bye();
+    };
+    
+    # Use array form of system() - cannot be interpreted as shell
+    system('perl', "-Mlib=$config{'home'}/modules", '-e', $perlscript);
 }
 
 sub session_maintenance {
