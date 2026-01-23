@@ -6,6 +6,9 @@
 use Fcntl qw(:DEFAULT :flock);
 use POSIX qw(strftime);
 
+# SECURITY: Global hash to track active lock filehandles
+our %GLOBAL_LOCK_FH;
+
 # ============================================================================
 # DATE/TIME HELPERS - Use Perl instead of forking to `date` command
 # ============================================================================
@@ -517,34 +520,77 @@ sub applytheme {
 }
 
 sub lockfile {
-  $tolock=$_[0];
-  $lockwait=5;
-  while (-e "$tolock.lock") {
-    # If lockfile is stale (>60s), remove it
-    if (-e "$tolock.lock" && (time - (stat("$tolock.lock"))[9]) > 60) {
-      unlink("$tolock.lock");
-      last;
+  my ($filepath) = @_;
+  my $lockfile = "$filepath.lock";
+  my $max_retries = 10;
+  my $retry_count = 0;
+  
+  # SECURITY FIX: Use atomic flock() instead of file existence check
+  # This prevents TOCTOU (Time-of-Check-Time-of-Use) race conditions
+  while ($retry_count < $max_retries) {
+    # Try to open the lock file for writing (create if doesn't exist)
+    if (open(my $lock_fh, '>', $lockfile)) {
+      # Try to acquire exclusive lock
+      if (flock($lock_fh, LOCK_EX | LOCK_NB)) {
+        # Successfully locked
+        print $lock_fh $info{'handle'};
+        chmod 0666, $lockfile;
+        
+        # Store the filehandle globally so unlockfile can access it
+        # Note: In production, consider using a lock manager object
+        $GLOBAL_LOCK_FH{$filepath} = $lock_fh;
+        return 1;
+      } else {
+        # Lock failed, check if lock file is stale
+        my @stat = stat($lockfile);
+        if (@stat && (time - $stat[9]) > 60) {
+          # Lock file is older than 60 seconds, remove it and retry
+          close($lock_fh);
+          unlink($lockfile);
+          $retry_count++;
+          sleep 1;
+          next;
+        }
+        # Wait for lock
+        close($lock_fh);
+        $retry_count++;
+        sleep 1;
+        next;
+      }
+    } else {
+      # Could not open lock file, wait and retry
+      $retry_count++;
+      sleep 1;
+      next;
     }
-    --$lockwait;
-    if ($lockwait eq 0) {
-      last;
-    }
-    sleep 1;
   }
-  if ($lockwait le 0) {
-    logger("ERROR: $info{'handle'} forced unlock on $tolock");
-    unlink("$tolock.lock");
+  
+  # If we got here, we couldn't acquire the lock after retries
+  # For backward compatibility, force unlock with warning
+  logger("WARN: $info{'handle'} unable to acquire lock on $filepath after $max_retries attempts");
+  if (-e $lockfile && (time - (stat($lockfile))[9]) > 60) {
+    logger("ERROR: $info{'handle'} forced unlock on $filepath (stale lock)");
+    unlink($lockfile);
   }
-  open(my $lock_fh, '>', "$tolock.lock");
-    print $lock_fh $info{'handle'};
-  close($lock_fh);
-  chmod 0777,"$tolock.lock";
-  return 1;  # Return success
+  
+  # Return 0 to indicate failure, but don't die (maintain compatibility)
+  return 0;
 }
 
 sub unlockfile {
-   $tolock=$_[0];
-   unlink("$tolock.lock");
+   my ($filepath) = @_;
+   
+   # SECURITY FIX: Release flock() properly if it was acquired
+   if (exists $GLOBAL_LOCK_FH{$filepath}) {
+     my $lock_fh = $GLOBAL_LOCK_FH{$filepath};
+     flock($lock_fh, LOCK_UN);
+     close($lock_fh);
+     delete $GLOBAL_LOCK_FH{$filepath};
+   }
+   
+   # Clean up lock file
+   my $lockfile = "$filepath.lock";
+   unlink($lockfile) if -e $lockfile;
    return 1;  # Return success
 }
 

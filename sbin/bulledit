@@ -130,7 +130,8 @@ for (;;) {
           if ($bulls[$result] ne "") {
             ($bullid,$bulltxt)=split(/\|/,$bulls[$result]);
             if (-e "$config{'home'}/$config{'text'}/$bullid") {
-              system ("$texteditor $config{'home'}/$config{'text'}/$bullid");
+              # SECURITY FIX: Use array form of system() to prevent shell command injection
+              system ($texteditor, "$config{'home'}/$config{'text'}/$bullid");
               goto bullmenu;
             }
           }
@@ -190,7 +191,8 @@ for (;;) {
         }
         $newbullid="bull".$newbull.".txt";
         push (@bulls,$newbullid."|".$newtopic);
-        system ("$texteditor $config{'home'}/$config{'text'}/$newbullid");
+        # SECURITY FIX: Use array form of system() to prevent shell command injection
+        system ($texteditor, "$config{'home'}/$config{'text'}/$newbullid");
         if (-e "$config{'home'}/$config{'text'}/$newbullid") {
           lockfile("$bullidx");
           open (newbull,">$bullidx");
