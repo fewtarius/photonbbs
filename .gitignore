@@ -29,3 +29,7 @@ tools/test-*.py
 tools/bbs-*.py
 tools/combat-*.py
 tools/telnet-test-proxy.py
+
+# CLIO logs and sessions (AI assistant working directories)
+.clio/logs/
+.clio/sessions/
