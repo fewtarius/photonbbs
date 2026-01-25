@@ -408,7 +408,40 @@ telnet localhost 2323
 
 ---
 
-## Session Handoff Notes
+## Session Handoff Procedures (MANDATORY)
+
+### CRITICAL: Session Handoff Directory Structure
+
+When ending a session, **ALWAYS** create a properly structured handoff directory:
+
+```
+ai-assisted/YYYYMMDD/HHMM/
+├── CONTINUATION_PROMPT.md  [MANDATORY] - Next session's complete context
+├── AGENT_PLAN.md           [MANDATORY] - Remaining priorities & blockers
+├── CHANGELOG.md            [OPTIONAL]  - User-facing changes (if applicable)
+└── NOTES.md                [OPTIONAL]  - Additional technical notes
+```
+
+**NEVER COMMIT** `ai-assisted/` directory to git. Always verify before committing:
+
+```bash
+git status  # Ensure no ai-assisted/ files staged
+git add -A
+git status  # Double-check
+git commit -m "message"
+```
+
+**Handoff should include:**
+- Current state of BBS/MUD functionality
+- In-progress work and testing status
+- Next steps for next session
+- Key decisions made about game mechanics or BBS features
+- Lessons learned from telnet testing
+- Links to relevant Perl modules modified
+
+---
+
+## Session Handoff Notes (Deprecated - See Above)
 
 When working across sessions, always:
 
