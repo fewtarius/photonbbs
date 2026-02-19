@@ -1,0 +1,225 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Activity Feed Module
+# Tracks and displays recent system activity
+#
+
+use Storable qw(store retrieve lock_store lock_retrieve);
+use Fcntl qw(:flock);
+
+# Activity types
+use constant {
+    ACTIVITY_NEW_USER => 'new_user',
+    ACTIVITY_BULLETIN => 'bulletin',
+    ACTIVITY_MUD_LEVEL => 'mud_level',
+    ACTIVITY_MUD_ACHIEVEMENT => 'mud_achievement',
+    ACTIVITY_DOOR_SCORE => 'door_score',
+    ACTIVITY_ONELINER => 'oneliner',
+    ACTIVITY_CUSTOM => 'custom',
+};
+
+# Get activity file path
+sub get_activity_file {
+    return "$config{'home'}$config{'data'}/activity.dat";
+}
+
+# Load activity log
+sub load_activity {
+    my $file = get_activity_file();
+    if (-e $file) {
+        return lock_retrieve($file);
+    }
+    return [];
+}
+
+# Save activity log
+sub save_activity {
+    my ($activities) = @_;
+    my $file = get_activity_file();
+    lock_store($activities, $file);
+}
+
+# Add a new activity to the log
+sub log_activity {
+    my ($type, $message, $user_handle, $extra_data) = @_;
+    
+    my $activities = load_activity();
+    
+    my $activity = {
+        type => $type,
+        message => $message,
+        user => $user_handle || $info{'handle'} || 'System',
+        timestamp => time(),
+        date => get_current_date() . " " . get_current_time(),
+        data => $extra_data || {},
+    };
+    
+    # Add to front of array
+    unshift @$activities, $activity;
+    
+    # Keep only last 100 activities
+    if (scalar(@$activities) > 100) {
+        splice(@$activities, 100);
+    }
+    
+    save_activity($activities);
+}
+
+# Log new user registration
+sub log_new_user {
+    my ($handle) = @_;
+    log_activity(ACTIVITY_NEW_USER, "$handle joined the BBS!", $handle);
+}
+
+# Log new bulletin
+sub log_new_bulletin {
+    my ($title, $author) = @_;
+    log_activity(ACTIVITY_BULLETIN, "New bulletin: $title", $author);
+}
+
+# Log MUD level up
+sub log_mud_levelup {
+    my ($handle, $level, $class) = @_;
+    log_activity(ACTIVITY_MUD_LEVEL, "$handle reached level $level as a $class!", $handle, { level => $level, class => $class });
+}
+
+# Log MUD achievement
+sub log_mud_achievement {
+    my ($handle, $achievement) = @_;
+    log_activity(ACTIVITY_MUD_ACHIEVEMENT, "$handle earned: $achievement", $handle, { achievement => $achievement });
+}
+
+# Log door game score
+sub log_door_score {
+    my ($handle, $game, $score) = @_;
+    log_activity(ACTIVITY_DOOR_SCORE, "$handle scored $score in $game!", $handle, { game => $game, score => $score });
+}
+
+# Log new oneliner
+sub log_new_oneliner {
+    my ($handle) = @_;
+    log_activity(ACTIVITY_ONELINER, "$handle wrote on the wall", $handle);
+}
+
+# Log custom activity
+sub log_custom_activity {
+    my ($message, $handle) = @_;
+    log_activity(ACTIVITY_CUSTOM, $message, $handle);
+}
+
+# Get activity icon based on type
+sub get_activity_icon {
+    my ($type) = @_;
+    return "*" if $type eq ACTIVITY_NEW_USER;
+    return "!" if $type eq ACTIVITY_BULLETIN;
+    return "^" if $type eq ACTIVITY_MUD_LEVEL;
+    return "+" if $type eq ACTIVITY_MUD_ACHIEVEMENT;
+    return "#" if $type eq ACTIVITY_DOOR_SCORE;
+    return ">" if $type eq ACTIVITY_ONELINER;
+    return "-";
+}
+
+# Get activity color based on type
+sub get_activity_color {
+    my ($type) = @_;
+    return $config{'usercolor'} if $type eq ACTIVITY_NEW_USER;
+    return $config{'themecolor'} if $type eq ACTIVITY_BULLETIN;
+    return $config{'datacolor'} if $type eq ACTIVITY_MUD_LEVEL;
+    return $config{'systemcolor'} if $type eq ACTIVITY_MUD_ACHIEVEMENT;
+    return $config{'promptcolor'} if $type eq ACTIVITY_DOOR_SCORE;
+    return $config{'inputcolor'};
+}
+
+# Show recent activity (configurable count)
+sub show_activity_feed {
+    my ($count) = @_;
+    $count ||= 10;
+    
+    my $activities = load_activity();
+    
+    writeline("", 1);
+    writeline($config{'themecolor'}."Recent Activity".$RST, 1);
+    writeline($config{'linecolor'}.("-" x 60).$RST, 1);
+    
+    if (scalar(@$activities) == 0) {
+        writeline($config{'systemcolor'}."No recent activity.".$RST, 1);
+        writeline("", 1);
+        return;
+    }
+    
+    my $shown = 0;
+    foreach my $act (@$activities) {
+        last if $shown >= $count;
+        
+        my $icon = get_activity_icon($act->{type});
+        my $color = get_activity_color($act->{type});
+        my $time_ago = format_time_ago($act->{timestamp});
+        
+        writeline($config{'promptcolor'}."  $icon ".$color.$act->{message}.$config{'datacolor'}." ($time_ago)".$RST, 1);
+        $shown++;
+    }
+    
+    writeline($config{'linecolor'}.("-" x 60).$RST, 1);
+    writeline("", 1);
+}
+
+# Format time ago
+sub format_time_ago {
+    my ($timestamp) = @_;
+    my $diff = time() - $timestamp;
+    
+    if ($diff < 60) {
+        return "just now";
+    } elsif ($diff < 3600) {
+        my $mins = int($diff / 60);
+        return "$mins min" . ($mins > 1 ? "s" : "") . " ago";
+    } elsif ($diff < 86400) {
+        my $hours = int($diff / 3600);
+        return "$hours hour" . ($hours > 1 ? "s" : "") . " ago";
+    } elsif ($diff < 604800) {
+        my $days = int($diff / 86400);
+        return "$days day" . ($days > 1 ? "s" : "") . " ago";
+    } else {
+        my $weeks = int($diff / 604800);
+        return "$weeks week" . ($weeks > 1 ? "s" : "") . " ago";
+    }
+}
+
+# Show activity feed on login (compact version)
+sub show_login_activity {
+    my $activities = load_activity();
+    my $last_visit = $info{'lastvisit_epoch'} || 0;
+    
+    # Get activities since last visit
+    my @new_activities;
+    foreach my $act (@$activities) {
+        last if scalar(@new_activities) >= 5;  # Max 5 items
+        if ($act->{timestamp} > $last_visit) {
+            push @new_activities, $act;
+        }
+    }
+    
+    if (scalar(@new_activities) == 0) {
+        return;  # Nothing new since last visit
+    }
+    
+    writeline("", 1);
+    writeline($config{'themecolor'}."What's New".$RST, 1);
+    
+    foreach my $act (@new_activities) {
+        my $icon = get_activity_icon($act->{type});
+        my $color = get_activity_color($act->{type});
+        writeline($config{'promptcolor'}."  $icon ".$color.$act->{message}.$RST, 1);
+    }
+    
+    writeline("", 1);
+}
+
+# Activity feed command (show full feed)
+sub activity_command {
+    writeline($CLR, 0);
+    show_activity_feed(20);
+    pause();
+}
+
+return 1;

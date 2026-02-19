@@ -1,0 +1,261 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Polls Module
+# Community voting on various topics
+#
+
+use Storable qw(store retrieve lock_store lock_retrieve);
+
+# Get polls directory
+sub get_polls_dir {
+    my $dir = "$config{'home'}$config{'data'}/polls";
+    unless (-d $dir) {
+        mkdir($dir, 0755);
+    }
+    return $dir;
+}
+
+# Get polls index file
+sub get_polls_file {
+    return get_polls_dir() . "/polls.dat";
+}
+
+# Load all polls
+sub load_polls {
+    my $file = get_polls_file();
+    if (-e $file) {
+        return lock_retrieve($file);
+    }
+    return { polls => [], next_id => 1 };
+}
+
+# Save polls
+sub save_polls {
+    my ($data) = @_;
+    my $file = get_polls_file();
+    lock_store($data, $file);
+}
+
+# Check if user has voted
+sub has_voted {
+    my ($poll_id, $user_id) = @_;
+    $user_id ||= $info{'id'};
+    
+    my $data = load_polls();
+    foreach my $poll (@{$data->{polls}}) {
+        if ($poll->{id} == $poll_id) {
+            return exists $poll->{votes}{$user_id};
+        }
+    }
+    return 0;
+}
+
+# Create a new poll (SysOp only)
+sub create_poll {
+    my ($question, @options) = @_;
+    
+    if ($info{'security'} < $config{'sec_sysop'}) {
+        writeline($config{'errorcolor'}."Only SysOps can create polls.".$RST, 1);
+        return 0;
+    }
+    
+    my $data = load_polls();
+    
+    my $poll = {
+        id => $data->{next_id}++,
+        question => $question,
+        options => [@options],
+        votes => {},
+        created => time(),
+        created_date => get_current_date(),
+        creator => $info{'handle'},
+        active => 1,
+    };
+    
+    unshift @{$data->{polls}}, $poll;
+    save_polls($data);
+    
+    log_activity('custom', "New poll: $question", $info{'handle'});
+    
+    return 1;
+}
+
+# Vote on a poll
+sub vote_poll {
+    my ($poll_id, $option_index) = @_;
+    
+    my $data = load_polls();
+    
+    foreach my $poll (@{$data->{polls}}) {
+        if ($poll->{id} == $poll_id) {
+            if (!$poll->{active}) {
+                writeline($config{'errorcolor'}."This poll is closed.".$RST, 1);
+                return 0;
+            }
+            
+            if (exists $poll->{votes}{$info{'id'}}) {
+                writeline($config{'errorcolor'}."You have already voted on this poll.".$RST, 1);
+                return 0;
+            }
+            
+            if ($option_index < 0 || $option_index >= scalar(@{$poll->{options}})) {
+                writeline($config{'errorcolor'}."Invalid option.".$RST, 1);
+                return 0;
+            }
+            
+            $poll->{votes}{$info{'id'}} = {
+                option => $option_index,
+                timestamp => time(),
+            };
+            
+            save_polls($data);
+            return 1;
+        }
+    }
+    
+    writeline($config{'errorcolor'}."Poll not found.".$RST, 1);
+    return 0;
+}
+
+# Show poll results
+sub show_poll {
+    my ($poll) = @_;
+    
+    writeline($config{'themecolor'}.$poll->{question}.$RST, 1);
+    writeline($config{'datacolor'}."Created by ".$poll->{creator}." on ".$poll->{created_date}.$RST, 1);
+    
+    my $status = $poll->{active} ? $config{'usercolor'}."[OPEN]" : $config{'systemcolor'}."[CLOSED]";
+    writeline($status.$RST, 1);
+    writeline($config{'linecolor'}.("-" x 50).$RST, 1);
+    
+    # Count votes per option
+    my @vote_counts;
+    my $total_votes = 0;
+    
+    for (my $i = 0; $i < scalar(@{$poll->{options}}); $i++) {
+        $vote_counts[$i] = 0;
+    }
+    
+    foreach my $vote (values %{$poll->{votes}}) {
+        $vote_counts[$vote->{option}]++;
+        $total_votes++;
+    }
+    
+    # Display options with vote bars
+    for (my $i = 0; $i < scalar(@{$poll->{options}}); $i++) {
+        my $count = $vote_counts[$i];
+        my $percent = $total_votes > 0 ? int(($count / $total_votes) * 100) : 0;
+        my $bar_len = int($percent / 5);  # Max 20 chars
+        my $bar = "#" x $bar_len;
+        $bar .= "." x (20 - $bar_len);
+        
+        my $choice_num = $i + 1;
+        writeline("  ".$config{'promptcolor'}."$choice_num. ".$config{'usercolor'}.$poll->{options}[$i].$RST, 1);
+        writeline("     ".$config{'datacolor'}."[$bar] ".$percent."% ($count votes)".$RST, 1);
+    }
+    
+    writeline($config{'linecolor'}.("-" x 50).$RST, 1);
+    writeline($config{'datacolor'}."Total votes: ".$config{'usercolor'}.$total_votes.$RST, 1);
+    
+    if (has_voted($poll->{id})) {
+        writeline($config{'systemcolor'}."(You have voted)".$RST, 1);
+    }
+}
+
+# Polls menu
+sub polls_menu {
+    while (1) {
+        writeline($CLR, 0);
+        writeline($config{'themecolor'}."\nPolls".$RST, 1);
+        writeline($config{'linecolor'}.("-" x 50).$RST, 1);
+        
+        my $data = load_polls();
+        my @active_polls = grep { $_->{active} } @{$data->{polls}};
+        
+        if (scalar(@active_polls) == 0) {
+            writeline($config{'systemcolor'}."No active polls right now.".$RST, 1);
+        } else {
+            my $i = 1;
+            foreach my $poll (@active_polls) {
+                my $voted = has_voted($poll->{id}) ? " [VOTED]" : "";
+                writeline("  ".$config{'promptcolor'}.$i.$config{'themecolor'}." ... ".$config{'usercolor'}.$poll->{question}.$config{'datacolor'}.$voted.$RST, 1);
+                $i++;
+            }
+        }
+        
+        writeline($config{'linecolor'}.("-" x 50).$RST, 1);
+        writeline("", 1);
+        
+        writeline($config{'datacolor'}."Commands".$RST, 1);
+        writeline("  ".$config{'promptcolor'}."#".$config{'themecolor'}." ... ".$config{'usercolor'}."View/vote on poll".$RST, 1);
+        if ($info{'security'} >= $config{'sec_sysop'}) {
+            writeline("  ".$config{'promptcolor'}."N".$config{'themecolor'}." ... ".$config{'usercolor'}."Create new poll".$RST, 1);
+        }
+        writeline("  ".$config{'promptcolor'}."Q".$config{'themecolor'}." ... ".$config{'usercolor'}."Exit".$RST, 1);
+        writeline("", 1);
+        writeline($config{'promptcolor'}."Choice: ".$RST);
+        
+        my $choice = getline('text', 3, "", 1);
+        chomp($choice);
+        
+        if (uc($choice) eq 'Q' || uc($choice) eq 'X' || $choice eq '!') {
+            last;
+        } elsif (uc($choice) eq 'N' && $info{'security'} >= $config{'sec_sysop'}) {
+            # Create new poll
+            writeline($config{'promptcolor'}."Question: ".$RST);
+            my $question = getline('text', 100, "", 1);
+            chomp($question);
+            
+            if ($question eq "") {
+                writeline($config{'errorcolor'}."Cancelled.".$RST, 1);
+                next;
+            }
+            
+            writeline($config{'systemcolor'}."Enter options (one per line, blank to finish):".$RST, 1);
+            my @options;
+            while (1) {
+                writeline($config{'promptcolor'}."Option ".scalar(@options + 1).": ".$RST);
+                my $opt = getline('text', 50, "", 1);
+                chomp($opt);
+                last if $opt eq "";
+                push @options, $opt;
+                last if scalar(@options) >= 10;
+            }
+            
+            if (scalar(@options) < 2) {
+                writeline($config{'errorcolor'}."Need at least 2 options.".$RST, 1);
+                next;
+            }
+            
+            if (create_poll($question, @options)) {
+                writeline($config{'systemcolor'}."Poll created!".$RST, 1);
+            }
+        } elsif ($choice =~ /^\d+$/) {
+            my $poll_idx = $choice - 1;
+            my @active = grep { $_->{active} } @{$data->{polls}};
+            
+            if ($poll_idx >= 0 && $poll_idx < scalar(@active)) {
+                my $poll = $active[$poll_idx];
+                writeline($CLR, 0);
+                show_poll($poll);
+                
+                if ($poll->{active} && !has_voted($poll->{id})) {
+                    writeline("", 1);
+                    writeline($config{'promptcolor'}."Your vote (1-".scalar(@{$poll->{options}})." or Q): ".$RST);
+                    my $vote = getline('text', 3, "", 1);
+                    chomp($vote);
+                    
+                    if ($vote =~ /^\d+$/) {
+                        if (vote_poll($poll->{id}, $vote - 1)) {
+                            writeline($config{'systemcolor'}."Vote recorded!".$RST, 1);
+                        }
+                    }
+                } else {
+                    pause();
+                }
+            }
+        }
+    }
+}
+
+return 1;

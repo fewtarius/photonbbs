@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Terminal Tavern BBS Auto-Update Script
+# PhotonBBS Auto-Update Script
 # Rocky Linux 9.7
 #
 # Automatically updates system packages and reboots at 4 AM ET daily

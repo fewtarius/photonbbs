@@ -1,12 +1,12 @@
 #!/bin/bash
 #
-# Terminal Tavern BBS Deployment Script for DediHOST VPS
+# PhotonBBS Deployment Script for VPS
 # Rocky Linux 9.7 (RHEL-based)
 #
-# This script automates the complete deployment of PhotonBBS Terminal Tavern theme
+# This script automates the complete deployment of PhotonBBS
 # including security hardening, Docker installation, and BBS deployment.
 #
-# Usage: ./deploy-terminal-tavern.sh <server-ip>
+# Usage: ./deploy.sh <server-ip>
 #
 
 set -e  # Exit on any error
@@ -181,7 +181,7 @@ EOF
 
 # Step 6: Deploy PhotonBBS
 deploy_photonbbs() {
-    echo_info "Deploying PhotonBBS Terminal Tavern..."
+    echo_info "Deploying PhotonBBS..."
     
     # Create deployment directory
     ssh ${BBS_USER}@${SERVER_IP} "
@@ -217,7 +217,7 @@ deploy_photonbbs() {
 
 # Main deployment flow
 main() {
-    echo_info "Starting Terminal Tavern BBS deployment to ${SERVER_IP}"
+    echo_info "Starting PhotonBBS deployment to ${SERVER_IP}"
     echo_info "=============================================="
     
     # Step-by-step deployment
@@ -239,7 +239,7 @@ main() {
     echo_info "3. Apply SSH hardening: ./scratch/harden-ssh.sh ${SERVER_IP}"
     echo_info "4. Configure DNS: bbs.terminaltavern.com -> ${SERVER_IP}"
     echo_info ""
-    echo_success "Terminal Tavern BBS is now live at: telnet ${SERVER_IP}"
+    echo_success "PhotonBBS is now live at: telnet ${SERVER_IP}"
 }
 
 # Run main deployment

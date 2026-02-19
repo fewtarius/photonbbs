@@ -1,54 +1,74 @@
-@THEMECLRTerminal Tavern - Chat System Help
+@THEMECLR@SYSNM help
 
-@USERCLRUser Interactions ..
-@THEMECLR/ACTION <ACTIONS>         @BGNPerform <action> in the chat        @USERCLR...  @THEMECLR/A
-@THEMECLR/WHISPER <WHO> <MESSAGE>  @BGNSend private message to user        @USERCLR...  @THEMECLR/W
-@THEMECLR/BROADCAST <MESSAGE>      @BGNBroadcast to entire system (Admin)  @USERCLR...  @THEMECLR/R
-@THEMECLR/PROFILE <USER>           @BGNView user's profile information     @USERCLR...  @THEMECLR/PROFILE
+@USERCLRUser Functions ..
+@THEMECLR/ACTION <ACTIONS>         @BGNPerform <action>                    @USERCLR...  @THEMECLR/A
+@THEMECLR/WHISPER <WHO> <MESSAGE>  @BGNSend private message                @USERCLR...  @THEMECLR/W
+@THEMECLR/BROADCAST <MESSAGE>      @BGNSend a message to all (ChanOp Only) @USERCLR...  @THEMECLR/R
 @THEMECLR/IGNORE <USER>            @BGNIgnore messages from a user         @USERCLR...  @THEMECLR/IGNORE
 @THEMECLR/UNIGNORE <USER>          @BGNStop ignoring a user                @USERCLR...  @THEMECLR/UNIGNORE
 
 @USERCLRSystem Commands ..
-@THEMECLR/USERS                    @BGNList online users (with status)     @USERCLR...  @THEMECLR #
-@THEMECLR/SCAN                     @BGNFind users in other channels        @USERCLR...  @THEMECLR/S
-@THEMECLR/CHANNELS                 @BGNView all available chat channels    @USERCLR...  @THEMECLR/C
-@THEMECLR/ONELINERS                @BGNPost a oneliner comment             @USERCLR...  @THEMECLR %
-@THEMECLR/BULLETINS                @BGNRead system bulletins               @USERCLR...  @THEMECLR @
-@THEMECLR/QUIT                     @BGNExit the chat system                @USERCLR...  @THEMECLR !
+@THEMECLR/USERS                    @BGNWho is logged into the system (shows idle/status) @USERCLR...  @THEMECLR #
+@THEMECLR/SCAN                     @BGNLocate chat users                   @USERCLR...  @THEMECLR/S
+@THEMECLR/CHANNELS                 @BGNShow available channels (with descriptions) @USERCLR...  @THEMECLR/C
+@THEMECLR/ONELINERS                @BGNWrite on the wall                   @USERCLR...  @THEMECLR %
+@THEMECLR/BULLETINS                @BGNRead System Bulletins               @USERCLR...  @THEMECLR @
+@THEMECLR/POLLS                    @BGNVote in community polls             @USERCLR...  @THEMECLR/VOTE
+@THEMECLR/ACTIVITY                 @BGNView recent BBS activity            @USERCLR...  @THEMECLR/FEED
+@THEMECLR/QUIT                     @BGNExit Teleconference                 @USERCLR...  @THEMECLR !
 
-@USERCLRChannel Commands ..
-@THEMECLR/JOIN <ROOM>              @BGNJoin a different channel            @USERCLR...  @THEMECLR/J
-@THEMECLR/LEAVE                    @BGNLeave current channel               @USERCLR...  @THEMECLR/L
-@THEMECLR/TOPIC <TEXT>             @BGNSet channel topic (Moderator)       @USERCLR...  @THEMECLR/TOPIC
-@THEMECLR/INVITE <USER>            @BGNInvite user to your channel         @USERCLR...  @THEMECLR/INVITE
+@USERCLRRoom Commands ..
+@THEMECLR/JOIN <ROOM>              @BGNJoins room <room>                   @USERCLR...  @THEMECLR/J
+@THEMECLR/BAN <USER>               @BGN(UN)Bans <user> from room           @USERCLR...  @THEMECLR/B
+@THEMECLR/KICK <USER>              @BGNRemove user from room (ChanOp Only) @USERCLR...  @THEMECLR/KICK
+@THEMECLR/MUTE <USER>              @BGNMute user in room (ChanOp Only)     @USERCLR...  @THEMECLR/MUTE
+@THEMECLR/UNMUTE <USER>            @BGNUnmute user in room (ChanOp Only)   @USERCLR...  @THEMECLR/UNMUTE
+@THEMECLR/HIDE                     @BGN(UN)Hides room from channel scan    @USERCLR...  @THEMECLR/H
+@THEMECLR/OP <USER>                @BGN(UN)Assign a user as a ChanOp       @USERCLR...  @THEMECLR/O
+@THEMECLR/SSL                      @BGN(UN)Enforce SSH on room             @USERCLR...  @THEMECLR/E
+@THEMECLR/PRIVATE                  @BGN(UN)Sets a room PRIVATE             @USERCLR...  @THEMECLR/V
+@THEMECLR/ALLOW <USER>             @BGN(UN)Allow <user(s)> in Private room @USERCLR...  @THEMECLR/L
+@THEMECLR/TOPIC                    @BGN(UN)Set a channel topic             @USERCLR...  @THEMECLR/T
+@THEMECLR/TOPICHIST                @BGNShow channel topic history          @USERCLR...  @THEMECLR/TOPICHIST
+@THEMECLR/STATUS                   @BGNShow room status                    @USERCLR...  @THEMECLR/$
+@THEMECLR/CHANPW <PASSWORD>        @BGNSet a password for the channel      @USERCLR...  @THEMECLR/CHANPW
+@THEMECLR/CHANPWREMOVE             @BGNRemove channel password             @USERCLR...  @THEMECLR/CHANPWREMOVE
+@THEMECLR/CHANDESC <DESC>          @BGNSet channel description             @USERCLR...  @THEMECLR/CHANDESC
+@THEMECLR/CHANENTRYEXIT <on|off>   @BGNToggle entry/exit notifications     @USERCLR...  @THEMECLR/CHANENTRYEXIT
 
-@USERCLRPersonal Commands ..
-@THEMECLR/STATUS <MESSAGE>         @BGNSet your status message             @USERCLR...  @THEMECLR/STATUS
-@THEMECLR/AWAY <MESSAGE>           @BGNMark yourself as away               @USERCLR...  @THEMECLR/AWAY
-@THEMECLR/BACK                     @BGNReturn from away status             @USERCLR...  @THEMECLR/BACK
-@THEMECLR/DND                      @BGNToggle Do Not Disturb mode          @USERCLR...  @THEMECLR/DND
-@THEMECLR/NICK <NICKNAME>          @BGNSet your display nickname           @USERCLR...  @THEMECLR/NICK
-@THEMECLR/COLOR <CODE>             @BGNChange your text color              @USERCLR...  @THEMECLR/COLOR
+@USERCLRUser Settings ..
+@THEMECLR/INFO                     @BGNDisplay your user settings
+@THEMECLR/SET <COMMAND>            @BGNSet user preferences (SEE BELOW)    @USERCLR...  @THEMECLR/U
+@BGNCommands:
+  @THEMECLRNAME                    @BGNSet your full name
+  @THEMECLRPASSWORD                @BGNReset your password
+  @THEMECLREMAIL                   @BGNChange your email address
+  @THEMECLRLOCATION                @BGNSet your call location
+  @THEMECLRPHONE                   @BGNSet your phone number
+  @THEMECLRDOB                     @BGNChange your DOB
+  @THEMECLRANSI                    @BGNChange your ANSI preference
+  @THEMECLRDEFAULT                 @BGNSets your default channel to the current channel
+  @THEMECLRUNIXPWD                 @BGNChange your local unix password (LOCAL only)
 
-@USERCLRModeration Commands (Moderators Only) ..
-@THEMECLR/KICK <USER>              @BGNKick user from channel              @USERCLR...  @THEMECLR/KICK
-@THEMECLR/BAN <USER>               @BGNBan user from channel               @USERCLR...  @THEMECLR/BAN
-@THEMECLR/UNBAN <USER>             @BGNUnban user from channel             @USERCLR...  @THEMECLR/UNBAN
-@THEMECLR/MUTE <USER>              @BGNMute user in channel                @USERCLR...  @THEMECLR/MUTE
-@THEMECLR/UNMUTE <USER>            @BGNUnmute user in channel              @USERCLR...  @THEMECLR/UNMUTE
+@USERCLRMessage Editing ..
+@THEMECLR/EDIT                     @BGNEdit your last message
+@THEMECLR/DELETE                   @BGNDelete your last message
 
-@USERCLRInformation Commands ..
-@THEMECLR/HELP                     @BGNDisplay this help screen            @USERCLR...  @THEMECLR ?
-@THEMECLR/WHO                      @BGNList users in current channel       @USERCLR...  @THEMECLR/WHO
-@THEMECLR/WHOIS <USER>             @BGNGet detailed user information       @USERCLR...  @THEMECLR/WHOIS
-@THEMECLR/TIME                     @BGNDisplay current system time         @USERCLR...  @THEMECLR/TIME
-@THEMECLR/UPTIME                   @BGNShow system uptime                  @USERCLR...  @THEMECLR/UPTIME
+@USERCLRColor .. Add color to chatroom messages, topics, whispers, actions, etc!
 
-@USERCLRAdditional Features ..
-@THEMECLRType your message and press ENTER to chat
-@THEMECLRUse UP/DOWN arrows to scroll through message history
-@THEMECLRUse TAB to autocomplete usernames and commands
-@THEMECLRPress CTRL+C to quick-quit back to main menu
+@THEMECLR~ATBLK @USERCLR... @THEMECLRBlack          @THEMECLR~ATBBK @USERCLR... @THEMECLRBright Black
+@THEMECLR~ATRED @USERCLR... @THEMECLRRed            @THEMECLR~ATBRD @USERCLR... @THEMECLRBright Red
+@THEMECLR~ATGRN @USERCLR... @THEMECLRGreen          @THEMECLR~ATBGN @USERCLR... @THEMECLRBright Green
+@THEMECLR~ATYLW @USERCLR... @THEMECLRYellow         @THEMECLR~ATBYL @USERCLR... @THEMECLRBright Yellow
+@THEMECLR~ATBLU @USERCLR... @THEMECLRBlue           @THEMECLR~ATBBL @USERCLR... @THEMECLRBright Blue
+@THEMECLR~ATMAG @USERCLR... @THEMECLRMagenta        @THEMECLR~ATBMG @USERCLR... @THEMECLRBright Magenta
+@THEMECLR~ATWHT @USERCLR... @THEMECLRWhite          @THEMECLR~ATBWH @USERCLR... @THEMECLRBright White
+@THEMECLR~ATCYN @USERCLR... @THEMECLRCyan           @THEMECLR~ATBCN @USERCLR... @THEMECLRBright Cyan
 
-@RST@THEMECLRFor more information, see the Terminal Tavern documentation.
+@THEMECLREx.
+@INPUTCLR/a sent you a ~ATGRN---~ATBGN{~ATGRN-~ATBGN{~ATRED@
+@THEMECLRbecomes
+@USERCLR@USER sent you a @GRN---@BGN{@GRN-@BGN{@RED@@BGN
 
+@USERCLR
+@THEMECLR/GAMES, /DOORS, or /MENU will show you a list of available door games you can access, based on your security level.

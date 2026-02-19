@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Install Auto-Update Script for Terminal Tavern BBS
+# Install Auto-Update Script for PhotonBBS
 # Sets up daily automatic updates at 4 AM ET
 #
 

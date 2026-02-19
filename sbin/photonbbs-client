@@ -63,6 +63,8 @@ require ($config{'home'}."/modules/pb-main");
 require ($config{'home'}."/modules/pb-doors");
 require	($config{'home'}."/modules/pb-lastcallers");
 require ($config{'home'}."/modules/pb-oneliners");
+require ($config{'home'}."/modules/pb-activity");
+require ($config{'home'}."/modules/pb-polls");
 
 chomp ($mytty=`tty`);
 # Validate tty - if not a valid device, try /dev/tty or leave empty
@@ -123,11 +125,19 @@ main: {
   setupdoors();
   iamat($info{'handle'},"Logging in");
   whosonline();
-  iamat($info{'handle'},"Menuing System");
-  logger("NOTICE: ".$info{'handle'}." entered the main menu.");
-  while (1) {
-      my $result = show_menu($config{'home'}.$config{'data'}."/main.mnu");
-      last if $result && $result eq 'exit';
+  
+  # Start in teleconference or menu based on config
+  if ($config{'start_in_teleconf'} eq "1") {
+    iamat($info{'handle'},"Chat");
+    logger("NOTICE: ".$info{'handle'}." entered teleconference");
+    teleconf();
+  } else {
+    iamat($info{'handle'},"Menuing System");
+    logger("NOTICE: ".$info{'handle'}." entered the main menu.");
+    while (1) {
+        my $result = show_menu($config{'home'}.$config{'data'}."/main.mnu");
+        last if $result && $result eq 'exit';
+    }
   }
   bye();
 }
