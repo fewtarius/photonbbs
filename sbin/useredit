@@ -7,8 +7,8 @@
 
 $ppid = getppid;
 if (-e "/etc/default/photonbbs") {
-  open(in,"</etc/default/photonbbs");
-  while (<in>) {
+  open(my $cfg_fh, '<', "/etc/default/photonbbs");
+  while (<$cfg_fh>) {
     $line=$_;
     chomp $line;
     ($key,$value)=split(/\=/,$line);
@@ -16,7 +16,7 @@ if (-e "/etc/default/photonbbs") {
     $value=~s/\".*$//;
     $config{$key}=$value;
   }
-  close(in);
+  close($cfg_fh);
 } else {
   die "Please configure your BBS (/etc/default/photonbbs)";
 }
@@ -28,14 +28,14 @@ $|=1;
 
 $node=@ARGV[1];
 if (-e "$config{'doors'}/nodes/$node/fusiondoor") {
-  open (in,"<$config{'doors'}/nodes/$node/fusiondoor");
-  while (<in>) {
+  open (my $fd_fh, '<', "$config{'doors'}/nodes/$node/fusiondoor");
+  while (<$fd_fh>) {
     $instream=$_;
     chomp $instream;
     ($key,$value)=split(/\=/,$instream);
     $fusiondoor{$key}=$value;
   }
-  close (in);
+  close ($fd_fh);
   if ($fusiondoor{'security'} <= $config{'sysopsecurity'}) {
     die "You do not have permission to run this tool!";
   }
@@ -43,22 +43,26 @@ if (-e "$config{'doors'}/nodes/$node/fusiondoor") {
   $fusiondoor{'ansi'}=1;
 }
 
-chomp($os=`uname`);
-if ($os =~/Linux/) {
+$sysinfo{'os'} = $^O;
+if ($sysinfo{'os'} =~/linux/) {
   $BSD_STYLE=1;
-} elsif ($os =~/HP-UX/) {
+} elsif ($sysinfo{'os'} =~/hpux/) {
   $BSD_STYLE=0;
 } else {
   $BSD_STYLE=1;
 }
-chomp ($mytty=`tty`);
-open(in,"<$config{'home'}$config{'data'}/users.dat");
-  while (<in>) {
+
+# Get TTY device path using POSIX
+eval { require POSIX; $mytty = POSIX::ttyname(fileno(STDIN)); };
+if (!$mytty) { chomp($mytty = `tty 2>/dev/null`); }
+
+open(my $users_fh, '<', "$config{'home'}$config{'data'}/users.dat");
+  while (<$users_fh>) {
     chomp;
     ($idx,$name)=split(/\|/,$_);
     push(@users,$name);
   }
-close(in);
+close($users_fh);
 
 applytheme($config{'theme'});
 $sk=0;
@@ -264,19 +268,19 @@ sub chsecurity {
 sub alterindex() {
   $userindex=$config{'home'}.$config{'data'}."/users.dat";
   lockfile("$userindex");
-  open (in,"<$userindex");
-    @records=<in>;
-  close (in);
+  open (my $idx_in, '<', $userindex);
+    @records=<$idx_in>;
+  close ($idx_in);
 
-  open (out,">$userindex");
+  open (my $idx_out, '>', $userindex);
     foreach $record(@records) {
       chomp $record;
       ($recid,$recname)=split(/\|/,$record);
       if ($recid eq $info{'id'}) {
         $recname=$info{'handle'};
       }
-      print out "$recid|$recname\n";
+      print $idx_out "$recid|$recname\n";
     }
-  close(out);
+  close($idx_out);
   unlockfile("$userindex");
 }

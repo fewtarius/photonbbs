@@ -35,8 +35,8 @@ our %config;
 require_module("pb-defaults");
 
 if (-e "/etc/default/photonbbs") {
-  open(in,"</etc/default/photonbbs");
-  while (<in>) {
+  open(my $cfg_fh, '<', "/etc/default/photonbbs");
+  while (<$cfg_fh>) {
     $line=$_;
     chomp $line;
     ($key,$value)=split(/\=/,$line);
@@ -44,7 +44,7 @@ if (-e "/etc/default/photonbbs") {
     $value=~s/\".*$//;
     $config{$key}=$value;
   }
-  close(in);
+  close($cfg_fh);
 }
 
 unless ( $config{'host'} ne "" ) {
