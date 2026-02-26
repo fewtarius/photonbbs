@@ -48,10 +48,26 @@ if (-e "/etc/default/photonbbs") {
 }
 
 unless ( $config{'host'} ne "" ) {
-  chomp ($sysinfo{'host'}=`hostname -f`);
+  eval {
+    require Sys::Hostname;
+    $sysinfo{'host'} = Sys::Hostname::hostname();
+  };
+  if ($@ || !$sysinfo{'host'}) {
+    chomp ($sysinfo{'host'}=`hostname -f 2>/dev/null`);
+  }
 }
-chomp ($sysinfo{'os'}=`uname -s`);
-chomp ($sysinfo{'ip'}=`hostname -i`);
+$sysinfo{'os'} = $^O;
+
+eval {
+  require Socket;
+  my $hostname = $sysinfo{'host'} || 'localhost';
+  my $packed = Socket::inet_aton($hostname);
+  $sysinfo{'ip'} = $packed ? Socket::inet_ntoa($packed) : '127.0.0.1';
+};
+if ($@ || !$sysinfo{'ip'}) {
+  chomp ($sysinfo{'ip'}=`hostname -i 2>/dev/null`);
+  $sysinfo{'ip'} ||= '127.0.0.1';
+}
 ###
 
 $|=1;
@@ -64,7 +80,14 @@ require ($config{'home'}."/modules/pb-doors");
 require	($config{'home'}."/modules/pb-lastcallers");
 require ($config{'home'}."/modules/pb-oneliners");
 
-chomp ($mytty=`tty`);
+# Get TTY device path using POSIX (no fork needed)
+eval {
+  require POSIX;
+  $mytty = POSIX::ttyname(fileno(STDIN));
+};
+if (!$mytty) {
+  chomp($mytty = `tty 2>/dev/null`);
+}
 # Validate tty - if not a valid device, try /dev/tty or leave empty
 if (!$mytty || $mytty !~ m|^/dev/|) {
     $mytty = (-e "/dev/tty" && -r "/dev/tty") ? "/dev/tty" : "";
@@ -75,10 +98,11 @@ unless (-d $config{transient}) {
 }
 
 main: {
-  $SIG{KILL}=sub {errorout ("SIGKILL..");};
-  $SIG{HUP}=sub {errorout ("SIGHUP..");};
-  $SIG{TERM}=sub {errorout ("SIGTERM..");};
-  $SIG{QUIT}=sub {errorout ("SIGQUIT..");};
+  # Signal handlers with terminal restoration safety
+  $SIG{KILL}=sub { cbreak(off); errorout("SIGKILL.."); };
+  $SIG{HUP}=sub { cbreak(off); errorout("SIGHUP.."); };
+  $SIG{TERM}=sub { cbreak(off); errorout("SIGTERM.."); };
+  $SIG{QUIT}=sub { cbreak(off); errorout("SIGQUIT.."); };
 
   $debug=1;
   hi();

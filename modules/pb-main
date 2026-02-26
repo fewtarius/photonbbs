@@ -461,7 +461,7 @@ sub telechannel {
     if ($chanexists eq 0) {
       if ($channel eq $config{'defchannel'}) {
         # Always create the main channel with owner 0 if missing
-        chomp ($chanid=`uuidgen`);
+        $chanid = generate_uuid();
         open (my $chan_out, '>>', "$config{'home'}$config{'messages'}/teleconf/channels");
         print $chan_out "$chanid|0|$channel\n";
         close($chan_out);
@@ -476,7 +476,7 @@ sub telechannel {
         writeline($BWH."Assigned ".$config{'usercolor'}."System Operator".$BWH." as owner ..",1);
       } elsif ($info{'security'} ge $config{'sec_createchan'}) {
         # Normal channel creation for users with permission
-        chomp ($chanid=`uuidgen`);
+        $chanid = generate_uuid();
         open (my $chan_out, '>>', "$config{'home'}$config{'messages'}/teleconf/channels");
         print $chan_out "$chanid|$info{'handle'}|$channel\n";
         close($chan_out);
@@ -1313,7 +1313,12 @@ sub teleconf {
 
 sub telesend {
   $sendmessage=$_[0];
-  @telesendto=`ls $config{'home'}$config{'messages'}/teleconf/$chanid/users 2>/dev/null`;
+  @telesendto = ();
+  my $userdir = "$config{'home'}$config{'messages'}/teleconf/$chanid/users";
+  if (opendir(my $dh, $userdir)) {
+    @telesendto = map { "$userdir/$_" } grep { !/^\./ } readdir($dh);
+    closedir($dh);
+  }
   if (scalar(@telesendto) eq 1) {
     unless ($leaving eq 1) {
       writeline ($config{'themecolor'}."There is no one here with you!",1);
@@ -1326,61 +1331,8 @@ sub telesend {
       # Ignore/mute logic
       next if $muted_users{$chanid}{$info{'handle'}}; # muted by op
       next if $ignore_list{$target}{$info{'handle'}}; # target ignores sender
-      $chatline =~s/\@SYSTEMCLR/$config{'systemcolor'}/g;
-      $chatline =~s/\@USERCLR/$config{'usercolor'}/g;
-      $chatline =~s/\@INPUTCLR/$config{'inputcolor'}/g;
-      $chatline =~s/\@ERRORCLR/$config{'errorcolor'}/g;
-      $chatline =~s/\@THEMECLR/$config{'themecolor'}/g;
-      $chatline =~s/\@PROMPTCLR/$config{'promptcolor'}/g;
-      $chatline =~s/\@DATACLR/$config{'datacolor'}/g;
-      $chatline =~s/\@LINECLR/$config{'linecolor'}/g;
-      $chatline =~s/\@BGN/$BGN/g;
-      $chatline =~s/\@BYL/$BYL/g;
-      $chatline =~s/\@BBL/$BBL/g;
-      $chatline =~s/\@RST/$RST/g;
-      $chatline =~s/\@BLK/$BLK/g;
-      $chatline =~s/\@RED/$RED/g;
-      $chatline =~s/\@GRN/$GRN/g;
-      $chatline =~s/\@YLW/$YLW/g;
-      $chatline =~s/\@BLU/$BLU/g;
-      $chatline =~s/\@MAG/$MAG/g;
-      $chatline =~s/\@WHT/$WHT/g;
-      $chatline =~s/\@CYN/$CYN/g;
-      $chatline =~s/\@BBK/$BBK/g;
-      $chatline =~s/\@BRD/$BRD/g;
-      $chatline =~s/\@BGN/$BGN/g;
-      $chatline =~s/\@BYL/$BYL/g;
-      $chatline =~s/\@BMG/$BMG/g;
-      $chatline =~s/\@BCN/$BCN/g;
-      $chatline =~s/\@BWH/$BWH/g;
-
-      $sendmessage =~s/\@SYSTEMCLR/$config{'systemcolor'}/g;
-      $sendmessage =~s/\@USERCLR/$config{'usercolor'}/g;
-      $sendmessage =~s/\@INPUTCLR/$config{'inputcolor'}/g;
-      $sendmessage =~s/\@ERRORCLR/$config{'errorcolor'}/g;
-      $sendmessage =~s/\@THEMECLR/$config{'themecolor'}/g;
-      $sendmessage =~s/\@PROMPTCLR/$config{'promptcolor'}/g;
-      $sendmessage =~s/\@DATACLR/$config{'datacolor'}/g;
-      $sendmessage =~s/\@LINECLR/$config{'linecolor'}/g;
-      $sendmessage =~s/\@BGN/$BGN/g;
-      $sendmessage =~s/\@BYL/$BYL/g;
-      $sendmessage =~s/\@BBL/$BBL/g;
-      $sendmessage =~s/\@RST/$RST/g;
-      $sendmessage =~s/\@BLK/$BLK/g;
-      $sendmessage =~s/\@RED/$RED/g;
-      $sendmessage =~s/\@GRN/$GRN/g;
-      $sendmessage =~s/\@YLW/$YLW/g;
-      $sendmessage =~s/\@BLU/$BLU/g;
-      $sendmessage =~s/\@MAG/$MAG/g;
-      $sendmessage =~s/\@WHT/$WHT/g;
-      $sendmessage =~s/\@CYN/$CYN/g;
-      $sendmessage =~s/\@BBK/$BBK/g;
-      $sendmessage =~s/\@BRD/$BRD/g;
-      $sendmessage =~s/\@BGN/$BGN/g;
-      $sendmessage =~s/\@BYL/$BYL/g;
-      $sendmessage =~s/\@BMG/$BMG/g;
-      $sendmessage =~s/\@BCN/$BCN/g;
-      $sendmessage =~s/\@BWH/$BWH/g;
+      $chatline = colorline($chatline);
+      $sendmessage = colorline($sendmessage);
 
       lockfile("$config{'home'}$config{'messages'}/$channode.page");
       open(my $page_fh, '>>', "$config{'home'}$config{'messages'}/$channode.page");
@@ -1443,30 +1395,7 @@ sub telewhisper {
      }
 
      if ($found eq "1") {
-       $pmsg =~s/\@SYSTEMCLR/$config{'systemcolor'}/g;
-       $pmsg =~s/\@USERCLR/$config{'usercolor'}/g;
-       $pmsg =~s/\@INPUTCLR/$config{'inputcolor'}/g;
-       $pmsg =~s/\@ERRORCLR/$config{'errorcolor'}/g;
-       $pmsg =~s/\@THEMECLR/$config{'themecolor'}/g;
-       $pmsg =~s/\@PROMPTCLR/$config{'promptcolor'}/g;
-       $pmsg =~s/\@DATACLR/$config{'datacolor'}/g;
-       $pmsg =~s/\@LINECLR/$config{'linecolor'}/g;
-       $pmsg =~s/\@RST/$RST/g;
-       $pmsg =~s/\@BLK/$BLK/g;
-       $pmsg =~s/\@RED/$RED/g;
-       $pmsg =~s/\@GRN/$GRN/g;
-       $pmsg =~s/\@YLW/$YLW/g;
-       $pmsg =~s/\@BLU/$BLU/g;
-       $pmsg =~s/\@MAG/$MAG/g;
-       $pmsg =~s/\@WHT/$WHT/g;
-       $pmsg =~s/\@CYN/$CYN/g;
-       $pmsg =~s/\@BBK/$BBK/g;
-       $pmsg =~s/\@BRD/$BRD/g;
-       $pmsg =~s/\@BGN/$BGN/g;
-       $pmsg =~s/\@BYL/$BYL/g;
-       $pmsg =~s/\@BMG/$BMG/g;
-       $pmsg =~s/\@BCN/$BCN/g;
-       $pmsg =~s/\@BWH/$BWH/g;
+       $pmsg = colorline($pmsg);
 
       ($discard,$pnode,$discard,$discard,$person,$discard,$discard)=split(/\|/,$nodeinfo);
       writeline($config{'usercolor'}."You whispered to $person: ".$pmsg,1);

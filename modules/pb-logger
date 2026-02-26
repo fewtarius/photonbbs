@@ -1,0 +1,47 @@
+#!/usr/bin/perl
+# Module Name: pb-logger
+# Purpose: Structured logging with level control for PhotonBBS
+
+use POSIX qw(strftime);
+
+our %LOG_LEVELS = (
+  'ERROR' => 0,
+  'WARN'  => 1,
+  'INFO'  => 2,
+  'DEBUG' => 3,
+);
+
+sub pblog {
+  my ($level, $module, $message) = @_;
+  $level = uc($level || 'INFO');
+
+  my $config_level = uc($config{'log_level'} || 'WARN');
+
+  return unless exists $LOG_LEVELS{$level};
+  return unless exists $LOG_LEVELS{$config_level};
+  return if $LOG_LEVELS{$level} > $LOG_LEVELS{$config_level};
+
+  my $timestamp = strftime("%Y-%m-%d %H:%M:%S", localtime);
+  my $log_msg = "[$timestamp] [$level]";
+  $log_msg .= "[$module]" if $module;
+  $log_msg .= " $message";
+
+  if (defined &main::logger) {
+    main::logger("$level: [$module] $message");
+  }
+
+  if ($config_level eq 'DEBUG' && $config{'debug_log'}) {
+    eval {
+      open(my $fh, '>>', $config{'debug_log'});
+      print $fh "$log_msg\n";
+      close($fh);
+    };
+  }
+}
+
+sub pblog_debug { pblog('DEBUG', @_); }
+sub pblog_info  { pblog('INFO',  @_); }
+sub pblog_warn  { pblog('WARN',  @_); }
+sub pblog_error { pblog('ERROR', @_); }
+
+1;
