@@ -1009,7 +1009,11 @@ sub teleconf {
         # Log topic change
         my $histfile = "$config{'home'}$config{'messages'}/teleconf/$chanid/topic_history";
         open(my $hf, '>>', $histfile);
-        print $hf scalar(localtime).": ".`cat $config{'home'}$config{'messages'}/teleconf/$chanid/message`;
+        my $topic_content = "";
+        if (open(my $tf, '<', "$config{'home'}$config{'messages'}/teleconf/$chanid/message")) {
+          local $/; $topic_content = <$tf>; close($tf);
+        }
+        print $hf scalar(localtime).": ".$topic_content;
         close($hf);
         unlockfile("$config{'home'}$config{'messages'}/teleconf/$chanid/message");
         writeline($BWH."Set Channel message ..",1);

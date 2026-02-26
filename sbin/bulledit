@@ -9,8 +9,8 @@ $texteditor="nano";
 
 $ppid = getppid;
 if (-e "/etc/default/photonbbs") {
-  open(in,"</etc/default/photonbbs");
-  while (<in>) {
+  open(my $cfg_fh, '<', "/etc/default/photonbbs");
+  while (<$cfg_fh>) {
     $line=$_;
     chomp $line;
     ($key,$value)=split(/\=/,$line);
@@ -18,12 +18,18 @@ if (-e "/etc/default/photonbbs") {
     $value=~s/\".*$//;
     $config{$key}=$value;
   }
-  close(in);
+  close($cfg_fh);
 } else {
   die "Please configure your BBS (/etc/default/photonbbs)";
 }
 
-chomp ($sysinfo{'host'}=`hostname`);
+eval {
+  require Sys::Hostname;
+  $sysinfo{'host'} = Sys::Hostname::hostname();
+};
+if ($@ || !$sysinfo{'host'}) {
+  chomp ($sysinfo{'host'}=`hostname`);
+}
 
 require ($config{'home'}."/modules/pb-framework");
 require ($config{'home'}."/modules/pb-usertools");
@@ -32,14 +38,14 @@ $|=1;
 
 $node=@ARGV[1];
 if (-e "$config{'doors'}/nodes/$node/fusiondoor") {
-  open (in,"<$config{'doors'}/nodes/$node/fusiondoor");
-  while (<in>) {
+  open (my $fd_fh, '<', "$config{'doors'}/nodes/$node/fusiondoor");
+  while (<$fd_fh>) {
     $instream=$_;
     chomp $instream;
     ($key,$value)=split(/\=/,$instream);
     $fusiondoor{$key}=$value;
   }
-  close (in);
+  close ($fd_fh);
   if ($fusiondoor{'security'} <= $config{'sysopsecurity'}) {
     die "You do not have permission to run this tool!";
   }
@@ -47,22 +53,26 @@ if (-e "$config{'doors'}/nodes/$node/fusiondoor") {
   $fusiondoor{'ansi'}=1;
 }
 
-chomp($os=`uname`);
-if ($os =~/Linux/) {
+$sysinfo{'os'} = $^O;
+if ($sysinfo{'os'} =~/linux/) {
   $BSD_STYLE=1;
-} elsif ($os =~/HP-UX/) {
+} elsif ($sysinfo{'os'} =~/hpux/) {
   $BSD_STYLE=0;
 } else {
   $BSD_STYLE=1;
 }
-chomp ($mytty=`tty`);
-open(in,"<$config{'home'}$config{'data'}/users.dat");
-  while (<in>) {
+
+# Get TTY device path using POSIX
+eval { require POSIX; $mytty = POSIX::ttyname(fileno(STDIN)); };
+if (!$mytty) { chomp($mytty = `tty 2>/dev/null`); }
+
+open(my $users_fh, '<', "$config{'home'}$config{'data'}/users.dat");
+  while (<$users_fh>) {
     chomp;
     ($idx,$name)=split(/\|/,$_);
     push(@users,$name);
   }
-close(in);
+close($users_fh);
 
 applytheme($config{'deftheme'});
 
@@ -87,9 +97,9 @@ for (;;) {
 
     $bullidx=$config{'home'}.$config{'data'}."/bullidx.dat";
     lockfile("$bullidx");
-    open (in,"<$bullidx");
-    @bulls=<in>;
-    close (in);
+    open (my $bull_fh, '<', $bullidx);
+    @bulls=<$bull_fh>;
+    close ($bull_fh);
     unlockfile("$bullidx");
 
     print "\e[2J\e[0;0H";
@@ -162,14 +172,14 @@ for (;;) {
             @bulls = keys %tmpbulls;
             undef %tmpbulls;
             lockfile("$bullidx");
-            open (newbull,">$bullidx");
+            open (my $nb_fh, '>', $bullidx);
             foreach $bull(@bulls) {
               chomp $bull;
               if ($bull ne "") {
-                print newbull $bull."\n";
+                print $nb_fh $bull."\n";
               }
             }
-            close (newbull);
+            close ($nb_fh);
             unlockfile("$bullidx");
             writeline($RED."Bulletin Deleted.")
           }
@@ -195,14 +205,14 @@ for (;;) {
         system ($texteditor, "$config{'home'}/$config{'text'}/$newbullid");
         if (-e "$config{'home'}/$config{'text'}/$newbullid") {
           lockfile("$bullidx");
-          open (newbull,">$bullidx");
+          open (my $nb_fh, '>', $bullidx);
           foreach $bull(@bulls) {
             chomp $bull;
             if ($bull ne "") {
-              print newbull $bull."\n";
+              print $nb_fh $bull."\n";
             }
           }
-          close (newbull);
+          close ($nb_fh);
           unlockfile("$bullidx");
         }
         goto bullmenu;

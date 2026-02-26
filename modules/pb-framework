@@ -8,6 +8,7 @@ use POSIX qw(strftime);
 use Sys::Syslog qw(openlog syslog closelog);
 use File::Find ();
 use File::Path qw(remove_tree);
+use Cwd qw(realpath abs_path);
 
 # HTTP::Tiny for webhook notifications (replaces system("curl ...") calls)
 # Core module since Perl 5.14 - no CPAN required
@@ -1029,7 +1030,6 @@ sub readfile {
   
   # SECURITY: Canonicalize and verify path is within allowed directories
   # Note: We check against multiple allowed bases since data dir may be a symlink
-  use Cwd qw(realpath abs_path);
   my $real_path = realpath($filename);
   
   # Define allowed base directories (resolve symlinks in data paths too)
@@ -1061,35 +1061,11 @@ sub readfile {
   my $ctime = get_current_time();
   my $cdate = get_current_date();
   while (<$file_fh>) {
-    s/\@SYSTEMCLR/$config{'systemcolor'}/g;
-    s/\@USERCLR/$config{'usercolor'}/g;
-    s/\@INPUTCLR/$config{'inputcolor'}/g;
-    s/\@ERRORCLR/$config{'errorcolor'}/g;
-    s/\@THEMECLR/$config{'themecolor'}/g;
-    s/\@PROMPTCLR/$config{'promptcolor'}/g;
-    s/\@DATACLR/$config{'datacolor'}/g;
-    s/\@LINECLR/$config{'linecolor'}/g;
-    
-    # Box-drawing character macros (PETSCII-aware)
-    s/\@BOXHORIZ\@/boxchar('horizontal')/eg;
-    s/\@BOXVERT\@/boxchar('vertical')/eg;
-    s/\@BOXTOPLEFT\@/boxchar('topleft')/eg;
-    s/\@BOXTOPRIGHT\@/boxchar('topright')/eg;
-    s/\@BOXBOTLEFT\@/boxchar('bottomleft')/eg;
-    s/\@BOXBOTRIGHT\@/boxchar('bottomright')/eg;
-    s/\@BOXTDOWN\@/boxchar('tdown')/eg;
-    s/\@BOXTUP\@/boxchar('tup')/eg;
-    s/\@BOXTLEFT\@/boxchar('tleft')/eg;
-    s/\@BOXTRIGHT\@/boxchar('tright')/eg;
-    
-    # Double-line box-drawing macros
-    s/\@DBOXHORIZ\@/boxchar('dhorizontal')/eg;
-    s/\@DBOXVERT\@/boxchar('dvertical')/eg;
-    s/\@DBOXTOPLEFT\@/boxchar('dtopleft')/eg;
-    s/\@DBOXTOPRIGHT\@/boxchar('dtopright')/eg;
-    s/\@DBOXBOTLEFT\@/boxchar('dbottomleft')/eg;
-    s/\@DBOXBOTRIGHT\@/boxchar('dbottomright')/eg;
-    
+    # Apply centralized theme, box, and color code substitutions
+    $_ = _substitute_theme_codes($_);
+    $_ = _substitute_box_codes($_);
+
+    # Readfile-specific variable substitutions (user/system info)
     s/\@SYSNM/$config{'systemname'}/g;
     s/\@NODE/$info{'node'}/g;
     s/\@CONNECT/$info{'connect'}/g;
@@ -1111,23 +1087,8 @@ sub readfile {
     s/\@DND/$info{'dnd'}/g;
     s/\@BANNED/$info{'banned'}/g;
     s/\@CLR/$CLR/g;
-    s/\@RST/$RST/g;
-    s/\@BLK/$BLK/g;
-    s/\@RED/$RED/g;
-    s/\@GRN/$GRN/g;
-    s/\@YLW/$YLW/g;
-    s/\@BLU/$BLU/g;
-    s/\@MAG/$MAG/g;
-    s/\@WHT/$WHT/g;
-    s/\@CYN/$CYN/g;
-    s/\@BBK/$BBK/g;
-    s/\@BRD/$BRD/g;
-    s/\@BGN/$BGN/g;
-    s/\@BYL/$BYL/g;
-    s/\@BBL/$BBL/g;
-    s/\@BMG/$BMG/g;
-    s/\@BCN/$BCN/g;
-    s/\@BWH/$BWH/g;
+
+    $_ = _substitute_color_codes($_);
     s/~AT/\@/g;
 
     if ($info{'ansi'} eq 1) {
