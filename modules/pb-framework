@@ -5,6 +5,42 @@
 
 use Fcntl qw(:DEFAULT :flock);
 use POSIX qw(strftime);
+use Sys::Syslog qw(openlog syslog closelog);
+use File::Find ();
+use File::Path qw(remove_tree);
+
+# HTTP::Tiny for webhook notifications (replaces system("curl ...") calls)
+# Core module since Perl 5.14 - no CPAN required
+our $HAS_HTTP_TINY = 0;
+eval {
+    require HTTP::Tiny;
+    $HAS_HTTP_TINY = 1;
+};
+
+# POSIX::Termios for terminal control (replaces system("stty ...") calls)
+# Benefits: Zero child processes, signal-safe, reliable save/restore
+our $INITIAL_TERMIOS;  # Saved pristine terminal state
+our $HAS_POSIX_TERMIOS = 0;
+our $TERMINAL_MODE = 0;  # Track current mode: 0=normal, 1=cbreak
+
+eval {
+    require POSIX;
+    POSIX->import(qw(:termios_h));
+    $HAS_POSIX_TERMIOS = 1;
+};
+
+# TIOCGWINSZ constant for ioctl-based terminal size detection
+# macOS: 0x40087468, Linux: 0x5413
+our $TIOCGWINSZ;
+eval {
+    require Config;
+    if ($Config::Config{osname} && $Config::Config{osname} eq 'linux') {
+        $TIOCGWINSZ = 0x5413;
+    } else {
+        # macOS, FreeBSD, and most other Unix
+        $TIOCGWINSZ = 0x40087468;
+    }
+};
 
 # SECURITY: Global hash to track active lock filehandles
 our %GLOBAL_LOCK_FH;
@@ -230,14 +266,28 @@ sub bye {
   if ($info{'handle'}) {
     logger("NOTICE".$config{'promptcolor'}.": ".$info{'handle'}." Logged off!");
   }
-  @list=`find $config{'home'} -name $info{'node'} -print`;
-  foreach $item(@list) {
-    chomp $item;
-    system ("rm -rf $item 2>/dev/null");
+  # Clean up node files using Perl (no shell fork needed)
+  if (defined $info{'node'} && $info{'node'} =~ /^\d+$/) {
+    my $node_name = $info{'node'};
+    my $home = $config{'home'};
+    eval {
+      File::Find::find({
+        wanted => sub {
+          if ($_ eq $node_name) {
+            if (-d $File::Find::name) {
+              remove_tree($File::Find::name, { safe => 1 });
+            } else {
+              unlink($File::Find::name);
+            }
+          }
+        },
+        no_chdir => 0,
+      }, $home) if -d $home;
+    };
   }
 
-  if ( -e "$config{'doors'}/nodes/$info{'node'}") {
-    system ("rm -rf $config{'doors'}/nodes/$info{'node'} 2>/dev/null");
+  if ( -e "$config{'doors'}/nodes/$info{'node'}" && $info{'node'} =~ /^\d+$/) {
+    remove_tree("$config{'doors'}/nodes/$info{'node'}", { safe => 1 });
   }
 
   # Only remove node file if it matches our PID
@@ -320,67 +370,64 @@ sub colorize {
 # TERMINAL DETECTION - Detect terminal width and height capabilities
 # ============================================================================
 sub detect_terminal_size {
-  my $width = undef;   # Start with undefined
+  my $width = undef;
   my $height = undef;
-  
-  # Check environment variables only (stty causes hangs on some terminals)
-  # DEBUG: Write to temp file
-  if (open(my $fh, '>>', '/tmp/photonbbs-debug.log')) {
-    print $fh "detect_terminal_size called at " . scalar(localtime) . "\n";
-    print $fh "COLUMNS=" . ($ENV{'COLUMNS'} // 'undef') . "\n";
-    print $fh "LINES=" . ($ENV{'LINES'} // 'undef') . "\n";
-    close $fh;
+
+  # Method 1: ioctl(TIOCGWINSZ) - zero overhead, works on any PTY
+  if ($TIOCGWINSZ) {
+    eval {
+      my $winsize = "\0" x 8;
+      if (ioctl(STDIN, $TIOCGWINSZ, $winsize)) {
+        my ($rows, $cols) = unpack('SS', $winsize);
+        if ($cols && $rows && $cols > 0 && $rows > 0) {
+          $width = $cols;
+          $height = $rows;
+        }
+      }
+    };
   }
-  
-  if ($ENV{'COLUMNS'} && $ENV{'COLUMNS'} =~ /^\d+$/ && $ENV{'COLUMNS'} > 0) {
-    $width = $ENV{'COLUMNS'};
+
+  # Method 2: Environment variables (set by some terminals and photonbbs-tty)
+  unless ($width) {
+    if ($ENV{'COLUMNS'} && $ENV{'COLUMNS'} =~ /^\d+$/ && $ENV{'COLUMNS'} > 0) {
+      $width = $ENV{'COLUMNS'};
+    }
   }
-  if ($ENV{'LINES'} && $ENV{'LINES'} =~ /^\d+$/ && $ENV{'LINES'} > 0) {
-    $height = $ENV{'LINES'};
+  unless ($height) {
+    if ($ENV{'LINES'} && $ENV{'LINES'} =~ /^\d+$/ && $ENV{'LINES'} > 0) {
+      $height = $ENV{'LINES'};
+    }
   }
-  
+
   return ($width, $height);
 }
 
 sub initialize_terminal_config {
   my ($width, $height);
-  
-  # DEBUG: Log entry
-  open(my $dbg, '>>', '/tmp/photonbbs-perl-debug.log');
-  print $dbg "=== initialize_terminal_config called ===\n";
-  print $dbg "info{terminal_width} = " . ($info{'terminal_width'} // 'undef') . "\n";
-  close($dbg);
-  
+
   # Check if user has a saved terminal preference in their profile
   if (defined $info{'terminal_width'} && $info{'terminal_width'} > 0) {
     $width = $info{'terminal_width'};
     $height = ($width == 40) ? 25 : 24;
   } else {
-    # No saved preference - try environment detection
+    # No saved preference - try detection
     ($width, $height) = detect_terminal_size();
-    
-    # If no environment vars, default to 80x24
+
+    # If nothing detected, default to 80x24
     $width //= 80;
     $height //= 24;
   }
-  
+
   # Validate reasonable ranges
   $width = 40 if ($width < 40);
   $width = 255 if ($width > 255);
   $height = 24 if ($height < 24);
   $height = 66 if ($height > 66);
-  
+
   # Store in config for session-wide access
   $config{'terminal_width'} = $width;
   $config{'terminal_height'} = $height;
-  
-  # DEBUG: Log final values
-  open($dbg, '>>', '/tmp/photonbbs-perl-debug.log');
-  print $dbg "Final width = $width\n";
-  print $dbg "Final height = $height\n";
-  print $dbg "config{terminal_width} = " . $config{'terminal_width'} . "\n";
-  close($dbg);
-  
+
   # Update rows for pagination
   $config{'rows'} = $height - 1;
   
@@ -457,33 +504,11 @@ sub applytheme {
     chomp $value;
     unless ($value eq "") {
       $$key = $value;
-      $$key =~s/\@SYSTEMCLR/$config{'systemcolor'}/g;
-      $$key =~s/\@USERCLR/$config{'usercolor'}/g;
-      $$key =~s/\@INPUTCLR/$config{'inputcolor'}/g;
-      $$key =~s/\@ERRORCLR/$config{'errorcolor'}/g;
-      $$key =~s/\@THEMECLR/$config{'themecolor'}/g;
-      $$key =~s/\@PROMPTCLR/$config{'promptcolor'}/g;
-      $$key =~s/\@DATACLR/$config{'datacolor'}/g;
-      $$key =~s/\@LINECLR/$config{'linecolor'}/g;
-      
-      # Box-drawing character macros (PETSCII-aware)
-      $$key =~s/\@BOXHORIZ\@/boxchar('horizontal')/eg;
-      $$key =~s/\@BOXVERT\@/boxchar('vertical')/eg;
-      $$key =~s/\@BOXTOPLEFT\@/boxchar('topleft')/eg;
-      $$key =~s/\@BOXTOPRIGHT\@/boxchar('topright')/eg;
-      $$key =~s/\@BOXBOTLEFT\@/boxchar('bottomleft')/eg;
-      $$key =~s/\@BOXBOTRIGHT\@/boxchar('bottomright')/eg;
-      $$key =~s/\@BOXTDOWN\@/boxchar('tdown')/eg;
-      $$key =~s/\@BOXTUP\@/boxchar('tup')/eg;
-      $$key =~s/\@BOXTLEFT\@/boxchar('tleft')/eg;
-      $$key =~s/\@BOXTRIGHT\@/boxchar('tright')/eg;
-      $$key =~s/\@DBOXHORIZ\@/boxchar('dhorizontal')/eg;
-      $$key =~s/\@DBOXVERT\@/boxchar('dvertical')/eg;
-      $$key =~s/\@DBOXTOPLEFT\@/boxchar('dtopleft')/eg;
-      $$key =~s/\@DBOXTOPRIGHT\@/boxchar('dtopright')/eg;
-      $$key =~s/\@DBOXBOTLEFT\@/boxchar('dbottomleft')/eg;
-      $$key =~s/\@DBOXBOTRIGHT\@/boxchar('dbottomright')/eg;
-      
+      # Apply all code substitutions using centralized functions
+      $$key = _substitute_theme_codes($$key);
+      $$key = _substitute_box_codes($$key);
+      $$key = _substitute_color_codes($$key);
+      # Theme-specific variable substitutions
       $$key =~s/\@USRNM/$info{'username'}/g;
       $$key =~s/\@SYSNM/$config{'systemname'}/g;
       $$key =~s/\@MENU/$menu/g;
@@ -496,22 +521,6 @@ sub applytheme {
       $$key =~s/\@TOTALCALLS/$config{'totcalls'}/g;
       $$key =~s/\@DEFAULT/$info{'defchan'}/g;
       $$key =~s/\@PROTO/$info{'proto'}/g;
-      $$key =~s/\@BLK/$BLK/g;
-      $$key =~s/\@RED/$RED/g;
-      $$key =~s/\@GRN/$GRN/g;
-      $$key =~s/\@YLW/$YLW/g;
-      $$key =~s/\@BLU/$BLU/g;
-      $$key =~s/\@MAG/$MAG/g;
-      $$key =~s/\@WHT/$WHT/g;
-      $$key =~s/\@CYN/$CYN/g;
-      $$key =~s/\@BBK/$BBK/g;
-      $$key =~s/\@BRD/$BRD/g;
-      $$key =~s/\@BGN/$BGN/g;
-      $$key =~s/\@BYL/$BYL/g;
-      $$key =~s/\@BBL/$BBL/g;
-      $$key =~s/\@BMG/$BMG/g;
-      $$key =~s/\@BCN/$BCN/g;
-      $$key =~s/\@BWH/$BWH/g;
       $$key =~s/\\n/\n/g; $$key =~s/\\t/\t/g; $$key =~ s/(\$\w+)/$1/eeg;
       $theme{$key}=$$key;
       $$key="";
@@ -594,6 +603,49 @@ sub unlockfile {
    return 1;  # Return success
 }
 
+# ============================================================================
+# ATOMIC FILE WRITE - Write to temp file then rename
+# ============================================================================
+# Prevents data corruption if the process is killed mid-write.
+# The rename() operation is atomic on POSIX filesystems.
+sub atomic_write_file {
+  my ($filepath, $content, $lock) = @_;
+  my $tmpfile = "$filepath.tmp.$$";
+
+  lockfile($filepath) if $lock;
+
+  eval {
+    open(my $fh, '>', $tmpfile) or die "Cannot write $tmpfile: $!";
+    print $fh $content;
+    close($fh) or die "Cannot close $tmpfile: $!";
+    rename($tmpfile, $filepath) or die "Cannot rename $tmpfile to $filepath: $!";
+  };
+  if ($@) {
+    unlink($tmpfile) if -e $tmpfile;
+    unlockfile($filepath) if $lock;
+    return 0;
+  }
+
+  unlockfile($filepath) if $lock;
+  return 1;
+}
+
+# ============================================================================
+# UUID GENERATION - Pure Perl UUID v4 (replaces `uuidgen` backtick)
+# ============================================================================
+sub generate_uuid {
+  my @hex = ('0'..'9', 'a'..'f');
+  my $uuid = '';
+  for my $i (1..32) {
+    $uuid .= $hex[int(rand(16))];
+    $uuid .= '-' if ($i == 8 || $i == 12 || $i == 16 || $i == 20);
+  }
+  # Set version 4 (random) and variant bits
+  substr($uuid, 14, 1) = '4';
+  substr($uuid, 19, 1) = $hex[8 + int(rand(4))];
+  return $uuid;
+}
+
 sub readconfig {
   $rfile=$config{'home'}.$config{'data'}."/".$_[0];
   lockfile("$rfile");
@@ -618,22 +670,72 @@ sub readconfig {
 }
 
 sub cbreak {
-  # Skip stty commands if we don't have a valid TTY
+  # Skip if we don't have a valid TTY
   return if (!defined $mytty || $mytty eq "" || $mytty =~ /not a tty/i);
-  
-  if ($_[0] eq "on") {
+
+  my $mode = $_[0];
+
+  if ($HAS_POSIX_TERMIOS) {
+    # POSIX::Termios approach: zero child processes, signal-safe
+    if (!$INITIAL_TERMIOS) {
+      eval {
+        $INITIAL_TERMIOS = POSIX::Termios->new();
+        $INITIAL_TERMIOS->getattr(fileno(STDIN));
+      };
+      if ($@) {
+        _cbreak_stty($mode);
+        return;
+      }
+    }
+
+    if ($mode eq "on") {
+      eval {
+        my $t = POSIX::Termios->new();
+        $t->getattr(fileno(STDIN));
+        my $lflag = $t->getlflag();
+        $lflag &= ~(POSIX::ECHO() | POSIX::ICANON());
+        $t->setlflag($lflag);
+        $t->setcc(POSIX::VMIN(), 1);
+        $t->setcc(POSIX::VTIME(), 0);
+        $t->setattr(fileno(STDIN), POSIX::TCSANOW());
+        $TERMINAL_MODE = 1;
+      };
+      if ($@) {
+        _cbreak_stty($mode);
+      }
+    }
+    if ($mode eq "off") {
+      eval {
+        $INITIAL_TERMIOS->setattr(fileno(STDIN), POSIX::TCSANOW());
+        $TERMINAL_MODE = 0;
+      };
+      if ($@) {
+        _cbreak_stty($mode);
+      }
+    }
+  } else {
+    _cbreak_stty($mode);
+  }
+}
+
+# Legacy stty fallback - only used if POSIX::Termios is unavailable
+sub _cbreak_stty {
+  my $mode = $_[0];
+  if ($mode eq "on") {
     if ($BSD_STYLE) {
       system "stty -echo cbreak <$mytty >$mytty 2>&1";
     } else {
       system "stty -echo raw opost <$mytty >$mytty 2>&1";
     }
+    $TERMINAL_MODE = 1;
   }
-  if ($_[0] eq "off") {
+  if ($mode eq "off") {
     if ($BSD_STYLE) {
       system "stty echo -cbreak <$mytty >$mytty 2>&1";
     } else {
       system "stty echo -raw <$mytty >$mytty 2>&1";
     }
+    $TERMINAL_MODE = 0;
   }
 }
 
@@ -679,25 +781,57 @@ sub waitkey {
   return $key;
 }
 
+# ============================================================================
+# COLOR CODE SUBSTITUTION - Central function for @-code to ANSI conversion
+# ============================================================================
+sub _substitute_color_codes {
+  my $text = $_[0];
+  my %color_map = (
+    '@RST' => $RST, '@BLK' => $BLK, '@RED' => $RED, '@GRN' => $GRN,
+    '@YLW' => $YLW, '@BLU' => $BLU, '@MAG' => $MAG, '@WHT' => $WHT,
+    '@CYN' => $CYN, '@BBK' => $BBK, '@BRD' => $BRD, '@BGN' => $BGN,
+    '@BYL' => $BYL, '@BBL' => $BBL, '@BMG' => $BMG, '@BCN' => $BCN,
+    '@BWH' => $BWH,
+  );
+  $text =~ s/(\@(?:RST|BLK|RED|GRN|YLW|BLU|MAG|WHT|CYN|BBK|BRD|BGN|BYL|BBL|BMG|BCN|BWH))/$color_map{$1} \/\/ ''/eg;
+  return $text;
+}
+
+sub _substitute_theme_codes {
+  my $text = $_[0];
+  my %theme_map = (
+    '@SYSTEMCLR' => $config{'systemcolor'}, '@USERCLR'   => $config{'usercolor'},
+    '@INPUTCLR'  => $config{'inputcolor'},  '@ERRORCLR'  => $config{'errorcolor'},
+    '@THEMECLR'  => $config{'themecolor'},  '@PROMPTCLR' => $config{'promptcolor'},
+    '@DATACLR'   => $config{'datacolor'},   '@LINECLR'   => $config{'linecolor'},
+  );
+  $text =~ s/(\@(?:SYSTEM|USER|INPUT|ERROR|THEME|PROMPT|DATA|LINE)CLR)/$theme_map{$1} \/\/ ''/eg;
+  return $text;
+}
+
+sub _substitute_box_codes {
+  my $text = $_[0];
+  $text =~ s/\@(D?BOX(?:HORIZ|VERT|TOPLEFT|TOPRIGHT|BOTLEFT|BOTRIGHT|TDOWN|TUP|TLEFT|TRIGHT))\@/_boxcode_lookup($1)/eg;
+  return $text;
+}
+
+sub _boxcode_lookup {
+  my %box_map = (
+    'BOXHORIZ' => 'horizontal', 'BOXVERT' => 'vertical',
+    'BOXTOPLEFT' => 'topleft', 'BOXTOPRIGHT' => 'topright',
+    'BOXBOTLEFT' => 'bottomleft', 'BOXBOTRIGHT' => 'bottomright',
+    'BOXTDOWN' => 'tdown', 'BOXTUP' => 'tup',
+    'BOXTLEFT' => 'tleft', 'BOXTRIGHT' => 'tright',
+    'DBOXHORIZ' => 'dhorizontal', 'DBOXVERT' => 'dvertical',
+    'DBOXTOPLEFT' => 'dtopleft', 'DBOXTOPRIGHT' => 'dtopright',
+    'DBOXBOTLEFT' => 'dbottomleft', 'DBOXBOTRIGHT' => 'dbottomright',
+  );
+  return boxchar($box_map{$_[0]} || 'horizontal');
+}
+
 sub writeline {
   $wrline=$_[0];
-  $wrline =~s/\@RST/$RST/g;
-  $wrline =~s/\@BLK/$BLK/g;
-  $wrline =~s/\@RED/$RED/g;
-  $wrline =~s/\@GRN/$GRN/g;
-  $wrline =~s/\@YLW/$YLW/g;
-  $wrline =~s/\@BLU/$BLU/g;
-  $wrline =~s/\@MAG/$MAG/g;
-  $wrline =~s/\@WHT/$WHT/g;
-  $wrline =~s/\@CYN/$CYN/g;
-  $wrline =~s/\@BBK/$BBK/g;
-  $wrline =~s/\@BRD/$BRD/g;
-  $wrline =~s/\@BGN/$BGN/g;
-  $wrline =~s/\@BYL/$BYL/g;
-  $wrline =~s/\@BBL/$BBL/g;
-  $wrline =~s/\@BMG/$BMG/g;
-  $wrline =~s/\@BCN/$BCN/g;
-  $wrline =~s/\@BWH/$BWH/g;
+  $wrline = _substitute_color_codes($wrline);
   print $wrline . "\e[K";
   if ($_[1] eq "1") {
     print "\n";
@@ -841,50 +975,9 @@ sub getline {
 }
 
 sub colorline {
-  $_[0] =~s/\@SYSTEMCLR/$config{'systemcolor'}/g;
-  $_[0] =~s/\@USERCLR/$config{'usercolor'}/g;
-  $_[0] =~s/\@INPUTCLR/$config{'inputcolor'}/g;
-  $_[0] =~s/\@ERRORCLR/$config{'errorcolor'}/g;
-  $_[0] =~s/\@THEMECLR/$config{'themecolor'}/g;
-  $_[0] =~s/\@PROMPTCLR/$config{'promptcolor'}/g;
-  $_[0] =~s/\@DATACLR/$config{'datacolor'}/g;
-  $_[0] =~s/\@LINECLR/$config{'linecolor'}/g;
-  
-  # Box-drawing character macros (PETSCII-aware)
-  $_[0] =~s/\@BOXHORIZ\@/boxchar('horizontal')/eg;
-  $_[0] =~s/\@BOXVERT\@/boxchar('vertical')/eg;
-  $_[0] =~s/\@BOXTOPLEFT\@/boxchar('topleft')/eg;
-  $_[0] =~s/\@BOXTOPRIGHT\@/boxchar('topright')/eg;
-  $_[0] =~s/\@BOXBOTLEFT\@/boxchar('bottomleft')/eg;
-  $_[0] =~s/\@BOXBOTRIGHT\@/boxchar('bottomright')/eg;
-  $_[0] =~s/\@BOXTDOWN\@/boxchar('tdown')/eg;
-  $_[0] =~s/\@BOXTUP\@/boxchar('tup')/eg;
-  $_[0] =~s/\@BOXTLEFT\@/boxchar('tleft')/eg;
-  $_[0] =~s/\@BOXTRIGHT\@/boxchar('tright')/eg;
-  $_[0] =~s/\@DBOXHORIZ\@/boxchar('dhorizontal')/eg;
-  $_[0] =~s/\@DBOXVERT\@/boxchar('dvertical')/eg;
-  $_[0] =~s/\@DBOXTOPLEFT\@/boxchar('dtopleft')/eg;
-  $_[0] =~s/\@DBOXTOPRIGHT\@/boxchar('dtopright')/eg;
-  $_[0] =~s/\@DBOXBOTLEFT\@/boxchar('dbottomleft')/eg;
-  $_[0] =~s/\@DBOXBOTRIGHT\@/boxchar('dbottomright')/eg;
-  
-  $_[0] =~s/\@RST/$RST/g;
-  $_[0] =~s/\@BLK/$BLK/g;
-  $_[0] =~s/\@RED/$RED/g;
-  $_[0] =~s/\@GRN/$GRN/g;
-  $_[0] =~s/\@YLW/$YLW/g;
-  $_[0] =~s/\@BLU/$BLU/g;
-  $_[0] =~s/\@MAG/$MAG/g;
-  $_[0] =~s/\@WHT/$WHT/g;
-  $_[0] =~s/\@CYN/$CYN/g;
-  $_[0] =~s/\@BBK/$BBK/g;
-  $_[0] =~s/\@BRD/$BRD/g;
-  $_[0] =~s/\@BGN/$BGN/g;
-  $_[0] =~s/\@BYL/$BYL/g;
-  $_[0] =~s/\@BBL/$BBL/g;
-  $_[0] =~s/\@BMG/$BMG/g;
-  $_[0] =~s/\@BCN/$BCN/g;
-  $_[0] =~s/\@BWH/$BWH/g;
+  $_[0] = _substitute_theme_codes($_[0]);
+  $_[0] = _substitute_box_codes($_[0]);
+  $_[0] = _substitute_color_codes($_[0]);
   return $_[0];
 }
 
@@ -1231,7 +1324,14 @@ sub hi {
     alarm 0;
   };
   print ".";
-  chomp ($info{'tty'}=`tty | sed -e s#/##g -e s#[a-z]##g`);
+  # Get TTY number using Perl instead of forking to tty|sed
+  if (defined $mytty && $mytty ne "") {
+    my $ttynum = $mytty;
+    $ttynum =~ s/[\/a-z]//gi;
+    $info{'tty'} = $ttynum;
+  } else {
+    $info{'tty'} = "";
+  }
 
   # Now that the node is reserved, write initial session info
   iamat("CONNECT", "Logging on");
@@ -1266,39 +1366,76 @@ sub hi {
     unlockfile("$config{'home'}/$config{'data'}/totalcalls");
   }
   ++$config{'totcalls'};
-  lockfile("$config{'home'}/$config{'data'}/totalcalls");
-  open (my $tcalls_out, '>', "$config{'home'}/$config{'data'}/totalcalls");
-   print $tcalls_out $config{'totcalls'};
-  close ($tcalls_out);
-  unlockfile("$config{'home'}/$config{'data'}/totalcalls");
+  atomic_write_file("$config{'home'}/$config{'data'}/totalcalls", $config{'totcalls'}, 1);
 }
 
 sub logger {
-  system ("logger -p $config{'facility'} -t \"$sysinfo{'servername'}\" \"$_[0]\"");
+  my $msg = $_[0];
+
+  # Syslog: direct Perl call instead of forking to system("logger ...")
+  eval {
+    openlog($sysinfo{'servername'} || 'photonbbs', 'ndelay,pid', $config{'facility'} || 'local0');
+    syslog('info', '%s', $msg);
+    closelog();
+  };
+
+  # Slack Webhook Integration
   if ( $config{'slackintegration'} eq "1" ) {
-    if ( $config{'slackerrors'} eq "0" && "$_[0]" =~ /^ERR/ ) {
+    if ( $config{'slackerrors'} eq "0" && $msg =~ /^ERR/ ) {
       return;
     }
-    if ( $config{'slackwarnings'} eq "0" && "$_[0]" =~ /^WARN/ ) {
+    if ( $config{'slackwarnings'} eq "0" && $msg =~ /^WARN/ ) {
       return;
     }
-    system ('curl -X POST --data-urlencode "payload={\"channel\": \"'.$config{'slackchannel'}.'\", \"username\": \"'.$config{'slackuser'}.'\", \"text\": \"'.$_[0].'\", \"icon_emoji\": \"'.$config{'slackemoji'}.'\"}" "https://hooks.slack.com/services/'.$config{'slackapipath'}.'" >/dev/null 2>&1');
+    _webhook_post(
+      'https://hooks.slack.com/services/'.$config{'slackapipath'},
+      '{"channel": "'.$config{'slackchannel'}.'", "username": "'.$config{'slackuser'}.'", "text": "'.escape_json_string($msg).'", "icon_emoji": "'.$config{'slackemoji'}.'"}'
+    );
   }
-  # --- Discord Webhook Integration ---
+
+  # Discord Webhook Integration
   if ( $config{'discordintegration'} eq "1" && $config{'discordwebhook'} ne "" ) {
-    if ( $config{'discorderrors'} eq "0" && "$_[0]" =~ /^ERR/ ) {
+    if ( $config{'discorderrors'} eq "0" && $msg =~ /^ERR/ ) {
       return;
     }
-    if ( $config{'discordwarnings'} eq "0" && "$_[0]" =~ /^WARN/ ) {
+    if ( $config{'discordwarnings'} eq "0" && $msg =~ /^WARN/ ) {
       return;
     }
     my $discord_payload = '{'.
       '"username": "'.$config{'discorduser'}.'",'.
       ($config{'discordavatar'} ne "" ? '"avatar_url": "'.$config{'discordavatar'}.'",' : '').
-      '"content": "'.escape_discord($_[0]).'"'.
+      '"content": "'.escape_discord($msg).'"'.
       '}';
-    system('curl -H "Content-Type: application/json" -X POST -d \''.$discord_payload.'\' "'.$config{'discordwebhook'}.'" >/dev/null 2>&1');
+    _webhook_post($config{'discordwebhook'}, $discord_payload);
   }
+}
+
+# Send webhook POST request using HTTP::Tiny (no child process)
+sub _webhook_post {
+  my ($url, $payload) = @_;
+  if ($HAS_HTTP_TINY) {
+    eval {
+      my $http = HTTP::Tiny->new(timeout => 5);
+      $http->post($url, {
+        headers => { 'Content-Type' => 'application/json' },
+        content => $payload,
+      });
+    };
+  } else {
+    my $escaped_payload = $payload;
+    $escaped_payload =~ s/'/'\\''/g;
+    system("curl -s -H 'Content-Type: application/json' -X POST -d '$escaped_payload' '$url' >/dev/null 2>&1");
+  }
+}
+
+sub escape_json_string {
+  my $s = shift;
+  $s =~ s/\\/\\\\/g;
+  $s =~ s/"/\\"/g;
+  $s =~ s/\n/\\n/g;
+  $s =~ s/\r/\\r/g;
+  $s =~ s/\t/\\t/g;
+  return $s;
 }
 
 # Helper: Escape Discord special chars (basic)
@@ -1424,6 +1561,25 @@ sub list_sessions {
   }
   closedir($dh);
   return @sessions;
+}
+
+# ============================================================================
+# END BLOCK - Restore terminal state on ANY exit
+# ============================================================================
+END {
+  if ($TERMINAL_MODE && $TERMINAL_MODE != 0) {
+    if ($HAS_POSIX_TERMIOS && $INITIAL_TERMIOS) {
+      eval { $INITIAL_TERMIOS->setattr(fileno(STDIN), POSIX::TCSANOW()); };
+    } else {
+      eval {
+        local $SIG{ALRM} = sub { die "stty timeout\n" };
+        alarm(1);
+        system "stty sane 2>/dev/null";
+        alarm(0);
+      };
+      alarm(0);
+    }
+  }
 }
 
 return 1;
