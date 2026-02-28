@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# SSH Hardening Script for Terminal Tavern BBS
+# SSH Hardening Script for PhotonBBS
 # 
 # IMPORTANT: Only run this AFTER you've verified you can SSH as the photonbbs user!
 # This disables root login and password authentication.

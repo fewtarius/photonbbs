@@ -71,6 +71,7 @@ our %config = (
     discorduser => "Photon BBS",              ## Discord username for notifications
     discordavatar => "",                      ## Discord avatar URL for notifications
     allow_duplicate_ips => "0",               ## Allow duplicate IPs (1 = Yes, 0 = No)
+    start_in_teleconf => "1",                 ## Start in teleconference (1) or menu system (0)
     
     ## Security settings
     sec_track_failed_logins => "1",           ## Track failed login attempts (1 = Yes, 0 = No)

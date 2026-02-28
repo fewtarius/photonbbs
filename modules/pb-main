@@ -1221,6 +1221,24 @@ sub teleconf {
       goto telemain;
     }
 
+    # Polls command
+    if ($chatline =~/^\/[Pp][Oo][Ll][Ll][Ss]$/ || $chatline =~/^\/[Vv][Oo][Tt][Ee]$/) {
+       $inteleconf="0";
+       iamat($info{'handle'}, "Polls");
+       polls_menu();
+       iamat($info{'handle'}, "Chat");
+       $inteleconf="1";
+       goto telemain;
+    }
+
+    # Activity feed command
+    if ($chatline =~/^\/[Aa][Cc][Tt][Ii][Vv][Ii][Tt][Yy]$/ || $chatline =~/^\/[Ff][Ee][Ee][Dd]$/) {
+       $inteleconf="0";
+       activity_command();
+       $inteleconf="1";
+       goto telemain;
+    }
+
     if ($chatline eq "$config{'help'}") {
        $inteleconf="0";
        readfile("telehelp.txt");
@@ -1302,6 +1320,21 @@ sub teleconf {
         $info{'dnd'}=$dndmode;
         unlink ("$config{'home'}$config{'messages'}/teleconf/$chanid/users/$info{'node'}");
         return;
+    }
+
+    # Door games / external commands menu
+    if ($chatline =~/^\/GAMES\b/i || $chatline =~/^\/DOORS\b/i || $chatline =~/^\/MENU\b/i) {
+      $inteleconf = 0;
+      iamat($info{'handle'}, "Games Menu");
+      # Call the menu system - returns when user exits
+      while (1) {
+          my $result = show_menu($config{'home'}.$config{'data'}."/main.mnu");
+          last if $result && $result eq 'exit';
+      }
+      iamat($info{'handle'}, "Chat");
+      $inteleconf = 1;
+      writeline($config{'themecolor'}."Returning to teleconference...".$RST, 1);
+      goto telemain;
     }
 
     $runthis=0;
@@ -1523,26 +1556,6 @@ $whonode,$whouser,$whowhere
     $~="stdout";
   }
   writeline($RST."\n");
-}
-
-if ($chatline =~/^\/DOORS\b/i || $chatline =~/^\/MENU\b/i) {
-  my @mnuitems;
-  if (-e "$config{'home'}$config{'data'}/external.mnu") {
-    lockfile("$config{'home'}$config{'data'}/external.mnu");
-    open(my $fh, "<", "$config{'home'}$config{'data'}/external.mnu");
-    @mnuitems = <$fh>;
-    close($fh);
-    unlockfile("$config{'home'}$config{'data'}/external.mnu");
-  }
-  writeline($config{'themecolor'}."Available Doors/Commands:",1,1,0);
-  foreach my $mnuitem (@mnuitems) {
-    next if $mnuitem =~ /^#/;
-    my ($cmd, $desc, $msg, $exec, $seclevel, $hidden, $type, $maxusers) = split(/\|/, $mnuitem);
-    next if $hidden && $info{'security'} < $config{'sec_sysop'};
-    next if $info{'security'} < $seclevel;
-    writeline($config{'datacolor'}."$cmd".(" " x (10-length($cmd))).$config{'usercolor'}."$desc",1,0,0);
-  }
-  goto telemain;
 }
 
 return 1;

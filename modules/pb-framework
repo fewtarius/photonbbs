@@ -509,20 +509,8 @@ sub applytheme {
       $$key = _substitute_theme_codes($$key);
       $$key = _substitute_box_codes($$key);
       $$key = _substitute_color_codes($$key);
-      # Theme-specific variable substitutions
-      $$key =~s/\@USRNM/$info{'username'}/g;
-      $$key =~s/\@SYSNM/$config{'systemname'}/g;
-      $$key =~s/\@MENU/$menu/g;
-      $$key =~s/\@NODE/$info{'node'}/g;
-      $$key =~s/\@CONNECT/$info{'connect'}/g;
-      $$key =~s/\@USER/$info{'handle'}/g;
-      $$key =~s/\@EMAIL/$info{'email'}/g;
-      $$key =~s/\@TIME/$ctime/g;
-      $$key =~s/\@DATE/$cdate/g;
-      $$key =~s/\@TOTALCALLS/$config{'totcalls'}/g;
-      $$key =~s/\@DEFAULT/$info{'defchan'}/g;
-      $$key =~s/\@PROTO/$info{'proto'}/g;
-      $$key =~s/\\n/\n/g; $$key =~s/\\t/\t/g; $$key =~ s/(\$\w+)/$1/eeg;
+      $$key = _substitute_template_vars($$key, ctime => $ctime, cdate => $cdate, menu => $menu);
+      $$key =~ s/(\$\w+)/$1/eeg;
       $theme{$key}=$$key;
       $$key="";
     }
@@ -830,6 +818,60 @@ sub _boxcode_lookup {
   return boxchar($box_map{$_[0]} || 'horizontal');
 }
 
+# Centralized template variable substitution
+# Replaces @VARIABLE tokens with user/system/session values.
+# Used by applytheme() and readfile() - superset of both.
+sub _substitute_template_vars {
+  my ($text, %opts) = @_;
+  my $ctime = $opts{'ctime'} // get_current_time();
+  my $cdate = $opts{'cdate'} // get_current_date();
+  my $menu  = $opts{'menu'}  // lc($menuname // '');
+  my $ansi  = ($info{'ansi'} eq '1') ? 'Y' : 'N';
+
+  my %var_map = (
+    # Session/user info
+    '@USER'       => $info{'handle'},
+    '@USRNM'      => $info{'username'},
+    '@RNAME'      => $info{'rname'},
+    '@EMAIL'      => $info{'email'},
+    '@DOB'        => $info{'dob'},
+    '@PHONE'      => $info{'phonenumber'},
+    '@LOCAL'      => $info{'location'},
+    '@NODE'       => $info{'node'},
+    '@CONNECT'    => $info{'connect'},
+    '@PROTO'      => $info{'proto'},
+    '@ID'         => $info{'id'},
+    '@CREDITS'    => $info{'credits'},
+    '@TLEFT'      => $info{'tlimit'},
+    '@DND'        => $info{'dnd'},
+    '@BANNED'     => $info{'banned'},
+    '@DEFAULT'    => $info{'defchan'},
+    '@ANSI'       => $ansi,
+    # System info
+    '@SYSNM'      => $config{'systemname'},
+    '@TOTALCALLS' => $config{'totcalls'},
+    '@HOST'       => $sysinfo{'host'},
+    '@IP'         => $sysinfo{'ip'},
+    '@USERS'      => $sysinfo{'users'},
+    # Context
+    '@MENU'       => $menu,
+    '@TIME'       => $ctime,
+    '@DATE'       => $cdate,
+    '@CLR'        => $CLR,
+  );
+
+  # Single regex with alternation, longest-first to prevent partial matches
+  # (e.g., @USERCLR must not be caught here - it's handled by _substitute_theme_codes)
+  $text =~ s/(\@(?:TOTALCALLS|CONNECT|CREDITS|BANNED|DEFAULT|USRNM|PHONE|RNAME|USERS|LOCAL|TLEFT|EMAIL|PROTO|SYSNM|TIME|DATE|NODE|USER|MENU|HOST|ANSI|DOB|DND|CLR|ID|IP))/$var_map{$1} \/\/ ''/eg;
+
+  # Escape sequence processing
+  $text =~ s/~AT/\@/g;
+  $text =~ s/\\n/\n/g;
+  $text =~ s/\\t/\t/g;
+
+  return $text;
+}
+
 sub writeline {
   $wrline=$_[0];
   $wrline = _substitute_color_codes($wrline);
@@ -1065,40 +1107,9 @@ sub readfile {
     $_ = _substitute_theme_codes($_);
     $_ = _substitute_box_codes($_);
 
-    # Readfile-specific variable substitutions (user/system info)
-    s/\@SYSNM/$config{'systemname'}/g;
-    s/\@NODE/$info{'node'}/g;
-    s/\@CONNECT/$info{'connect'}/g;
-    s/\@HOST/$sysinfo{'host'}/g;
-    s/\@IP/$sysinfo{'ip'}/g;
-    s/\@USERS/$sysinfo{'users'}/g;
-    s/\@TIME/$ctime/g;	s/\@DATE/$cdate/g;
-    s/\@DEFAULT/$info{'defchan'}/g;
-    s/\@PROTO/$info{'proto'}/g;
-    s/\@USER/$info{'handle'}/g;
-    s/\@RNAME/$info{'rname'}/g;
-    s/\@DOB/$info{'dob'}/g;
-    s/\@PHONE/$info{'phonenumber'}/g;
-    s/\@LOCAL/$info{'location'}/g;
-    s/\@CREDITS/$info{'credits'}/g;
-    s/\@TLEFT/$info{'tlimit'}/g;
-    s/\@ID/$info{'id'}/g;
-    s/\@EMAIL/$info{'email'}/g;
-    s/\@DND/$info{'dnd'}/g;
-    s/\@BANNED/$info{'banned'}/g;
-    s/\@CLR/$CLR/g;
-
+    # Template variable and color code substitutions
+    $_ = _substitute_template_vars($_, ctime => $ctime, cdate => $cdate, menu => $menu);
     $_ = _substitute_color_codes($_);
-    s/~AT/\@/g;
-
-    if ($info{'ansi'} eq 1) {
-      $ansi="Y";
-    } else {
-      $ansi="N";
-    }
-    s/\@ANSI/$ansi/g;
-    s/\\n/\n/g;
-    s/\\t/\t/g;
 
     unless ($inteleconf eq 1) {
       print $_;

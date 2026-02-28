@@ -7,7 +7,7 @@ export TERM="ansi"
 export DOSEMU_HOGTHRESHOLD=1
 
 echo -e "**Seth Able's Node Data System, for node $2\r" >${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
-echo -e "BBSNAME Terminal Tavern\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
+echo -e "BBSNAME PhotonBBS\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
 echo -e "BBSTYPE QBBS\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
 echo -e "COMPORT 1\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
 echo -e ";FOSSIL\r" >>${HOME}/.dosemu/drive_c/doors/lord/node$2.dat
