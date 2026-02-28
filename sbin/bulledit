@@ -28,7 +28,7 @@ eval {
   $sysinfo{'host'} = Sys::Hostname::hostname();
 };
 if ($@ || !$sysinfo{'host'}) {
-  chomp ($sysinfo{'host'}=`hostname`);
+  chomp ($sysinfo{'host'}=`hostname -f 2>/dev/null`);
 }
 
 require ($config{'home'}."/modules/pb-framework");
