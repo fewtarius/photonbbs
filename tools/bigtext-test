@@ -1,0 +1,1002 @@
+#!/usr/bin/perl
+# Tool: bigtext-test
+# Purpose: Standalone test harness for pb-bigtext module
+# Usage: perl tools/bigtext-test [--font=FONT] [--style=STYLE] [--text=TEXT] [--all]
+#
+# Tests the ANSI big text generator without needing a full BBS session.
+# Can verify rendering, character coverage, width calculations, and styles.
+
+use strict;
+use warnings;
+use FindBin qw($Bin);
+use Getopt::Long;
+use utf8;
+binmode(STDOUT, ':utf8');
+
+# ============================================================================
+# SIMULATE PHOTONBBS ENVIRONMENT
+# ============================================================================
+
+our $RST = "\e[0m";
+our $BLK = "\e[0;30m";
+our $RED = "\e[0;31m";
+our $GRN = "\e[0;32m";
+our $YLW = "\e[0;33m";
+our $BLU = "\e[0;34m";
+our $MAG = "\e[0;35m";
+our $CYN = "\e[0;36m";
+our $WHT = "\e[0;37m";
+our $BBK = "\e[1;30m";
+our $BRD = "\e[1;31m";
+our $BGN = "\e[1;32m";
+our $BYL = "\e[1;33m";
+our $BBL = "\e[1;34m";
+our $BMG = "\e[1;35m";
+our $BCN = "\e[1;36m";
+our $BWH = "\e[1;37m";
+
+our %config = (
+  'terminal_width' => 80,
+  'themecolor'     => $BCN,
+  'usercolor'      => $BWH,
+  'systemcolor'    => $BGN,
+  'datacolor'      => $YLW,
+  'errorcolor'     => $BRD,
+  'promptcolor'    => $BYL,
+  'inputcolor'     => $WHT,
+  'linecolor'      => $CYN,
+);
+
+sub boxchar {
+  my ($type) = @_;
+  my %chars = (
+    'horizontal'   => chr(196),
+    'vertical'     => chr(179),
+    'topleft'      => chr(218),
+    'topright'     => chr(191),
+    'bottomleft'   => chr(192),
+    'bottomright'  => chr(217),
+    'dhorizontal'  => chr(205),
+    'dvertical'    => chr(186),
+    'dtopleft'     => chr(201),
+    'dtopright'    => chr(187),
+    'dbottomleft'  => chr(200),
+    'dbottomright' => chr(188),
+  );
+  return $chars{$type} // ' ';
+}
+
+sub writeline {
+  my ($text, $newline) = @_;
+  print $text;
+  print "\n" if $newline;
+}
+
+*main::writeline = \&writeline;
+
+# ============================================================================
+# LOAD THE MODULE
+# ============================================================================
+my $module_path = "$Bin/../modules/pb-bigtext";
+die "Cannot find pb-bigtext module at: $module_path\n" unless -f $module_path;
+require $module_path;
+
+# ============================================================================
+# TEST FRAMEWORK
+# ============================================================================
+my $tests_run = 0;
+my $tests_passed = 0;
+my $tests_failed = 0;
+
+sub test_ok {
+  my ($name, $condition) = @_;
+  $tests_run++;
+  if ($condition) {
+    $tests_passed++;
+    print "${BGN}  PASS${RST} $name\n";
+  } else {
+    $tests_failed++;
+    print "${BRD}  FAIL${RST} $name\n";
+  }
+}
+
+sub test_header {
+  my ($name) = @_;
+  print "\n${BCN}" . ("=" x 70) . "${RST}\n";
+  print "${BWH}  $name${RST}\n";
+  print "${BCN}" . ("=" x 70) . "${RST}\n\n";
+}
+
+sub test_subheader {
+  my ($name) = @_;
+  print "\n${CYN}  --- $name ---${RST}\n\n";
+}
+
+# ============================================================================
+# COMMAND LINE OPTIONS
+# ============================================================================
+my $opt_font = '';
+my $opt_style = '';
+my $opt_text = '';
+my $opt_all = 0;
+my $opt_demo = 0;
+my $opt_chars = 0;
+my $opt_quiet = 0;
+my $opt_width = 80;
+my $opt_help = 0;
+
+GetOptions(
+  'font=s'  => \$opt_font,
+  'style=s' => \$opt_style,
+  'text=s'  => \$opt_text,
+  'all'     => \$opt_all,
+  'demo'    => \$opt_demo,
+  'chars'   => \$opt_chars,
+  'quiet'   => \$opt_quiet,
+  'width=i' => \$opt_width,
+  'help'    => \$opt_help,
+);
+
+if ($opt_help) {
+  print <<USAGE;
+${BWH}bigtext-test${RST} - Test harness for pb-bigtext ANSI text generator
+
+${BCN}Usage:${RST}
+  perl tools/bigtext-test              Run all tests
+  perl tools/bigtext-test --demo       Show all fonts/styles demo
+  perl tools/bigtext-test --chars      Show all available characters
+  perl tools/bigtext-test --all        Run tests + demo + chars
+  perl tools/bigtext-test --font=X     Use specific font (block, miniwi)
+  perl tools/bigtext-test --style=X    Demo specific style (block font only)
+  perl tools/bigtext-test --text="HI"  Render specific text
+  perl tools/bigtext-test --width=40   Test 40-column mode
+  perl tools/bigtext-test --quiet      Suppress demo output (tests only)
+
+${BCN}Fonts:${RST}  block (5-row CP437), miniwi (3-4 row Unicode)
+${BCN}Styles:${RST} block, shade, light, dots, half, hash, ascii, double, line
+         (styles apply to block font only; miniwi has its own rendering)
+
+${BCN}Examples:${RST}
+  perl tools/bigtext-test --text="PHOTON BBS" --font=miniwi
+  perl tools/bigtext-test --text="Hello World" --font=miniwi
+  perl tools/bigtext-test --text="HELLO" --style=shade
+  perl tools/bigtext-test --all
+USAGE
+  exit 0;
+}
+
+$config{'terminal_width'} = $opt_width;
+
+# ============================================================================
+# CUSTOM TEXT RENDERING (--text option)
+# ============================================================================
+if ($opt_text ne '') {
+  my $font = $opt_font || 'block';
+  my $style = $opt_style || 'block';
+  print "\n${BCN}Rendering: ${BWH}\"$opt_text\"${BCN} font=${BWH}$font${BCN}";
+  print " style=${BWH}$style${BCN}" if $font eq 'block';
+  print " width=${BWH}$config{'terminal_width'}${RST}\n\n";
+
+  my @lines = bigtext($opt_text, font => $font, style => $style, color => $config{'themecolor'}, center => 1);
+  for my $line (@lines) {
+    print "$line\n";
+  }
+
+  my $w = bigtext_width($opt_text, font => $font, style => $style);
+  my $fits = bigtext_fits($opt_text, font => $font, style => $style) ? "yes" : "NO - too wide!";
+  print "\n${CYN}Rendered width: ${BWH}$w${CYN} cols, fits in ${BWH}$config{'terminal_width'}${CYN}: ${BWH}$fits${RST}\n\n";
+
+  exit 0 unless $opt_all;
+}
+
+# ============================================================================
+# TEST SUITE
+# ============================================================================
+
+# ==========================================
+# BLOCK FONT TESTS
+# ==========================================
+
+test_header("TEST 1: Module Loading & API");
+
+test_ok("bigtext() exists", defined(&bigtext));
+test_ok("bigtext_write() exists", defined(&bigtext_write));
+test_ok("bigtext_string() exists", defined(&bigtext_string));
+test_ok("bigtext_width() exists", defined(&bigtext_width));
+test_ok("bigtext_fits() exists", defined(&bigtext_fits));
+test_ok("bigtext_fonts() exists", defined(&bigtext_fonts));
+test_ok("bigtext_styles() exists", defined(&bigtext_styles));
+test_ok("bigtext_chars() exists", defined(&bigtext_chars));
+
+test_header("TEST 2: Available Fonts & Styles");
+
+my @fonts = bigtext_fonts();
+test_ok("bigtext_fonts() returns list", scalar(@fonts) > 0);
+test_ok("'block' font available", grep { $_ eq 'block' } @fonts);
+test_ok("'miniwi' font available", grep { $_ eq 'miniwi' } @fonts);
+test_ok("'bloody' font available", grep { $_ eq 'bloody' } @fonts);
+test_ok("'dosrebel' font available", grep { $_ eq 'dosrebel' } @fonts);
+test_ok("'doom' font available", grep { $_ eq 'doom' } @fonts);
+print "  Fonts: " . join(", ", @fonts) . "\n";
+
+my @styles = bigtext_styles();
+test_ok("bigtext_styles() returns list", scalar(@styles) > 0);
+for my $s ('block', 'shade', 'light', 'dots', 'half', 'hash', 'ascii', 'double', 'line') {
+  test_ok("'$s' style available", grep { $_ eq $s } @styles);
+}
+print "  Styles: " . join(", ", @styles) . "\n";
+
+test_header("TEST 3: Block Font - Character Coverage");
+
+my @chars = bigtext_chars(font => 'block');
+my $char_count = scalar @chars;
+test_ok("Has A-Z letters (26)", scalar(grep { /^[A-Z]$/ } @chars) == 26);
+test_ok("Has 0-9 digits (10)", scalar(grep { /^[0-9]$/ } @chars) == 10);
+test_ok("Has space character", grep { $_ eq ' ' } @chars);
+test_ok("Has punctuation", grep({ $_ eq '!' } @chars) && grep({ $_ eq '?' } @chars));
+print "  Total block font chars: $char_count\n";
+
+test_header("TEST 4: Block Font - Basic Rendering");
+
+my @lines = bigtext("A");
+test_ok("Single char returns 5 rows", scalar(@lines) == 5);
+test_ok("Rows are non-empty", length($lines[0]) > 0);
+
+@lines = bigtext("AB");
+test_ok("Two chars returns 5 rows", scalar(@lines) == 5);
+test_ok("Two chars wider than one", length($lines[0]) > length((bigtext("A"))[0]));
+
+@lines = bigtext("HELLO WORLD");
+test_ok("Full phrase returns 5 rows", scalar(@lines) == 5);
+
+my @lower = bigtext("hello");
+my @upper = bigtext("HELLO");
+test_ok("Block font: lowercase auto-converts to uppercase", $lower[0] eq $upper[0]);
+
+test_header("TEST 5: Block Font - Row Consistency");
+
+for my $test_str ("ABCDEF", "HELLO WORLD", "0123456789", "A-B_C") {
+  @lines = bigtext($test_str);
+  my $first_len = length($lines[0]);
+  my $consistent = 1;
+  for my $row (1..4) {
+    $consistent = 0 if length($lines[$row]) != $first_len;
+  }
+  test_ok("\"$test_str\" - all 5 rows same length ($first_len)", $consistent);
+}
+
+test_header("TEST 6: Block Font - Per-Character Row Consistency");
+{
+  my @check_chars = bigtext_chars(font => 'block');
+  my $all_consistent = 1;
+  my @bad_chars;
+
+  for my $ch (@check_chars) {
+    my @ch_lines = bigtext($ch, style => 'ascii');
+    my $row0_len = length($ch_lines[0]);
+    for my $row (1..4) {
+      if (length($ch_lines[$row]) != $row0_len) {
+        $all_consistent = 0;
+        push @bad_chars, "'$ch' (row $row: " . length($ch_lines[$row]) . " vs row 0: $row0_len)";
+        last;
+      }
+    }
+  }
+
+  test_ok("All block font chars have consistent row widths", $all_consistent);
+  if (@bad_chars) {
+    print "  ${BRD}Inconsistent chars: " . join(", ", @bad_chars) . "${RST}\n";
+  }
+}
+
+test_header("TEST 7: Block Font - Style Differentiation");
+
+my $base_text = "AB";
+my %style_output;
+for my $style (bigtext_styles()) {
+  my @out = bigtext($base_text, style => $style);
+  $style_output{$style} = join('', @out);
+}
+test_ok("'block' differs from 'ascii'", $style_output{'block'} ne $style_output{'ascii'});
+test_ok("'shade' differs from 'block'", $style_output{'shade'} ne $style_output{'block'});
+test_ok("'dots' differs from 'shade'", $style_output{'dots'} ne $style_output{'shade'});
+test_ok("'double' differs from 'line'", $style_output{'double'} ne $style_output{'line'});
+test_ok("'ascii' same as 'hash'", $style_output{'ascii'} eq $style_output{'hash'});
+
+test_header("TEST 8: Color Support");
+
+my @colored = bigtext("HI", color => $BRD);
+test_ok("Color prefix applied", $colored[0] =~ /^\e\[1;31m/);
+test_ok("Color reset at end", $colored[0] =~ /\e\[0m$/);
+
+my @uncolored = bigtext("HI");
+test_ok("No color when not specified", $uncolored[0] !~ /^\e\[/);
+
+test_header("TEST 9: Centering");
+
+$config{'terminal_width'} = 80;
+my @centered = bigtext("HI", center => 1);
+my @left_align = bigtext("HI", center => 0);
+test_ok("Centered row starts with spaces", $centered[0] =~ /^ /);
+test_ok("Left-aligned does not pad", $left_align[0] !~ /^  /);
+
+test_header("TEST 10: Width Calculation");
+
+my $w = bigtext_width("A");
+test_ok("bigtext_width returns positive int", $w > 0);
+
+my $w2 = bigtext_width("AB");
+test_ok("Two chars wider than one ($w2 > $w)", $w2 > $w);
+
+my $w_colored = bigtext_width("AB", color => $RED);
+test_ok("Width ignores ANSI color codes", $w_colored == $w2);
+
+test_header("TEST 11: Fits Check");
+
+$config{'terminal_width'} = 80;
+test_ok("Short text fits in 80 cols", bigtext_fits("HI"));
+$config{'terminal_width'} = 20;
+test_ok("Long text doesn't fit in 20 cols", !bigtext_fits("HELLO WORLD"));
+$config{'terminal_width'} = $opt_width;
+
+test_header("TEST 12: Spacing & String Output");
+
+my @no_space = bigtext("AB", spacing => 0);
+my @with_space = bigtext("AB", spacing => 2);
+test_ok("Spacing makes output wider", length($with_space[0]) > length($no_space[0]));
+
+my $str = bigtext_string("HI");
+test_ok("bigtext_string returns string", defined($str) && length($str) > 0);
+my @str_lines = split(/\n/, $str);
+test_ok("String has 5 lines", scalar(@str_lines) == 5);
+
+test_header("TEST 13: 40-Column Mode (PETSCII Fallback)");
+
+$config{'terminal_width'} = 40;
+my @petscii = bigtext("A", style => 'block');
+test_ok("40-col mode returns 5 rows", scalar(@petscii) == 5);
+
+$config{'terminal_width'} = 80;
+my @cp437 = bigtext("A", style => 'block');
+$config{'terminal_width'} = 40;
+@petscii = bigtext("A", style => 'block');
+test_ok("PETSCII output differs from CP437", $petscii[0] ne $cp437[0]);
+$config{'terminal_width'} = $opt_width;
+
+test_header("TEST 14: Edge Cases");
+
+my @empty = bigtext("");
+test_ok("Empty string returns 5 rows", scalar(@empty) == 5);
+test_ok("Empty string rows are empty", $empty[0] eq '' && $empty[4] eq '');
+test_ok("All-spaces returns 5 rows", scalar(bigtext("   ")) == 5);
+test_ok("Single char works", scalar(bigtext("X")) == 5);
+
+# ==========================================
+# MINIWI FONT TESTS
+# ==========================================
+
+test_header("TEST 15: Miniwi Font - Character Coverage");
+
+my @mw_chars = bigtext_chars(font => 'miniwi');
+my $mw_count = scalar @mw_chars;
+my $mw_upper = scalar(grep { /^[A-Z]$/ } @mw_chars);
+my $mw_lower = scalar(grep { /^[a-z]$/ } @mw_chars);
+my $mw_digits = scalar(grep { /^[0-9]$/ } @mw_chars);
+test_ok("Miniwi has A-Z uppercase ($mw_upper)", $mw_upper == 26);
+test_ok("Miniwi has a-z lowercase ($mw_lower)", $mw_lower == 26);
+test_ok("Miniwi has 0-9 digits ($mw_digits)", $mw_digits == 10);
+test_ok("Miniwi has space", grep { $_ eq ' ' } @mw_chars);
+test_ok("Miniwi has punctuation (! . , : -)", 
+  grep({ $_ eq '!' } @mw_chars) &&
+  grep({ $_ eq '.' } @mw_chars) &&
+  grep({ $_ eq ',' } @mw_chars) &&
+  grep({ $_ eq ':' } @mw_chars) &&
+  grep({ $_ eq '-' } @mw_chars)
+);
+print "  Total miniwi chars: $mw_count\n";
+
+test_header("TEST 16: Miniwi Font - Basic Rendering");
+
+@lines = bigtext("A", font => 'miniwi');
+test_ok("Miniwi returns 4 rows", scalar(@lines) == 4);
+test_ok("Miniwi rows non-empty", length($lines[0]) > 0);
+
+@lines = bigtext("AB", font => 'miniwi');
+test_ok("Miniwi two chars returns 4 rows", scalar(@lines) == 4);
+
+@lines = bigtext("HELLO", font => 'miniwi');
+test_ok("Miniwi phrase returns 4 rows", scalar(@lines) == 4);
+test_ok("Miniwi phrase has content", length($lines[0]) > 5);
+
+test_header("TEST 17: Miniwi Font - Case Handling");
+
+my @mw_upper_out = bigtext("HELLO", font => 'miniwi');
+my @mw_lower_out = bigtext("hello", font => 'miniwi');
+test_ok("Miniwi preserves case (upper != lower)", $mw_upper_out[0] ne $mw_lower_out[0]);
+
+my @mw_mixed = bigtext("Hello", font => 'miniwi');
+test_ok("Miniwi handles mixed case", scalar(@mw_mixed) == 4);
+
+test_header("TEST 18: Miniwi Font - Row Consistency");
+{
+  my @check = bigtext_chars(font => 'miniwi');
+  my $all_ok = 1;
+  my @bad;
+
+  for my $ch (@check) {
+    my @ch_lines = bigtext($ch, font => 'miniwi');
+    # All rows should have same visible width
+    my $row0_len = length($ch_lines[0]);
+    for my $row (1..3) {
+      if (length($ch_lines[$row]) != $row0_len) {
+        $all_ok = 0;
+        push @bad, "'$ch' (row $row: " . length($ch_lines[$row]) . " vs row 0: $row0_len)";
+        last;
+      }
+    }
+  }
+
+  test_ok("All miniwi chars have consistent row widths", $all_ok);
+  if (@bad) {
+    for my $b (@bad) {
+      print "  ${BRD}Inconsistent: $b${RST}\n";
+    }
+  }
+}
+
+test_header("TEST 19: Miniwi Font - Width & Centering");
+
+$config{'terminal_width'} = 80;
+my $mw_w = bigtext_width("HELLO", font => 'miniwi');
+test_ok("Miniwi width is positive ($mw_w)", $mw_w > 0);
+test_ok("Miniwi is more compact than block", $mw_w < bigtext_width("HELLO"));
+
+my @mw_centered = bigtext("HI", font => 'miniwi', center => 1);
+test_ok("Miniwi centering works", $mw_centered[0] =~ /^ /);
+
+my @mw_colored = bigtext("HI", font => 'miniwi', color => $BRD);
+test_ok("Miniwi color works", $mw_colored[0] =~ /^\e\[1;31m/);
+
+test_header("TEST 20: Miniwi Font - Edge Cases");
+
+my @mw_empty = bigtext("", font => 'miniwi');
+test_ok("Miniwi empty returns 4 rows", scalar(@mw_empty) == 4);
+
+# Unknown char falls back to space
+my @mw_unknown = bigtext("A\x01B", font => 'miniwi');
+test_ok("Miniwi unknown chars handled", scalar(@mw_unknown) == 4);
+
+# Numbers
+my @mw_nums = bigtext("0123456789", font => 'miniwi');
+test_ok("Miniwi renders all digits", scalar(@mw_nums) == 4 && length($mw_nums[0]) > 10);
+
+test_header("TEST 21: Miniwi Font - Descender Characters");
+# g, j, p, q, y have descenders (content in row 4)
+for my $ch ('g', 'j', 'p', 'q', 'y') {
+  my @out = bigtext($ch, font => 'miniwi');
+  my $has_desc = ($out[3] =~ /\S/);  # Row 4 has non-space content
+  test_ok("'$ch' has descender in row 4", $has_desc);
+}
+
+test_header("TEST 22: Miniwi Font - Ascender Characters");
+# b, d, f, h, i, j, k, l, t have ascenders (content in row 1)
+for my $ch ('b', 'd', 'f', 'h', 'i', 'j', 'k', 'l', 't') {
+  my @out = bigtext($ch, font => 'miniwi');
+  my $has_asc = ($out[0] =~ /\S/);  # Row 1 has non-space content
+  test_ok("'$ch' has ascender in row 1", $has_asc);
+}
+
+test_header("TEST 23: Miniwi vs Block - Font Differences");
+
+my @block_out = bigtext("PHOTON BBS", font => 'block');
+my @miniwi_out = bigtext("PHOTON BBS", font => 'miniwi');
+test_ok("Block font: 5 rows", scalar(@block_out) == 5);
+test_ok("Miniwi font: 4 rows", scalar(@miniwi_out) == 4);
+test_ok("Block wider than miniwi", length($block_out[0]) > length($miniwi_out[0]));
+
+# ==========================================
+# BLOODY FONT TESTS
+# ==========================================
+
+test_header("TEST 24: Bloody Font - Character Coverage");
+
+my @bl_chars = bigtext_chars(font => 'bloody');
+my $bl_count = scalar @bl_chars;
+my $bl_upper = scalar(grep { /^[A-Z]$/ } @bl_chars);
+test_ok("Bloody has A-Z uppercase ($bl_upper)", $bl_upper == 26);
+test_ok("Bloody has space", grep { $_ eq ' ' } @bl_chars);
+test_ok("Bloody has dash", grep { $_ eq '-' } @bl_chars);
+test_ok("Bloody has exclamation", grep { $_ eq '!' } @bl_chars);
+print "  Total bloody font chars: $bl_count\n";
+
+test_header("TEST 25: Bloody Font - Basic Rendering");
+
+my @bl_lines = bigtext("A", font => 'bloody');
+test_ok("Bloody returns 10 rows", scalar(@bl_lines) == 10);
+test_ok("Bloody rows non-empty", length($bl_lines[0]) > 0);
+
+@bl_lines = bigtext("AB", font => 'bloody');
+test_ok("Bloody two chars returns 10 rows", scalar(@bl_lines) == 10);
+
+@bl_lines = bigtext("HELLO", font => 'bloody');
+test_ok("Bloody phrase returns 10 rows", scalar(@bl_lines) == 10);
+test_ok("Bloody phrase has content", length($bl_lines[0]) > 20);
+
+test_header("TEST 26: Bloody Font - Case Handling");
+
+my @bl_lower = bigtext("hello", font => 'bloody');
+my @bl_upper_out = bigtext("HELLO", font => 'bloody');
+test_ok("Bloody auto-uppercases lowercase", $bl_lower[0] eq $bl_upper_out[0]);
+
+test_header("TEST 27: Bloody Font - Row Consistency");
+{
+  my @check = bigtext_chars(font => 'bloody');
+  my $all_ok = 1;
+  my @bad;
+
+  for my $ch (@check) {
+    my @ch_lines = bigtext($ch, font => 'bloody');
+    my $row0_len = length($ch_lines[0]);
+    for my $row (1..9) {
+      if (length($ch_lines[$row]) != $row0_len) {
+        $all_ok = 0;
+        push @bad, "'$ch' (row $row: " . length($ch_lines[$row]) . " vs row 0: $row0_len)";
+        last;
+      }
+    }
+  }
+
+  test_ok("All bloody chars have consistent row widths", $all_ok);
+  if (@bad) {
+    for my $b (@bad) {
+      print "  ${BRD}Inconsistent: $b${RST}\n";
+    }
+  }
+}
+
+test_header("TEST 28: Bloody Font - Width & Color");
+
+$config{'terminal_width'} = 80;
+my $bl_w = bigtext_width("HELLO", font => 'bloody');
+test_ok("Bloody width is positive ($bl_w)", $bl_w > 0);
+test_ok("Bloody wider than block", $bl_w > bigtext_width("HELLO"));
+
+my @bl_colored = bigtext("HI", font => 'bloody', color => $BRD);
+test_ok("Bloody color works", $bl_colored[0] =~ /^\e\[1;31m/);
+
+my @bl_centered = bigtext("HI", font => 'bloody', center => 1);
+test_ok("Bloody centering works", $bl_centered[0] =~ /^ /);
+
+test_header("TEST 29: Font Size Comparison");
+
+my $w_block = bigtext_width("PHOTON", font => 'block');
+my $w_miniwi = bigtext_width("PHOTON", font => 'miniwi');
+my $w_bloody = bigtext_width("PHOTON", font => 'bloody');
+my $w_dosrebel = bigtext_width("PHOTON", font => 'dosrebel');
+print "  Block:     ${BWH}${w_block}${RST} cols x ${BWH}5${RST} rows\n";
+print "  Miniwi:    ${BWH}${w_miniwi}${RST} cols x ${BWH}4${RST} rows\n";
+print "  Bloody:    ${BWH}${w_bloody}${RST} cols x ${BWH}10${RST} rows\n";
+print "  DOS Rebel: ${BWH}${w_dosrebel}${RST} cols x ${BWH}8${RST} rows\n";
+test_ok("Size ordering: miniwi < block < bloody", $w_miniwi < $w_block && $w_block < $w_bloody);
+
+# ==========================================
+# DOS REBEL FONT TESTS
+# ==========================================
+
+test_header("TEST 30: DOS Rebel Font - Character Coverage");
+
+my @dr_chars = bigtext_chars(font => 'dosrebel');
+my $dr_count = scalar @dr_chars;
+my $dr_upper = scalar(grep { /^[A-Z]$/ } @dr_chars);
+test_ok("DOS Rebel has A-Z uppercase ($dr_upper)", $dr_upper == 26);
+test_ok("DOS Rebel has space", grep { $_ eq ' ' } @dr_chars);
+print "  Total DOS Rebel chars: $dr_count\n";
+
+test_header("TEST 31: DOS Rebel Font - Basic Rendering");
+
+my @dr_lines = bigtext("A", font => 'dosrebel');
+test_ok("DOS Rebel returns 8 rows", scalar(@dr_lines) == 8);
+test_ok("DOS Rebel rows non-empty", length($dr_lines[0]) > 0);
+
+@dr_lines = bigtext("AB", font => 'dosrebel');
+test_ok("DOS Rebel two chars returns 8 rows", scalar(@dr_lines) == 8);
+
+@dr_lines = bigtext("HELLO", font => 'dosrebel');
+test_ok("DOS Rebel phrase returns 8 rows", scalar(@dr_lines) == 8);
+test_ok("DOS Rebel phrase has content", length($dr_lines[0]) > 20);
+
+test_header("TEST 32: DOS Rebel Font - Case Handling");
+
+my @dr_lower = bigtext("hello", font => 'dosrebel');
+my @dr_upper_out = bigtext("HELLO", font => 'dosrebel');
+test_ok("DOS Rebel auto-uppercases lowercase", $dr_lower[0] eq $dr_upper_out[0]);
+
+test_header("TEST 33: DOS Rebel Font - Row Consistency");
+{
+  my @check = bigtext_chars(font => 'dosrebel');
+  my $all_ok = 1;
+  my @bad;
+
+  for my $ch (@check) {
+    my @ch_lines = bigtext($ch, font => 'dosrebel');
+    my $row0_len = length($ch_lines[0]);
+    for my $row (1..7) {
+      if (length($ch_lines[$row]) != $row0_len) {
+        $all_ok = 0;
+        push @bad, "'$ch' (row $row: " . length($ch_lines[$row]) . " vs row 0: $row0_len)";
+        last;
+      }
+    }
+  }
+
+  test_ok("All DOS Rebel chars have consistent row widths", $all_ok);
+  if (@bad) {
+    for my $b (@bad) {
+      print "  ${BRD}Inconsistent: $b${RST}\n";
+    }
+  }
+}
+
+test_header("TEST 34: DOS Rebel Font - Width & Color");
+
+$config{'terminal_width'} = 80;
+my $dr_w = bigtext_width("HELLO", font => 'dosrebel');
+test_ok("DOS Rebel width is positive ($dr_w)", $dr_w > 0);
+test_ok("DOS Rebel wider than block", $dr_w > bigtext_width("HELLO"));
+
+my @dr_colored = bigtext("HI", font => 'dosrebel', color => $BCN);
+test_ok("DOS Rebel color works", $dr_colored[0] =~ /^\e\[1;36m/);
+
+my @dr_centered = bigtext("HI", font => 'dosrebel', center => 1);
+test_ok("DOS Rebel centering works", $dr_centered[0] =~ /^ /);
+
+test_header("TEST 35: DOS Rebel - Fits Check");
+
+test_ok("Short word fits in 80 cols", bigtext_fits("HI", font => 'dosrebel'));
+test_ok("Long word may not fit in 40 cols", !bigtext_fits("ABCDEFGHIJ", font => 'dosrebel', terminal_width => 40));
+
+# ==========================================
+# DOOM FONT TESTS
+# ==========================================
+
+test_header("TEST 36: Doom Font - Character Coverage");
+
+my @dm_chars = bigtext_chars(font => 'doom');
+my $dm_count = scalar @dm_chars;
+my $dm_upper = scalar(grep { /^[A-Z]$/ } @dm_chars);
+my $dm_lower = scalar(grep { /^[a-z]$/ } @dm_chars);
+test_ok("Doom has A-Z uppercase ($dm_upper)", $dm_upper == 26);
+test_ok("Doom has a-z lowercase ($dm_lower)", $dm_lower == 26);
+test_ok("Doom has space", grep { $_ eq ' ' } @dm_chars);
+test_ok("Doom has punctuation (! . -)", grep({ $_ eq '!' } @dm_chars) && grep({ $_ eq '.' } @dm_chars) && grep({ $_ eq '-' } @dm_chars));
+print "  Total Doom chars: $dm_count\n";
+
+test_header("TEST 37: Doom Font - Basic Rendering");
+
+my @dm_lines = bigtext("A", font => 'doom');
+test_ok("Doom returns 8 rows", scalar(@dm_lines) == 8);
+test_ok("Doom rows non-empty", length($dm_lines[0]) > 0);
+
+@dm_lines = bigtext("HELLO", font => 'doom');
+test_ok("Doom UC phrase returns 8 rows", scalar(@dm_lines) == 8);
+test_ok("Doom UC phrase has content", length($dm_lines[0]) > 20);
+
+@dm_lines = bigtext("hello", font => 'doom');
+test_ok("Doom LC phrase returns 8 rows", scalar(@dm_lines) == 8);
+test_ok("Doom LC phrase has content", length($dm_lines[2]) > 10);
+
+test_header("TEST 38: Doom Font - Mixed Case");
+
+my @dm_mixed = bigtext("Hello", font => 'doom');
+test_ok("Doom mixed case returns 8 rows", scalar(@dm_mixed) == 8);
+test_ok("Doom mixed case has content", length($dm_mixed[0]) > 5);
+my @dm_uc = bigtext("HELLO", font => 'doom');
+my @dm_lc = bigtext("hello", font => 'doom');
+test_ok("Doom preserves case (UC != LC)", $dm_uc[0] ne $dm_lc[0]);
+
+test_header("TEST 39: Doom Font - Row Consistency");
+{
+  my @check = bigtext_chars(font => 'doom');
+  my $all_ok = 1;
+  my @bad;
+
+  for my $ch (@check) {
+    my @ch_lines = bigtext($ch, font => 'doom');
+    my $row0_len = length($ch_lines[0]);
+    for my $row (1..7) {
+      if (length($ch_lines[$row]) != $row0_len) {
+        $all_ok = 0;
+        push @bad, "'$ch' (row $row: " . length($ch_lines[$row]) . " vs row 0: $row0_len)";
+        last;
+      }
+    }
+  }
+
+  test_ok("All Doom chars have consistent row widths", $all_ok);
+  if (@bad) {
+    for my $b (splice(@bad, 0, 5)) {
+      print "  ${BRD}Inconsistent: $b${RST}\n";
+    }
+  }
+}
+
+test_header("TEST 40: Doom Font - Width & Color");
+
+$config{'terminal_width'} = 80;
+my $dm_w = bigtext_width("HELLO", font => 'doom');
+test_ok("Doom width is positive ($dm_w)", $dm_w > 0);
+test_ok("Doom fits 80 cols for HELLO", bigtext_fits("HELLO", font => 'doom'));
+
+my @dm_colored = bigtext("HI", font => 'doom', color => $BGN);
+test_ok("Doom color works", $dm_colored[0] =~ /^\e\[1;32m/);
+
+my @dm_centered = bigtext("HI", font => 'doom', center => 1);
+test_ok("Doom centering works", $dm_centered[0] =~ /^ /);
+
+test_header("TEST 41: Doom Font - Descenders");
+
+my @dm_g = bigtext("g", font => 'doom');
+test_ok("Doom 'g' has descender in row 7", $dm_g[6] =~ /\S/ || $dm_g[7] =~ /\S/);
+
+my @dm_y = bigtext("y", font => 'doom');
+test_ok("Doom 'y' has descender in row 7", $dm_y[6] =~ /\S/ || $dm_y[7] =~ /\S/);
+
+test_header("TEST 42: All Fonts - Size Comparison");
+
+my %widths;
+my %heights = (block => 5, miniwi => 4, bloody => 10, dosrebel => 8, doom => 8);
+for my $font (bigtext_fonts()) {
+    $widths{$font} = bigtext_width("HELLO", font => $font);
+    my @lines = bigtext("A", font => $font);
+    printf "  %-10s ${BWH}%3d${RST} cols x ${BWH}%2d${RST} rows\n", "$font:", $widths{$font}, scalar(@lines);
+}
+test_ok("Miniwi is most compact", $widths{'miniwi'} < $widths{'block'});
+test_ok("Doom is compact ASCII", $widths{'doom'} < $widths{'dosrebel'});
+
+# ============================================================================
+# TEST RESULTS SUMMARY
+# ============================================================================
+test_header("TEST RESULTS");
+
+my $color = ($tests_failed == 0) ? $BGN : $BRD;
+print "  ${BWH}Total:${RST}  $tests_run tests\n";
+print "  ${BGN}Passed:${RST} $tests_passed\n";
+print "  ${BRD}Failed:${RST} $tests_failed\n";
+print "\n  ${color}" . ($tests_failed == 0 ? "ALL TESTS PASSED" : "$tests_failed TEST(S) FAILED") . "${RST}\n\n";
+
+# ============================================================================
+# DEMO MODE
+# ============================================================================
+if ($opt_demo || $opt_all) {
+  test_header("BLOCK FONT - STYLE DEMO");
+
+  my $demo_text = "PHOTON";
+  my @demo_styles = ($opt_style ne '' && $opt_font ne 'miniwi') ? ($opt_style) : bigtext_styles();
+
+  unless ($opt_font eq 'miniwi') {
+    for my $style (@demo_styles) {
+      test_subheader("Block Style: $style");
+      my @out = bigtext($demo_text, style => $style, color => $config{'themecolor'}, center => 1);
+      for my $line (@out) { print "$line\n"; }
+      print "\n";
+    }
+  }
+
+  test_header("MINIWI FONT DEMO");
+
+  test_subheader("Uppercase: PHOTON BBS");
+  {
+    my @out = bigtext("PHOTON BBS", font => 'miniwi', color => $config{'themecolor'}, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("Lowercase: photon bbs");
+  {
+    my @out = bigtext("photon bbs", font => 'miniwi', color => $config{'usercolor'}, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("Mixed Case: Hello World");
+  {
+    my @out = bigtext("Hello World", font => 'miniwi', color => $config{'systemcolor'}, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("Numbers: 0123456789");
+  {
+    my @out = bigtext("0123456789", font => 'miniwi', color => $config{'promptcolor'}, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("Descenders: gjpqy");
+  {
+    my @out = bigtext("gjpqy", font => 'miniwi', color => $config{'errorcolor'}, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  # Color demo
+  test_subheader("Color Demo (Miniwi)");
+  my @colors = (
+    [$BRD, "Red"],   [$BGN, "Green"],  [$BYL, "Yellow"],
+    [$BBL, "Blue"],  [$BMG, "Magenta"], [$BCN, "Cyan"],
+  );
+  for my $c (@colors) {
+    print "  ${BWH}$c->[1]:${RST} ";
+    my @out = bigtext("BBS", font => 'miniwi', color => $c->[0]);
+    print $out[0] . "  " . $out[1] . "  " . $out[2] . "  " . $out[3] . "\n";
+  }
+  print "\n";
+
+  # Side-by-side comparison
+  test_subheader("Block vs Miniwi vs Bloody Comparison");
+  print "  ${BWH}Block font (5 rows):${RST}\n";
+  {
+    my @out = bigtext("HELLO", style => 'block', color => $config{'themecolor'}, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n  ${BWH}Miniwi font (4 rows):${RST}\n";
+  {
+    my @out = bigtext("HELLO", font => 'miniwi', color => $config{'themecolor'}, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_header("BLOODY FONT DEMO");
+
+  test_subheader("PHOTON");
+  {
+    my @out = bigtext("PHOTON", font => 'bloody', color => $BRD, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("HELLO");
+  {
+    my @out = bigtext("HELLO", font => 'bloody', color => $BMG, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("BBS");
+  {
+    my @out = bigtext("BBS", font => 'bloody', color => $BRD, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_header("DOS REBEL FONT DEMO");
+
+  test_subheader("PHOTON");
+  {
+    my @out = bigtext("PHOTON", font => 'dosrebel', color => $BCN, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("HELLO");
+  {
+    my @out = bigtext("HELLO", font => 'dosrebel', color => $BWH, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("BBS");
+  {
+    my @out = bigtext("BBS", font => 'dosrebel', color => $BGN, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_header("DOOM FONT DEMO");
+
+  test_subheader("DOOM (uppercase)");
+  {
+    my @out = bigtext("DOOM", font => 'doom', color => $BRD, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("Hello World (mixed case)");
+  {
+    my @out = bigtext("Hello World", font => 'doom', color => $BGN, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+
+  test_subheader("Terminal Tavern");
+  {
+    my @out = bigtext("Terminal Tavern", font => 'doom', color => $BCN, center => 1);
+    for my $line (@out) { print "$line\n"; }
+  }
+  print "\n";
+}
+
+# ============================================================================
+# CHARACTER CHART
+# ============================================================================
+if ($opt_chars || $opt_all) {
+  unless ($opt_font eq 'miniwi') {
+    test_header("BLOCK FONT CHARACTER CHART");
+
+    my $style = $opt_style || 'block';
+    my @all_chars = bigtext_chars(font => 'block');
+
+    my @groups = (
+      ["Letters A-M", [grep { /^[A-M]$/ } @all_chars]],
+      ["Letters N-Z", [grep { /^[N-Z]$/ } @all_chars]],
+      ["Numbers 0-9", [grep { /^[0-9]$/ } @all_chars]],
+      ["Symbols",     [grep { /^[^A-Z0-9 ]$/ } @all_chars]],
+    );
+
+    for my $group (@groups) {
+      test_subheader("$group->[0] (style: $style)");
+      my @chunk;
+      my $chunk_width = 0;
+
+      for my $ch (@{$group->[1]}) {
+        my $ch_width = bigtext_width($ch, style => $style);
+        if ($chunk_width + $ch_width > $config{'terminal_width'} - 2) {
+          if (@chunk) {
+            my @out = bigtext(join('', @chunk), style => $style, color => $config{'themecolor'});
+            for my $line (@out) { print "$line\n"; }
+            print "\n";
+          }
+          @chunk = ();
+          $chunk_width = 0;
+        }
+        push @chunk, $ch;
+        $chunk_width += $ch_width;
+      }
+      if (@chunk) {
+        my @out = bigtext(join('', @chunk), style => $style, color => $config{'themecolor'});
+        for my $line (@out) { print "$line\n"; }
+        print "\n";
+      }
+    }
+  }
+
+  test_header("MINIWI FONT CHARACTER CHART");
+
+  my @mw_groups = (
+    ["Uppercase A-Z", [('A'..'Z')]],
+    ["Lowercase a-z", [('a'..'z')]],
+    ["Numbers 0-9",   [('0'..'9')]],
+  );
+
+  for my $group (@mw_groups) {
+    test_subheader($group->[0]);
+    # Render in chunks that fit
+    my @chunk;
+    my $chunk_width = 0;
+
+    for my $ch (@{$group->[1]}) {
+      my $ch_width = bigtext_width($ch, font => 'miniwi');
+      if ($chunk_width + $ch_width > $config{'terminal_width'} - 2) {
+        if (@chunk) {
+          my @out = bigtext(join('', @chunk), font => 'miniwi', color => $config{'themecolor'});
+          for my $line (@out) { print "$line\n"; }
+          print "\n";
+        }
+        @chunk = ();
+        $chunk_width = 0;
+      }
+      push @chunk, $ch;
+      $chunk_width += $ch_width;
+    }
+    if (@chunk) {
+      my @out = bigtext(join('', @chunk), font => 'miniwi', color => $config{'themecolor'});
+      for my $line (@out) { print "$line\n"; }
+      print "\n";
+    }
+  }
+}
+
+# ============================================================================
+# EXIT
+# ============================================================================
+exit($tests_failed > 0 ? 1 : 0);

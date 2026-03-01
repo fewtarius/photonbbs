@@ -1,0 +1,271 @@
+#!/usr/bin/perl
+#
+# bigtext-generator - Standalone ASCII/ANSI big text generator for PhotonBBS
+#
+# Generates big text banners that can be used in BBS text files, welcome
+# screens, headers, and other displays. Output uses PhotonBBS @CODE tokens
+# for color so generated files work with any theme.
+#
+# Usage:
+#   tools/bigtext-generator "TEXT" [options]
+#
+# Options:
+#   --font=NAME       Font to use (block, miniwi, bloody, dosrebel, doom)
+#   --style=NAME      Style variant for block font (block, shade, light, dots, etc.)
+#   --color=CODE      Color @code to apply (e.g., @BCN, @BRD, @BWH, @THEMECLR)
+#   --center          Center output for 80-column terminal
+#   --width=N         Terminal width for centering (default: 80)
+#   --spacing=N       Extra spacing between characters (default: 0)
+#   --raw             Output raw text without @CODE tokens
+#   --preview         Show ANSI-colored preview on terminal
+#   --list-fonts      List available fonts
+#   --list-styles     List available styles (block font only)
+#   --list-chars      List available characters for a font
+#   --help            Show this help
+#
+# Examples:
+#   # Generate a centered PhotonBBS header in doom font
+#   tools/bigtext-generator "PhotonBBS" --font=doom --color=@BCN --center
+#
+#   # Preview big text with ANSI color
+#   tools/bigtext-generator "HELLO" --font=dosrebel --preview --color=@BRD
+#
+#   # Generate for a text file (uses @CODE tokens)
+#   tools/bigtext-generator "Welcome" --font=doom --color=@THEMECLR > data/text/header.txt
+#
+#   # Compact banner for narrow terminals
+#   tools/bigtext-generator "BBS" --font=miniwi --center --width=40
+#
+#   # Block font with shade style
+#   tools/bigtext-generator "HELLO" --font=block --style=shade
+#
+
+use utf8;
+use open ':std', ':encoding(UTF-8)';
+use Getopt::Long;
+use File::Basename;
+use Cwd 'abs_path';
+
+# Find and load pb-bigtext module
+my $script_dir = dirname(abs_path($0));
+my $base_dir = dirname($script_dir);  # Parent of tools/
+my $module_path = "$base_dir/modules/pb-bigtext";
+
+unless (-e $module_path) {
+    die "Error: Cannot find modules/pb-bigtext at $module_path\n" .
+        "Run this tool from the PhotonBBS directory.\n";
+}
+
+# Set up minimal environment for pb-bigtext
+our $RST = "\e[0m";
+our %config = (
+    'terminal_width' => 80,
+    'themecolor'     => "\e[1;34m",
+    'datacolor'      => "\e[1;37m",
+    'usercolor'      => "\e[1;37m",
+    'systemcolor'    => "\e[0;37m",
+    'errorcolor'     => "\e[0;31m",
+    'promptcolor'    => "\e[0;37m",
+    'inputcolor'     => "\e[0;37m",
+    'linecolor'      => "\e[0;34m",
+);
+
+# Stub for boxchar (not needed for bigtext but module may reference it)
+sub boxchar { return ' '; }
+
+require $module_path;
+
+# Parse command line
+my ($opt_font, $opt_style, $opt_color, $opt_center, $opt_width);
+my ($opt_spacing, $opt_raw, $opt_preview, $opt_list_fonts, $opt_list_styles);
+my ($opt_list_chars, $opt_help);
+
+GetOptions(
+    'font=s'       => \$opt_font,
+    'style=s'      => \$opt_style,
+    'color=s'      => \$opt_color,
+    'center'       => \$opt_center,
+    'width=i'      => \$opt_width,
+    'spacing=i'    => \$opt_spacing,
+    'raw'          => \$opt_raw,
+    'preview'      => \$opt_preview,
+    'list-fonts'   => \$opt_list_fonts,
+    'list-styles'  => \$opt_list_styles,
+    'list-chars'   => \$opt_list_chars,
+    'help'         => \$opt_help,
+) or die "Error in arguments. Use --help for usage.\n";
+
+$opt_font //= 'block';
+$opt_style //= 'block';
+$opt_width //= 80;
+$opt_spacing //= 0;
+
+$config{'terminal_width'} = $opt_width;
+
+# ANSI color code map for preview mode
+my %ansi_colors = (
+    '@RST' => "\e[0m",   '@BLK' => "\e[0;30m", '@RED' => "\e[0;31m",
+    '@GRN' => "\e[0;32m", '@YLW' => "\e[0;33m", '@BLU' => "\e[0;34m",
+    '@MAG' => "\e[0;35m", '@CYN' => "\e[0;36m", '@WHT' => "\e[0;37m",
+    '@BBK' => "\e[1;30m", '@BRD' => "\e[1;31m", '@BGN' => "\e[1;32m",
+    '@BYL' => "\e[1;33m", '@BBL' => "\e[1;34m", '@BMG' => "\e[1;35m",
+    '@BCN' => "\e[1;36m", '@BWH' => "\e[1;37m",
+    # Theme codes resolve to theme defaults in preview
+    '@THEMECLR'  => "\e[1;34m",  '@SYSTEMCLR' => "\e[0;37m",
+    '@USERCLR'   => "\e[1;37m",  '@DATACLR'   => "\e[1;37m",
+    '@ERRORCLR'  => "\e[0;31m",  '@PROMPTCLR' => "\e[0;37m",
+    '@INPUTCLR'  => "\e[0;37m",  '@LINECLR'   => "\e[0;34m",
+);
+
+if ($opt_help) {
+    print <<'HELP';
+bigtext-generator - ASCII/ANSI big text generator for PhotonBBS
+
+Usage: tools/bigtext-generator "TEXT" [options]
+
+Options:
+  --font=NAME       Font: block, miniwi, bloody, dosrebel, doom (default: block)
+  --style=NAME      Block font style: block, shade, light, dots, half, hash,
+                    ascii, double, line (default: block)
+  --color=CODE      Color code: @BCN, @BRD, @BWH, @THEMECLR, etc.
+  --center          Center output for terminal width
+  --width=N         Terminal width for centering (default: 80)
+  --spacing=N       Extra character spacing (default: 0)
+  --raw             Output plain text without @CODE tokens
+  --preview         Show ANSI-colored preview on terminal
+  --list-fonts      List available fonts with details
+  --list-styles     List block font style variants
+  --list-chars      List characters available in chosen font
+  --help            Show this help
+
+Font Summary:
+  block     5 rows, 64 chars, A-Z 0-9 symbols, 9 style variants
+  miniwi    4 rows, 68 chars, mixed case, very compact (Unicode)
+  bloody   10 rows, 29 chars, A-Z only, dramatic (Unicode)
+  dosrebel  8 rows, 27 chars, A-Z only, bold blocks (Unicode)
+  doom      8 rows, 57 chars, mixed case, classic ASCII art
+
+Examples:
+  tools/bigtext-generator "PhotonBBS" --font=doom --color=@BCN --center
+  tools/bigtext-generator "HELLO" --preview --font=dosrebel --color=@BRD
+  tools/bigtext-generator "Welcome" --font=doom --color=@THEMECLR > header.txt
+  tools/bigtext-generator "BBS" --font=miniwi --center --width=40
+  tools/bigtext-generator "MENU" --font=block --style=shade
+HELP
+    exit 0;
+}
+
+if ($opt_list_fonts) {
+    print "Available fonts:\n\n";
+    my @fonts = bigtext_fonts();
+    my %info = (
+        'block'    => ['5 rows', '64 chars', 'A-Z, 0-9, symbols', 'CP437 blocks, 9 style variants'],
+        'miniwi'   => ['4 rows', '68 chars', 'Mixed case A-Za-z, 0-9', 'Unicode quadrant blocks'],
+        'bloody'   => ['10 rows', '29 chars', 'A-Z only', 'Unicode shade gradients'],
+        'dosrebel' => ['8 rows', '27 chars', 'A-Z only', 'Unicode full/shade blocks'],
+        'doom'     => ['8 rows', '57 chars', 'Mixed case A-Za-z, punct', 'Pure ASCII art'],
+    );
+    for my $f (@fonts) {
+        my $i = $info{$f};
+        printf "  %-10s  %s, %s\n", $f, $i->[0], $i->[1];
+        printf "  %10s  Chars: %s\n", '', $i->[2];
+        printf "  %10s  Style: %s\n\n", '', $i->[3];
+    }
+    exit 0;
+}
+
+if ($opt_list_styles) {
+    print "Block font styles:\n\n";
+    my @styles = bigtext_styles();
+    my %desc = (
+        'block'  => 'Full blocks (CP437 219)',
+        'shade'  => 'Medium shade (CP437 177)',
+        'light'  => 'Light shade (CP437 176)',
+        'dots'   => 'Dotted pattern',
+        'half'   => 'Half blocks (upper/lower)',
+        'hash'   => 'Hash marks (#)',
+        'ascii'  => 'Hash marks (# alias)',
+        'double' => 'Double-line box drawing',
+        'line'   => 'Single-line box drawing',
+    );
+    for my $s (@styles) {
+        printf "  %-10s  %s\n", $s, $desc{$s} // '';
+    }
+    exit 0;
+}
+
+if ($opt_list_chars) {
+    my @chars = bigtext_chars(font => $opt_font);
+    printf "Characters in '%s' font (%d total):\n\n", $opt_font, scalar @chars;
+
+    my @upper = grep { /^[A-Z]$/ } @chars;
+    my @lower = grep { /^[a-z]$/ } @chars;
+    my @digits = grep { /^[0-9]$/ } @chars;
+    my @other = grep { /^[^A-Za-z0-9 ]$/ } @chars;
+    my $has_space = grep { $_ eq ' ' } @chars;
+
+    print "  Uppercase: " . join(' ', @upper) . "\n" if @upper;
+    print "  Lowercase: " . join(' ', @lower) . "\n" if @lower;
+    print "  Digits:    " . join(' ', @digits) . "\n" if @digits;
+    print "  Symbols:   " . join(' ', @other) . "\n" if @other;
+    print "  Space:     yes\n" if $has_space;
+    exit 0;
+}
+
+# Get the text to render
+my $text = join(' ', @ARGV);
+unless (length($text)) {
+    die "Error: No text specified. Usage: tools/bigtext-generator \"TEXT\" [options]\n" .
+        "Use --help for full usage information.\n";
+}
+
+# Check if text fits
+unless (bigtext_fits($text, font => $opt_font, style => $opt_style,
+                     spacing => $opt_spacing, terminal_width => $opt_width)) {
+    my $w = bigtext_width($text, font => $opt_font, style => $opt_style,
+                          spacing => $opt_spacing);
+    warn "Warning: Text is $w cols wide, exceeds terminal width of $opt_width.\n";
+    warn "  Try a more compact font (miniwi), shorter text, or wider terminal (--width=N).\n";
+}
+
+# Build options
+my %bt_opts = (font => $opt_font, style => $opt_style, spacing => $opt_spacing);
+$bt_opts{'center'} = 1 if $opt_center;
+
+# Render
+my @lines = bigtext($text, %bt_opts);
+
+# Output
+if ($opt_preview) {
+    # Preview mode: convert @CODE to ANSI and display
+    my $ansi_color = '';
+    if ($opt_color && exists $ansi_colors{$opt_color}) {
+        $ansi_color = $ansi_colors{$opt_color};
+    } elsif ($opt_color) {
+        # Try to interpret as raw color
+        $ansi_color = $opt_color;
+    }
+
+    for my $line (@lines) {
+        print $ansi_color . $line . "\e[0m\n";
+    }
+    print "\n";
+    my $w = bigtext_width($text, font => $opt_font, style => $opt_style,
+                          spacing => $opt_spacing);
+    print "\e[0;36mFont: \e[1;37m$opt_font\e[0;36m  Width: \e[1;37m$w\e[0;36m cols" .
+          "  Fits $opt_width: \e[1;37m" . ($w <= $opt_width ? "yes" : "NO") . "\e[0m\n";
+} elsif ($opt_raw) {
+    # Raw mode: no @CODE tokens
+    for my $line (@lines) {
+        print "$line\n";
+    }
+} else {
+    # Default: output with @CODE color tokens for use in BBS text files
+    for my $line (@lines) {
+        if ($opt_color) {
+            print "$opt_color$line\@RST\n";
+        } else {
+            print "$line\n";
+        }
+    }
+}
