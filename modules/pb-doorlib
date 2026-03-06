@@ -1,0 +1,590 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door Library
+# Shared framework for native Perl door games
+#
+# Provides standardized APIs for:
+#   - Game I/O (wrapping main:: functions)
+#   - Persistent data storage (Storable-based, per-door)
+#   - Credits system (shared across doors, persisted in user data)
+#   - High score tracking
+#   - Turn/session management
+#   - Activity feed integration
+#
+
+use Storable qw(store retrieve lock_store lock_retrieve);
+use Fcntl qw(:flock);
+
+# ============================================================================
+# DOOR DATA PATHS
+# ============================================================================
+
+# Get base data directory for a door
+sub door_data_dir {
+  my ($doorname) = @_;
+  my $dir = "$config{'home'}$config{'data'}/doors/$doorname";
+  unless (-d $dir) {
+    mkdir "$config{'home'}$config{'data'}/doors" unless -d "$config{'home'}$config{'data'}/doors";
+    mkdir $dir;
+  }
+  return $dir;
+}
+
+# Per-user save file for a door
+sub door_user_file {
+  my ($doorname, $handle) = @_;
+  $handle //= $info{'handle'};
+  # Sanitize handle for filesystem
+  my $safe = lc($handle);
+  $safe =~ s/[^a-z0-9_-]/_/g;
+  return door_data_dir($doorname) . "/$safe.dat";
+}
+
+# Shared data file for a door (scores, world state, etc.)
+sub door_shared_file {
+  my ($doorname, $filename) = @_;
+  return door_data_dir($doorname) . "/$filename";
+}
+
+# ============================================================================
+# PERSISTENT DATA - Per-user game saves
+# ============================================================================
+
+# Save per-user game state
+sub door_save {
+  my ($doorname, $data, $handle) = @_;
+  my $file = door_user_file($doorname, $handle);
+  eval { lock_store($data, $file); };
+  if ($@) {
+    door_debug($doorname, "Save failed: $@");
+    return 0;
+  }
+  return 1;
+}
+
+# Load per-user game state (returns undef if no save)
+sub door_load {
+  my ($doorname, $handle) = @_;
+  my $file = door_user_file($doorname, $handle);
+  return undef unless -e $file;
+  my $data;
+  eval { $data = lock_retrieve($file); };
+  if ($@) {
+    door_debug($doorname, "Load failed: $@");
+    return undef;
+  }
+  return $data;
+}
+
+# Delete per-user game state
+sub door_delete_save {
+  my ($doorname, $handle) = @_;
+  my $file = door_user_file($doorname, $handle);
+  unlink $file if -e $file;
+}
+
+# Save shared game data (world state, etc.)
+sub door_save_shared {
+  my ($doorname, $filename, $data) = @_;
+  my $file = door_shared_file($doorname, $filename);
+  eval { lock_store($data, $file); };
+  return $@ ? 0 : 1;
+}
+
+# Load shared game data
+sub door_load_shared {
+  my ($doorname, $filename) = @_;
+  my $file = door_shared_file($doorname, $filename);
+  return undef unless -e $file;
+  my $data;
+  eval { $data = lock_retrieve($file); };
+  return $@ ? undef : $data;
+}
+
+# ============================================================================
+# CREDITS SYSTEM - Shared user credits across all doors
+# ============================================================================
+
+# Get user's current credit balance
+sub door_get_credits {
+  my ($handle) = @_;
+  $handle //= $info{'handle'};
+  # Credits stored in %info for current user, or load from file for others
+  if ($handle eq $info{'handle'}) {
+    return int($info{'credits'} // 0);
+  }
+  # Load another user's credits
+  my $uid = finduserid($handle);
+  return 0 if $uid eq "0";
+  my $ufile = "$config{'home'}$config{'data'}/users/$uid.dat";
+  return 0 unless -e $ufile;
+  lockfile($ufile);
+  open(my $fh, '<', $ufile);
+  my $credits = 0;
+  while (<$fh>) {
+    chomp;
+    if (/^credits=(.+)/) {
+      $credits = int($1);
+      last;
+    }
+  }
+  close($fh);
+  unlockfile($ufile);
+  return $credits;
+}
+
+# Add credits to a user
+sub door_add_credits {
+  my ($amount, $handle) = @_;
+  $handle //= $info{'handle'};
+  if ($handle eq $info{'handle'}) {
+    $info{'credits'} = int($info{'credits'} // 0) + int($amount);
+    updateuser();
+    return $info{'credits'};
+  }
+  # For other users, load/modify/save
+  my $uid = finduserid($handle);
+  return 0 if $uid eq "0";
+  _modify_user_credits($uid, int($amount));
+}
+
+# Subtract credits from a user (returns 0 if insufficient)
+sub door_sub_credits {
+  my ($amount, $handle) = @_;
+  $handle //= $info{'handle'};
+  my $current = door_get_credits($handle);
+  if ($current < $amount) {
+    return 0;  # Insufficient funds
+  }
+  return door_add_credits(-$amount, $handle);
+}
+
+# Internal: modify credits in a user file
+sub _modify_user_credits {
+  my ($uid, $delta) = @_;
+  my $ufile = "$config{'home'}$config{'data'}/users/$uid.dat";
+  return 0 unless -e $ufile;
+  lockfile($ufile);
+  open(my $fh, '<', $ufile);
+  my @lines = <$fh>;
+  close($fh);
+  my $found = 0;
+  my $new_credits = 0;
+  for my $line (@lines) {
+    if ($line =~ /^credits=(.+)/) {
+      $new_credits = int($1) + $delta;
+      $new_credits = 0 if $new_credits < 0;
+      $line = "credits=$new_credits\n";
+      $found = 1;
+      last;
+    }
+  }
+  unless ($found) {
+    $new_credits = $delta > 0 ? $delta : 0;
+    push @lines, "credits=$new_credits\n";
+  }
+  open(my $out, '>', "$ufile.tmp.$$");
+  print $out @lines;
+  close($out);
+  rename("$ufile.tmp.$$", $ufile);
+  unlockfile($ufile);
+  return $new_credits;
+}
+
+# ============================================================================
+# HIGH SCORES
+# ============================================================================
+
+# Submit a high score
+sub door_submit_score {
+  my ($doorname, $score, $extra) = @_;
+  $extra //= {};
+  my $file = door_shared_file($doorname, "scores.dat");
+  my $scores = [];
+  if (-e $file) {
+    eval { $scores = lock_retrieve($file); };
+    $scores = [] if $@;
+  }
+  push @$scores, {
+    handle    => $info{'handle'},
+    score     => $score,
+    date      => get_current_date(),
+    timestamp => time(),
+    %$extra,
+  };
+  # Sort by score descending, keep top 20
+  @$scores = sort { $b->{score} <=> $a->{score} } @$scores;
+  splice(@$scores, 20) if @$scores > 20;
+  eval { lock_store($scores, $file); };
+  return $scores;
+}
+
+# Get high scores for a door
+sub door_get_scores {
+  my ($doorname, $limit) = @_;
+  $limit //= 10;
+  my $file = door_shared_file($doorname, "scores.dat");
+  return [] unless -e $file;
+  my $scores;
+  eval { $scores = lock_retrieve($file); };
+  return [] if $@;
+  my @top = @$scores[0 .. ($limit - 1 < $#$scores ? $limit - 1 : $#$scores)];
+  return \@top;
+}
+
+# Display high scores
+sub door_show_scores {
+  my ($doorname, $title, $score_label, $limit) = @_;
+  $title //= "High Scores";
+  $score_label //= "Score";
+  $limit //= 10;
+  my $scores = door_get_scores($doorname, $limit);
+
+  writeline("", 1);
+  writeline($config{'themecolor'} . " $title" . $RST, 1);
+  writeline($config{'linecolor'} . (" " . ("-" x 50)) . $RST, 1);
+
+  if (@$scores == 0) {
+    writeline($config{'systemcolor'} . "  No scores yet." . $RST, 1);
+  } else {
+    writeline($config{'systemcolor'} . sprintf("  %-4s %-20s %-12s %s", "#", "Player", $score_label, "Date") . $RST, 1);
+    my $rank = 1;
+    for my $entry (@$scores) {
+      my $color = ($entry->{handle} eq $info{'handle'}) ? $config{'usercolor'} : $config{'datacolor'};
+      writeline($color . sprintf("  %-4d %-20s %-12s %s",
+        $rank, substr($entry->{handle}, 0, 20),
+        _format_score($entry->{score}),
+        $entry->{date} // "") . $RST, 1);
+      $rank++;
+    }
+  }
+  writeline("", 1);
+}
+
+# Format a score for display (add commas, currency, etc.)
+sub _format_score {
+  my ($n) = @_;
+  # Add thousand separators
+  my $s = int($n);
+  1 while $s =~ s/^(-?\d+)(\d{3})/$1,$2/;
+  return $s;
+}
+
+# ============================================================================
+# DOOR I/O HELPERS
+# ============================================================================
+
+# Clear screen
+sub door_clear {
+  writeline($CLR, 0);
+}
+
+# Standard door header
+sub door_header {
+  my ($title) = @_;
+  door_clear();
+  writeline($config{'themecolor'} . " $title" . $RST, 1);
+  writeline($config{'linecolor'} . (" " . ("-" x 50)) . $RST, 1);
+  writeline("", 1);
+}
+
+# Pause (press any key)
+sub door_pause {
+  my ($msg) = @_;
+  $msg //= "Press any key to continue...";
+  writeline($config{'systemcolor'} . " $msg" . $RST);
+  waitkey("");
+  writeline("", 1);
+}
+
+# Yes/No prompt (default yes)
+sub door_yesno {
+  my ($prompt) = @_;
+  writeline($config{'promptcolor'} . " $prompt " . $config{'systemcolor'} . "[Y/n] " . $RST);
+  my $r = waitkey("Y");
+  writeline("", 1);
+  return ($r =~ /^[Yy]$/ || $r eq "\n" || $r eq "\r") ? 1 : 0;
+}
+
+# No/Yes prompt (default no)
+sub door_noyes {
+  my ($prompt) = @_;
+  writeline($config{'promptcolor'} . " $prompt " . $config{'systemcolor'} . "[y/N] " . $RST);
+  my $r = waitkey("N");
+  writeline("", 1);
+  return ($r =~ /^[Yy]$/) ? 1 : 0;
+}
+
+# Get a number from user (1..max)
+sub door_getnum {
+  my ($prompt, $max) = @_;
+  writeline($config{'promptcolor'} . " $prompt" . $RST . " ");
+  my $input = getline(text, length("$max") + 1, "", 1);
+  chomp $input;
+  $input =~ s/\D//g;
+  return 0 if $input eq "";
+  $input = int($input);
+  return ($input >= 1 && $input <= $max) ? $input : 0;
+}
+
+# Get amount (money input)
+sub door_getamount {
+  my ($prompt, $max) = @_;
+  writeline($config{'promptcolor'} . " $prompt" . $RST . " ");
+  my $input = getline(text, 12, "", 1);
+  chomp $input;
+  $input =~ s/[^\d]//g;
+  return 0 if $input eq "";
+  $input = int($input);
+  return ($max && $input > $max) ? $max : $input;
+}
+
+# Display a menu and get selection
+sub door_menu {
+  my ($items, $prompt) = @_;
+  $prompt //= "Your choice";
+  my $valid = "";
+  for my $item (@$items) {
+    my ($key, $label) = @$item;
+    writeline("  " . $config{'promptcolor'} . $key . $config{'themecolor'} . " ... " . $config{'usercolor'} . $label . $RST, 1);
+    $valid .= uc($key) . lc($key);
+  }
+  writeline("", 1);
+  writeline($config{'promptcolor'} . " $prompt: " . $RST);
+  my $choice = waitkey("");
+  writeline("", 1);
+  return uc($choice);
+}
+
+# Format money for display
+sub door_money {
+  my ($amount) = @_;
+  my $sign = $amount < 0 ? "-" : "";
+  $amount = abs(int($amount));
+  1 while $amount =~ s/^(-?\d+)(\d{3})/$1,$2/;
+  return $sign . "\$" . $amount;
+}
+
+# ============================================================================
+# TURN/SESSION MANAGEMENT
+# ============================================================================
+
+# Check/enforce daily play limits
+# Returns remaining turns, or 0 if limit reached
+sub door_check_turns {
+  my ($doorname, $max_per_day) = @_;
+  my $file = door_user_file($doorname);
+  my $data = door_load($doorname);
+  $data //= {};
+  my $today = get_current_date();
+  if (($data->{last_play_date} // '') ne $today) {
+    $data->{turns_today} = 0;
+    $data->{last_play_date} = $today;
+  }
+  my $remaining = $max_per_day - ($data->{turns_today} // 0);
+  return $remaining > 0 ? $remaining : 0;
+}
+
+# Record a turn used
+sub door_use_turn {
+  my ($doorname) = @_;
+  my $data = door_load($doorname);
+  $data //= {};
+  my $today = get_current_date();
+  if (($data->{last_play_date} // '') ne $today) {
+    $data->{turns_today} = 0;
+    $data->{last_play_date} = $today;
+  }
+  $data->{turns_today}++;
+  door_save($doorname, $data);
+}
+
+# ============================================================================
+# ACTIVITY FEED INTEGRATION
+# ============================================================================
+
+# Log a door event to the activity feed (if pb-activity is loaded)
+sub door_log_activity {
+  my ($doorname, $message, $extra) = @_;
+  eval {
+    log_activity(ACTIVITY_DOOR_SCORE, $message, $info{'handle'}, {
+      door => $doorname,
+      %{$extra // {}},
+    });
+  };
+  # Silently ignore if pb-activity not loaded
+}
+
+# ============================================================================
+# MULTIPLAYER SUPPORT
+# ============================================================================
+
+# Alias for door_log_activity (used by some games)
+sub door_post_activity {
+  my ($doorname, $message) = @_;
+  door_log_activity($doorname, $message);
+}
+
+# Broadcast a message to all online BBS users via page system
+sub door_broadcast {
+  my ($doorname, $message) = @_;
+  my $formatted = "\@DATACLR[\@USERCLR$doorname\@DATACLR] \@SYSTEMCLR$message";
+  eval {
+    # Use BBS pageall if available
+    if (defined &main::pageall) {
+      # Temporarily override handle for the broadcast source
+      my $saved = $info{'handle'};
+      $info{'handle'} = $doorname;
+      main::pageall($message);
+      $info{'handle'} = $saved;
+    } else {
+      # Fallback: write to all node page files directly
+      my @nodes = glob("$config{'home'}$config{'nodes'}/*");
+      for my $nf (@nodes) {
+        my $node = $nf;
+        $node =~ s/^.*\///;
+        my $pagefile = "$config{'home'}$config{'messages'}/$node.page";
+        eval {
+          lockfile($pagefile);
+          open(my $fh, '>>', $pagefile);
+          print $fh "\n\@DATACLR[\@USERCLR$doorname\@DATACLR] \@SYSTEMCLR$message\n";
+          close($fh);
+          unlockfile($pagefile);
+        };
+      }
+    }
+  };
+  door_log_activity($doorname, $message);
+}
+
+# Get list of currently online player handles
+sub door_get_online_players {
+  my @players;
+  my @nodefiles = glob("$config{'home'}$config{'nodes'}/*");
+  for my $nf (@nodefiles) {
+    eval {
+      open(my $fh, '<', $nf);
+      my $line = <$fh>;
+      close($fh);
+      chomp $line if $line;
+      # Node files contain handle or handle info
+      if ($line && $line =~ /\S/) {
+        push @players, $line;
+      }
+    };
+  }
+  return @players;
+}
+
+# Get list of all players who have save data for a door
+sub door_get_all_players {
+  my ($doorname) = @_;
+  my $dir = door_data_dir($doorname);
+  my @players;
+  if (opendir(my $dh, $dir)) {
+    for my $f (readdir($dh)) {
+      next unless $f =~ /^(.+)\.dat$/ && $f ne 'scores.dat' && $f !~ /^(universe|world|galaxy|shared)/;
+      my $name = $1;
+      $name =~ s/_/ /g;
+      push @players, $name;
+    }
+    closedir($dh);
+  }
+  return sort @players;
+}
+
+# Load another player's save data (for PvP attacks on sleeping players)
+sub door_load_player {
+  my ($doorname, $handle) = @_;
+  my $file = door_user_file($doorname, $handle);
+  return undef unless -e $file;
+  my $data;
+  eval { $data = lock_retrieve($file); };
+  return $@ ? undef : $data;
+}
+
+# Save another player's data (after PvP attack modifies it)
+sub door_save_player {
+  my ($doorname, $handle, $data) = @_;
+  my $file = door_user_file($doorname, $handle);
+  eval { lock_store($data, $file); };
+  return $@ ? 0 : 1;
+}
+
+# Send a message to a specific player (delivered on their next login/check)
+sub door_send_message {
+  my ($doorname, $target_handle, $message) = @_;
+  my $dir = door_data_dir($doorname);
+  my $msgfile = "$dir/messages.dat";
+  my $messages = [];
+  if (-e $msgfile) {
+    eval { $messages = lock_retrieve($msgfile); };
+    $messages = [] if $@;
+  }
+  push @$messages, {
+    from      => $info{'handle'},
+    to        => $target_handle,
+    message   => $message,
+    timestamp => time(),
+    read      => 0,
+  };
+  # Keep only last 100 messages
+  splice(@$messages, 0, @$messages - 100) if @$messages > 100;
+  eval { lock_store($messages, $msgfile); };
+}
+
+# Get unread messages for current player
+sub door_get_messages {
+  my ($doorname) = @_;
+  my $dir = door_data_dir($doorname);
+  my $msgfile = "$dir/messages.dat";
+  return [] unless -e $msgfile;
+  my $messages;
+  eval { $messages = lock_retrieve($msgfile); };
+  return [] if $@ || !$messages;
+  my @mine = grep { lc($_->{to}) eq lc($info{'handle'}) && !$_->{read} } @$messages;
+  return \@mine;
+}
+
+# Mark messages as read for current player
+sub door_mark_messages_read {
+  my ($doorname) = @_;
+  my $dir = door_data_dir($doorname);
+  my $msgfile = "$dir/messages.dat";
+  return unless -e $msgfile;
+  my $messages;
+  eval { $messages = lock_retrieve($msgfile); };
+  return if $@ || !$messages;
+  for my $m (@$messages) {
+    $m->{read} = 1 if lc($m->{to}) eq lc($info{'handle'});
+  }
+  eval { lock_store($messages, $msgfile); };
+}
+
+# Show unread messages to player
+sub door_show_messages {
+  my ($doorname) = @_;
+  my $msgs = door_get_messages($doorname);
+  return unless @$msgs;
+  writeline("", 1);
+  writeline($config{'themecolor'} . " You have " . scalar(@$msgs) . " message(s):" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  for my $m (@$msgs) {
+    my $when = localtime($m->{timestamp});
+    writeline($config{'usercolor'} . " From $m->{from}" . $config{'systemcolor'} . " ($when):" . $RST, 1);
+    writeline($config{'datacolor'} . "   $m->{message}" . $RST, 1);
+  }
+  writeline("", 1);
+  door_mark_messages_read($doorname);
+}
+
+# ============================================================================
+# DEBUG
+# ============================================================================
+
+sub door_debug {
+  my ($doorname, $msg) = @_;
+  logger("DOOR[$doorname]: $msg") if $config{'debug'};
+}
+
+1;

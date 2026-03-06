@@ -386,9 +386,57 @@ PhotonBBS supports scheduled execution of scripts in three directories:
 
 These scripts run with reduced privileges (as the "nobody" user).
 
-## BBS Door Support
+## Native Door Games
 
-PhotonBBS v1.5 and later provide support for BBS doors. The following drop file formats
+PhotonBBS includes 10 built-in door games written in native Perl. These games are integrated directly into the BBS - no external executables, DOS emulation, or drop files required.
+
+### Accessing Games
+
+Games are accessible two ways:
+- From **teleconference**: Type `/games` or `/doors`
+- From the **main menu**: Select any game by letter key
+
+### Game List
+
+| Key | Game | Description |
+|-----|------|-------------|
+| A | **PhotonMUD** | Multi-user dungeon with procedural world, D&D combat, magic system |
+| B | **Red Dragon** | Fantasy RPG - forest exploration, monster combat, 10 levels, dragon boss |
+| C | **Star Trader** | Space trading - sector navigation, commodities, ship upgrades, pirate combat |
+| D | **Casino** | Card and dice games - blackjack, video poker, craps, slots, roulette |
+| E | **Drug Lord** | Street empire - buy/sell across locations, 30-day campaign |
+| F | **Sea Battle** | Naval combat - ship placement, grid targeting, AI opponent |
+| G | **Star Trek** | Space exploration - 8x8 galaxy, phaser/torpedo combat, starbases |
+| H | **Big Catch** | Fishing simulation - 5 lakes, 7 lures, tackle shop, tournaments |
+| I | **Atlantis** | Underwater adventure - diving, sea creatures, artifacts, equipment upgrades |
+| J | **1000 Miles** | Racing card game - 2-4 players, 101-card deck, coup fourre |
+
+### Door Features
+
+All native door games share these features through the doorlib framework:
+
+- **Save/Load**: Game progress persists between sessions
+- **High Scores**: Per-game leaderboards visible to all players
+- **Credits System**: Earn credits from gameplay, spend across games
+- **Broadcasts**: Notable achievements announced to online users
+- **Turn Limits**: Configurable daily turn limits per game (optional)
+- **Activity Logging**: Game actions logged for operator review
+
+### Game Administration
+
+The **Door Game Editor** (`sbin/photonbbs-dooredit`) allows operators to:
+
+- Browse all players for any game
+- View and edit individual player saves
+- Reset player data
+- Manage shared game data (high scores, game state files)
+- Backup and restore game data
+
+Access from the main menu (requires sysop security level).
+
+## External Door Support
+
+PhotonBBS also supports external BBS doors via drop files. The following formats
 are supported:
 
   * DOOR.SYS
@@ -450,6 +498,7 @@ available to anyone with proper security. PhotonBBS ships with several utilities
 
     .USEREDIT  - BBS User editor
     .BULLEDIT  - BBS Bulletin editor
+    .DOOREDIT  - Door Game Data editor
     .DOS       - FreeDOS Shell
     .SHELL     - BASH Shell
 
@@ -459,8 +508,9 @@ PhotonBBS includes several administrative tools:
 
 1. **useredit** - User editor for managing accounts, security levels, etc.
 2. **bulledit** - Bulletin editor for managing system bulletins
-3. **newpass** - Password reset utility
-4. **procmon.pl** - Process monitoring utility
+3. **photonbbs-dooredit** - Door game data editor for managing player saves and scores
+4. **newpass** - Password reset utility
+5. **procmon.pl** - Process monitoring utility
 
 ## Security Considerations
 
@@ -502,8 +552,18 @@ PhotonBBS uses a modular architecture with core modules in `/opt/photonbbs/modul
 - pb-defaults - System configuration
 - pb-framework - Core BBS framework
 - pb-usertools - User management functions
-- pb-main - Main BBS functionality
-- pb-doors - Door game support
+- pb-main - Main BBS functionality and menu system
+- pb-doors - External door game support (drop files)
+- pb-doorlib - Native door game shared library (saves, scores, credits)
+- pb-door-reddragon - Red Dragon (fantasy RPG)
+- pb-door-startrader - Star Trader (space trading)
+- pb-door-casino - Casino (card and dice games)
+- pb-door-druglord - Drug Lord (street empire)
+- pb-door-seabattle - Sea Battle (naval combat)
+- pb-door-startrek - Star Trek (space exploration)
+- pb-door-bigcatch - Big Catch (fishing simulation)
+- pb-door-atlantis - Atlantis (underwater adventure)
+- pb-door-1000miles - 1000 Miles (racing card game)
 - pb-lastcallers - Last caller functionality
 - pb-oneliners - Oneliner wall functionality
 
@@ -515,7 +575,8 @@ PhotonBBS uses a modular architecture with core modules in `/opt/photonbbs/modul
 
 2. **Permission issues**: Ensure the data directory is owned by the BBS user with appropriate permissions.
 
-3. **Door games not working**: Check that the door scripts and symbolic links are correctly set up.
+3. **Native door games not loading**: Check `perl -c modules/pb-door-<game>` for syntax errors. Ensure `pb-doorlib` is present and `photonbbs-client` has the require line.
+4. **External door games not working**: Check that the door scripts and symbolic links are correctly set up.
 
 4. **Stale sessions**: If users get stuck, the maintenance script will clean them up after the configured timeout (default: 30 minutes).
 

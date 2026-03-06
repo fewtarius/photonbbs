@@ -1,0 +1,1249 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: Red Dragon - A Fantasy RPG
+# Inspired by Legend of the Red Dragon (Seth Robinson, 1989)
+# A fantasy RPG door game for PhotonBBS
+#
+# Explore the forest, battle monsters, visit the town,
+# train to gain levels, and ultimately defeat the Red Dragon.
+#
+
+# ============================================================================
+# GAME CONSTANTS
+# ============================================================================
+
+my $DOOR_NAME    = "reddragon";
+my $MAX_LEVEL    = 12;
+my $FOREST_FIGHTS= 50;   # Per day
+my $PVP_FIGHTS   = 5;    # Per day
+my $DAILY_RESET  = 86400; # Seconds in a day
+
+# Level progression table: HP, STR, DEF, gold_needed, exp_needed, title
+my @LEVELS = (
+  { hp =>  20, str =>  5, def =>  2, gold =>      0, exp =>       0, title => "Peasant" },
+  { hp =>  40, str => 10, def =>  5, gold =>    200, exp =>     100, title => "Squire" },
+  { hp =>  70, str => 17, def =>  9, gold =>    600, exp =>     400, title => "Fighter" },
+  { hp => 110, str => 25, def => 14, gold =>   1500, exp =>    1000, title => "Soldier" },
+  { hp => 160, str => 35, def => 20, gold =>   4000, exp =>    2500, title => "Warrior" },
+  { hp => 220, str => 48, def => 28, gold =>  10000, exp =>    6000, title => "Knight" },
+  { hp => 300, str => 63, def => 38, gold =>  25000, exp =>   14000, title => "Champion" },
+  { hp => 400, str => 80, def => 50, gold =>  60000, exp =>   30000, title => "Hero" },
+  { hp => 520, str =>100, def => 65, gold => 140000, exp =>   65000, title => "Master" },
+  { hp => 660, str =>125, def => 82, gold => 320000, exp =>  140000, title => "Legend" },
+  { hp => 820, str =>155, def =>102, gold => 700000, exp =>  300000, title => "Dragon Slayer" },
+  { hp =>1000, str =>190, def =>125, gold =>1500000, exp =>  650000, title => "Immortal" },
+);
+
+# Weapons for purchase
+my @WEAPONS = (
+  { name => "Stick",             str =>   1, price =>       0 },
+  { name => "Dagger",            str =>   5, price =>     200 },
+  { name => "Short Sword",       str =>  10, price =>    1000 },
+  { name => "Long Sword",        str =>  18, price =>    3000 },
+  { name => "Huge Axe",          str =>  28, price =>   10000 },
+  { name => "Bone Cruncher",     str =>  40, price =>   30000 },
+  { name => "Twin Swords",       str =>  55, price =>  100000 },
+  { name => "Power Axe",         str =>  75, price =>  150000 },
+  { name => "Able's Sword",      str => 100, price =>  200000 },
+  { name => "Wan's Weapon",      str => 150, price =>  400000 },
+  { name => "Spear of Gold",     str => 200, price =>  800000 },
+  { name => "Crystal Shard",     str => 250, price => 1500000 },
+  { name => "Nira's Teeth",      str => 300, price => 4000000 },
+);
+
+# Armor for purchase
+my @ARMORS = (
+  { name => "Coat",              def =>   1, price =>       0 },
+  { name => "Leather Vest",      def =>   4, price =>     200 },
+  { name => "Bronze Armor",      def =>   8, price =>    1000 },
+  { name => "Iron Armor",        def =>  14, price =>    3000 },
+  { name => "Graphite Armor",    def =>  22, price =>   10000 },
+  { name => "Erdrick's Armor",   def =>  32, price =>   30000 },
+  { name => "Armor of Death",    def =>  44, price =>  100000 },
+  { name => "Able's Armor",      def =>  60, price =>  150000 },
+  { name => "Full Body Armor",   def =>  80, price =>  200000 },
+  { name => "Blood Armor",       def => 110, price =>  400000 },
+  { name => "Magic Protection",  def => 150, price =>  800000 },
+  { name => "Belar's Mail",      def => 200, price => 1500000 },
+  { name => "Golden Armor",      def => 260, price => 4000000 },
+);
+
+# Forest monsters by level range (min_level, max_level)
+my @MONSTERS = (
+  { name => "Small Thief",       hp =>  12, str =>   4, def =>  1, exp =>   10, gold =>   15, min => 1, max => 2 },
+  { name => "Rogue",             hp =>  18, str =>   7, def =>  3, exp =>   20, gold =>   30, min => 1, max => 3 },
+  { name => "Wild Boar",         hp =>  25, str =>  10, def =>  4, exp =>   35, gold =>   20, min => 1, max => 3 },
+  { name => "Ugly Old Hag",      hp =>  30, str =>  12, def =>  5, exp =>   50, gold =>   45, min => 2, max => 4 },
+  { name => "Large Green Snake",  hp =>  40, str =>  16, def =>  7, exp =>   75, gold =>   55, min => 2, max => 5 },
+  { name => "Huge Rat",          hp =>  50, str =>  20, def =>  9, exp =>  100, gold =>   70, min => 3, max => 5 },
+  { name => "Shadow Wolf",       hp =>  70, str =>  28, def => 13, exp =>  180, gold =>  100, min => 3, max => 6 },
+  { name => "Dark Cleric",       hp =>  90, str =>  35, def => 16, exp =>  250, gold =>  140, min => 4, max => 7 },
+  { name => "Black Knight",      hp => 120, str =>  45, def => 22, exp =>  400, gold =>  200, min => 5, max => 8 },
+  { name => "Evil Wizard",       hp => 160, str =>  58, def => 28, exp =>  600, gold =>  280, min => 6, max => 9 },
+  { name => "Fire Demon",        hp => 210, str =>  72, def => 35, exp =>  900, gold =>  400, min => 7, max => 10 },
+  { name => "Ice Dragon",        hp => 280, str =>  90, def => 45, exp => 1400, gold =>  600, min => 8, max => 11 },
+  { name => "Grim Reaper",       hp => 360, str => 112, def => 58, exp => 2200, gold =>  900, min => 9, max => 12 },
+  { name => "Death Knight",      hp => 460, str => 140, def => 72, exp => 3500, gold => 1400, min =>10, max => 12 },
+  { name => "Ancient Wyrm",      hp => 580, str => 170, def => 88, exp => 5500, gold => 2000, min =>11, max => 12 },
+  { name => "Shadow Demon",      hp => 350, str => 130, def => 65, exp => 2800, gold => 1100, min => 9, max => 12 },
+  { name => "Plague Bearer",     hp => 200, str =>  68, def => 33, exp =>  750, gold =>  350, min => 6, max =>  9 },
+  { name => "Vampire Lord",      hp => 300, str => 100, def => 50, exp => 1800, gold =>  700, min => 8, max => 11 },
+  { name => "Stone Golem",       hp => 500, str =>  85, def =>120, exp => 2000, gold =>  500, min => 8, max => 11 },
+  { name => "Lich King",         hp => 400, str => 150, def => 70, exp => 4000, gold => 1800, min =>10, max => 12 },
+  { name => "Wyvern",            hp => 250, str =>  95, def => 42, exp => 1500, gold =>  600, min => 7, max => 10 },
+  { name => "Dire Wolf Pack",    hp =>  60, str =>  25, def => 10, exp =>  150, gold =>   80, min => 3, max =>  5 },
+  { name => "Goblin Warband",    hp =>  45, str =>  18, def =>  8, exp =>  100, gold =>   65, min => 2, max =>  4 },
+  { name => "Bandit King",       hp => 100, str =>  40, def => 18, exp =>  350, gold =>  180, min => 4, max =>  7 },
+);
+
+# Red Dragon boss stats
+my %RED_DRAGON = (
+  name => "The Red Dragon",
+  hp   => 2000,
+  str  => 250,
+  def  => 150,
+  exp  => 50000,
+  gold => 100000,
+);
+
+# Forest events (random non-combat encounters)
+my @FOREST_EVENTS = (
+  "find_gold",
+  "find_gem",
+  "old_man",
+  "fairy",
+  "trap",
+  "nothing",
+);
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+sub reddragon_main {
+  my $p = _rd_load_player();
+
+  # Check for daily reset
+  _rd_daily_reset($p);
+
+  _rd_title_screen();
+  door_show_messages($DOOR_NAME);
+  door_pause();
+
+  my $quit = 0;
+  while (!$quit) {
+    _rd_town_menu($p);
+    my $ch = uc(getline('text', 1, "", 1));
+
+    if    ($ch eq 'F') { _rd_forest($p); }
+    elsif ($ch eq 'W') { _rd_weapon_shop($p); }
+    elsif ($ch eq 'A') { _rd_armor_shop($p); }
+    elsif ($ch eq 'H') { _rd_healer($p); }
+    elsif ($ch eq 'I') { _rd_inn($p); }
+    elsif ($ch eq 'T') { _rd_training($p); }
+    elsif ($ch eq 'V') { _rd_view_stats($p); }
+    elsif ($ch eq 'L') { _rd_player_list(); }
+    elsif ($ch eq 'P') { _rd_pvp_attack($p); }
+    elsif ($ch eq 'D') { _rd_dragon($p); }
+    elsif ($ch eq 'S') { door_show_scores($DOOR_NAME, "Red Dragon Hall of Fame", "Kills", 10); door_pause(); }
+    elsif ($ch eq 'Q') { $quit = 1; }
+  }
+
+  door_save($DOOR_NAME, $p);
+  writeline("", 1);
+  writeline($config{'themecolor'} . " The town gates close behind you..." . $RST, 1);
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# TITLE SCREEN
+# ============================================================================
+
+sub _rd_title_screen {
+  door_clear();
+  writeline("", 1);
+  writeline($config{'errorcolor'} . "          Red Dragon" . $RST, 1);
+  writeline($config{'themecolor'} . "              A PhotonBBS Door" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  In the days of old, a mighty Red Dragon" . $RST, 1);
+  writeline($config{'systemcolor'} . "  terrorized a small village. Many brave" . $RST, 1);
+  writeline($config{'systemcolor'} . "  warriors have tried to slay the beast," . $RST, 1);
+  writeline($config{'systemcolor'} . "  but none have returned alive..." . $RST, 1);
+  writeline("", 1);
+  writeline($config{'datacolor'} . "  Will YOU be the one to end its reign?" . $RST, 1);
+  writeline("", 1);
+}
+
+# ============================================================================
+# PLAYER DATA
+# ============================================================================
+
+sub _rd_load_player {
+  my $p = door_load($DOOR_NAME);
+  return $p if $p;
+  return _rd_new_player();
+}
+
+sub _rd_new_player {
+  my $lvl = $LEVELS[0];
+  return {
+    level        => 1,
+    hp           => $lvl->{hp},
+    max_hp       => $lvl->{hp},
+    str          => $lvl->{str},
+    def          => $lvl->{def},
+    gold         => 500,
+    bank         => 0,
+    exp          => 0,
+    weapon       => 0,
+    armor        => 0,
+    forest_fights=> $FOREST_FIGHTS,
+    pvp_fights   => $PVP_FIGHTS,
+    charm        => 0,
+    gems         => 0,
+    dragon_kills => 0,
+    deaths       => 0,
+    kills        => 0,
+    last_reset   => time(),
+    created      => time(),
+    alive        => 1,
+  };
+}
+
+sub _rd_daily_reset {
+  my ($p) = @_;
+  my $now = time();
+  # Reset if it's been more than a day since last reset
+  if (($now - ($p->{last_reset} // 0)) >= $DAILY_RESET) {
+    $p->{forest_fights} = $FOREST_FIGHTS;
+    $p->{pvp_fights}    = $PVP_FIGHTS;
+    $p->{hp}            = $p->{max_hp};
+    $p->{alive}         = 1;
+    $p->{last_reset}    = $now;
+    door_save($DOOR_NAME, $p);
+  }
+}
+
+# ============================================================================
+# TOWN MENU
+# ============================================================================
+
+sub _rd_town_menu {
+  my ($p) = @_;
+  my $title = $LEVELS[$p->{level} - 1]{title};
+  my $weapon = $WEAPONS[$p->{weapon}]{name};
+  my $armor  = $ARMORS[$p->{armor}]{name};
+
+  door_clear();
+  writeline($config{'themecolor'} . " The Town of Havenwood" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  writeline("", 1);
+  writeline($config{'usercolor'} . " $info{'handle'}" . $config{'systemcolor'} . " the " . $config{'datacolor'} . "$title" . $RST, 1);
+  writeline($config{'systemcolor'} . " Level " . $config{'datacolor'} . "$p->{level}" .
+    $config{'systemcolor'} . "  HP " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" .
+    $config{'systemcolor'} . "  Gold " . $config{'datacolor'} . _fmt($p->{gold}) .
+    $config{'systemcolor'} . "  Exp " . $config{'datacolor'} . _fmt($p->{exp}) . $RST, 1);
+  writeline($config{'systemcolor'} . " Weapon: " . $config{'datacolor'} . "$weapon" .
+    $config{'systemcolor'} . "  Armor: " . $config{'datacolor'} . "$armor" .
+    $config{'systemcolor'} . "  Fights: " . $config{'datacolor'} . "$p->{forest_fights}" . $RST, 1);
+  writeline("", 1);
+
+  writeline("  " . $config{'promptcolor'} . "F" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Enter the Forest" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "W" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Weapon Shop" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Armor Shop" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "H" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Healer" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "I" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "The Inn" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "T" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Training Grounds" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "V" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "View Stats" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "L" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Player List" . $RST, 1);
+  if ($p->{pvp_fights} > 0) {
+    writeline("  " . $config{'promptcolor'} . "P" . $config{'themecolor'} . " ... " . $config{'errorcolor'} . "Attack a Player ($p->{pvp_fights} left)" . $RST, 1);
+  }
+  if ($p->{level} >= 10) {
+    writeline("  " . $config{'promptcolor'} . "D" . $config{'themecolor'} . " ... " . $config{'errorcolor'} . "Face the Red Dragon" . $RST, 1);
+  }
+  writeline("  " . $config{'promptcolor'} . "S" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Hall of Fame" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Quit" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Your choice? " . $RST);
+}
+
+# ============================================================================
+# FOREST - The main gameplay loop
+# ============================================================================
+
+sub _rd_forest {
+  my ($p) = @_;
+
+  unless ($p->{alive}) {
+    writeline("", 1);
+    writeline($config{'errorcolor'} . " You are dead! Visit the healer to resurrect." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  if ($p->{forest_fights} <= 0) {
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " You have no more forest fights today." . $RST, 1);
+    writeline($config{'systemcolor'} . " Return tomorrow for more adventure!" . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  door_header("The Dark Forest");
+  writeline($config{'systemcolor'} . " You venture into the dark forest..." . $RST, 1);
+  writeline($config{'systemcolor'} . " Fights remaining: " . $config{'datacolor'} . "$p->{forest_fights}" . $RST, 1);
+  writeline("", 1);
+
+  # Random event vs combat (20% event, 80% combat)
+  if (rand(100) < 20) {
+    _rd_forest_event($p);
+  } else {
+    _rd_forest_combat($p);
+  }
+
+  $p->{forest_fights}--;
+  door_save($DOOR_NAME, $p);
+}
+
+sub _rd_forest_event {
+  my ($p) = @_;
+  my $event = $FOREST_EVENTS[int(rand(@FOREST_EVENTS))];
+
+  if ($event eq 'find_gold') {
+    my $gold = int(rand($p->{level} * 100)) + 50;
+    writeline($config{'datacolor'} . " You find a pouch of gold on the ground!" . $RST, 1);
+    writeline($config{'systemcolor'} . " You found " . $config{'usercolor'} . _fmt($gold) . " gold" . $RST, 1);
+    $p->{gold} += $gold;
+  }
+  elsif ($event eq 'find_gem') {
+    writeline($config{'datacolor'} . " A glittering gem catches your eye!" . $RST, 1);
+    writeline($config{'systemcolor'} . " You found a " . $config{'usercolor'} . "Gem!" . $RST, 1);
+    $p->{gems}++;
+  }
+  elsif ($event eq 'old_man') {
+    my $exp = int(rand($p->{level} * 30)) + 20;
+    writeline($config{'datacolor'} . " An old man appears and shares wisdom..." . $RST, 1);
+    writeline($config{'systemcolor'} . " You gain " . $config{'usercolor'} . _fmt($exp) . " experience" . $RST, 1);
+    $p->{exp} += $exp;
+  }
+  elsif ($event eq 'fairy') {
+    my $heal = int($p->{max_hp} * 0.3);
+    writeline($config{'datacolor'} . " A forest fairy heals your wounds!" . $RST, 1);
+    $p->{hp} = $p->{hp} + $heal;
+    $p->{hp} = $p->{max_hp} if $p->{hp} > $p->{max_hp};
+    writeline($config{'systemcolor'} . " You recover " . $config{'usercolor'} . "$heal HP" . $RST, 1);
+  }
+  elsif ($event eq 'trap') {
+    my $dmg = int(rand($p->{level} * 5)) + 3;
+    writeline($config{'errorcolor'} . " You stumble into a trap!" . $RST, 1);
+    writeline($config{'errorcolor'} . " You take " . $config{'usercolor'} . "$dmg damage" . $RST, 1);
+    $p->{hp} -= $dmg;
+    if ($p->{hp} <= 0) {
+      $p->{hp} = 0;
+      $p->{alive} = 0;
+      $p->{deaths}++;
+      writeline("", 1);
+      writeline($config{'errorcolor'} . " The trap has killed you!" . $RST, 1);
+    }
+  }
+  else {
+    writeline($config{'systemcolor'} . " The forest is quiet today. Nothing happens." . $RST, 1);
+  }
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# COMBAT SYSTEM
+# ============================================================================
+
+sub _rd_forest_combat {
+  my ($p) = @_;
+  my $monster = _rd_pick_monster($p->{level});
+  my $mhp = $monster->{hp} + int(rand($monster->{hp} * 0.3));
+  my $mstr = $monster->{str};
+  my $mdef = $monster->{def};
+  my $mname = $monster->{name};
+
+  writeline($config{'errorcolor'} . " A $mname appears!" . $RST, 1);
+  writeline("", 1);
+
+  my $fled = 0;
+  while ($mhp > 0 && $p->{hp} > 0) {
+    # Display status
+    writeline($config{'systemcolor'} . " Your HP: " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" .
+      $config{'systemcolor'} . "   $mname HP: " . $config{'errorcolor'} . "$mhp" . $RST, 1);
+    writeline("", 1);
+    writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} . "ttack  " .
+              $config{'promptcolor'} . "R" . $config{'themecolor'} . "un  " .
+              $config{'promptcolor'} . "U" . $config{'themecolor'} . "se Gem  " .
+              $config{'systemcolor'} . "? " . $RST);
+    my $ch = uc(getline('text', 1, "", 1));
+
+    if ($ch eq 'A') {
+      # Player attacks
+      my $total_str = $p->{str} + $WEAPONS[$p->{weapon}]{str};
+      my $pdmg = int(rand($total_str) * 0.8) + int($total_str * 0.3);
+      $pdmg -= int($mdef * 0.3);
+      $pdmg = 1 if $pdmg < 1;
+      $mhp -= $pdmg;
+      writeline("", 1);
+      writeline($config{'usercolor'} . " You hit the $mname for " . $config{'datacolor'} . "$pdmg" . $config{'usercolor'} . " damage!" . $RST, 1);
+
+      # Monster attacks back (if alive)
+      if ($mhp > 0) {
+        my $total_def = $p->{def} + $ARMORS[$p->{armor}]{def};
+        my $mdmg = int(rand($mstr) * 0.8) + int($mstr * 0.3);
+        $mdmg -= int($total_def * 0.3);
+        $mdmg = 1 if $mdmg < 1;
+        $p->{hp} -= $mdmg;
+        writeline($config{'errorcolor'} . " The $mname hits you for " . $config{'datacolor'} . "$mdmg" . $config{'errorcolor'} . " damage!" . $RST, 1);
+      }
+      writeline("", 1);
+    }
+    elsif ($ch eq 'R') {
+      if (rand(100) < 60) {
+        writeline("", 1);
+        writeline($config{'systemcolor'} . " You flee from the $mname!" . $RST, 1);
+        $fled = 1;
+        last;
+      } else {
+        writeline("", 1);
+        writeline($config{'errorcolor'} . " You couldn't escape!" . $RST, 1);
+        # Monster gets free hit
+        my $total_def = $p->{def} + $ARMORS[$p->{armor}]{def};
+        my $mdmg = int(rand($mstr) * 0.8) + int($mstr * 0.3);
+        $mdmg -= int($total_def * 0.3);
+        $mdmg = 1 if $mdmg < 1;
+        $p->{hp} -= $mdmg;
+        writeline($config{'errorcolor'} . " The $mname hits you for " . $config{'datacolor'} . "$mdmg" . $config{'errorcolor'} . " damage!" . $RST, 1);
+        writeline("", 1);
+      }
+    }
+    elsif ($ch eq 'U') {
+      if ($p->{gems} > 0) {
+        $p->{gems}--;
+        my $gdmg = int($p->{str} * 2) + int(rand(50));
+        $mhp -= $gdmg;
+        writeline("", 1);
+        writeline($config{'datacolor'} . " The gem explodes with energy!" . $RST, 1);
+        writeline($config{'usercolor'} . " You blast the $mname for " . $config{'datacolor'} . "$gdmg" . $config{'usercolor'} . " damage!" . $RST, 1);
+        writeline("", 1);
+      } else {
+        writeline("", 1);
+        writeline($config{'systemcolor'} . " You have no gems!" . $RST, 1);
+        writeline("", 1);
+      }
+    }
+  }
+
+  unless ($fled) {
+    if ($p->{hp} <= 0) {
+      # Player died
+      $p->{hp} = 0;
+      $p->{alive} = 0;
+      $p->{deaths}++;
+      my $lost_gold = int($p->{gold} * 0.1);
+      $p->{gold} -= $lost_gold;
+      writeline($config{'errorcolor'} . " The $mname has killed you!" . $RST, 1);
+      writeline($config{'errorcolor'} . " You lost " . $config{'datacolor'} . _fmt($lost_gold) . $config{'errorcolor'} . " gold." . $RST, 1);
+    }
+    elsif ($mhp <= 0) {
+      # Monster died
+      my $exp_gain = $monster->{exp} + int(rand($monster->{exp} * 0.3));
+      my $gold_gain = $monster->{gold} + int(rand($monster->{gold} * 0.5));
+      $p->{exp} += $exp_gain;
+      $p->{gold} += $gold_gain;
+      $p->{kills}++;
+      writeline($config{'usercolor'} . " You have defeated the $mname!" . $RST, 1);
+      writeline($config{'systemcolor'} . " Experience: " . $config{'datacolor'} . "+" . _fmt($exp_gain) .
+        $config{'systemcolor'} . "  Gold: " . $config{'datacolor'} . "+" . _fmt($gold_gain) . $RST, 1);
+
+      # Check for level up
+      _rd_check_levelup($p);
+    }
+  }
+  writeline("", 1);
+  door_pause();
+}
+
+sub _rd_pick_monster {
+  my ($level) = @_;
+  my @eligible = grep { $_->{min} <= $level && $_->{max} >= $level } @MONSTERS;
+  @eligible = ($MONSTERS[0]) unless @eligible;
+  return $eligible[int(rand(@eligible))];
+}
+
+sub _rd_check_levelup {
+  my ($p) = @_;
+  return if $p->{level} >= $MAX_LEVEL;
+  my $next = $LEVELS[$p->{level}]; # Next level (0-indexed, so current level = next index)
+  if ($p->{exp} >= $next->{exp}) {
+    writeline("", 1);
+    writeline($config{'usercolor'} . " * LEVEL UP! *" . $RST, 1);
+    writeline($config{'systemcolor'} . " You can train at the Training Grounds to advance!" . $RST, 1);
+  }
+}
+
+# ============================================================================
+# WEAPON SHOP
+# ============================================================================
+
+sub _rd_weapon_shop {
+  my ($p) = @_;
+
+  door_header("Ye Olde Weapon Shoppe");
+  writeline($config{'systemcolor'} . " The blacksmith grins as you enter." . $RST, 1);
+  writeline($config{'systemcolor'} . " Current weapon: " . $config{'datacolor'} . $WEAPONS[$p->{weapon}]{name} .
+    $config{'systemcolor'} . "  Gold: " . $config{'datacolor'} . _fmt($p->{gold}) . $RST, 1);
+  writeline("", 1);
+
+  my $idx = 0;
+  for my $w (@WEAPONS) {
+    next if $idx == 0; # Skip the Stick
+    my $afford = ($p->{gold} >= $w->{price}) ? $config{'datacolor'} : $config{'linecolor'};
+    my $own = ($idx == $p->{weapon}) ? $config{'usercolor'} . " (owned)" : "";
+    writeline(sprintf("  %s%-2d%s %s%-22s%s STR +%-3d %s%s%s",
+      $config{'promptcolor'}, $idx, $config{'themecolor'},
+      $afford, $w->{name}, $config{'themecolor'},
+      $w->{str},
+      $config{'systemcolor'}, _fmt($w->{price}) . " gold",
+      $own . $RST), 1);
+    $idx++;
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Buy which? (0 to leave) " . $RST);
+  my $choice = int(getline('text', 2, "", 1));
+
+  if ($choice > 0 && $choice <= $#WEAPONS) {
+    my $w = $WEAPONS[$choice];
+    if ($choice == $p->{weapon}) {
+      writeline($config{'systemcolor'} . " You already own that weapon!" . $RST, 1);
+    }
+    elsif ($p->{gold} < $w->{price}) {
+      writeline($config{'errorcolor'} . " You can't afford that!" . $RST, 1);
+    }
+    else {
+      # Sell old weapon for 50%
+      if ($p->{weapon} > 0) {
+        my $sell = int($WEAPONS[$p->{weapon}]{price} * 0.5);
+        $p->{gold} += $sell;
+        writeline($config{'systemcolor'} . " Sold your " . $WEAPONS[$p->{weapon}]{name} . " for " .
+          $config{'datacolor'} . _fmt($sell) . " gold" . $RST, 1);
+      }
+      $p->{gold} -= $w->{price};
+      $p->{weapon} = $choice;
+      writeline($config{'usercolor'} . " You purchased the $w->{name}!" . $RST, 1);
+      door_save($DOOR_NAME, $p);
+    }
+  }
+  door_pause();
+}
+
+# ============================================================================
+# ARMOR SHOP
+# ============================================================================
+
+sub _rd_armor_shop {
+  my ($p) = @_;
+
+  door_header("The Armory");
+  writeline($config{'systemcolor'} . " Rows of gleaming armor line the walls." . $RST, 1);
+  writeline($config{'systemcolor'} . " Current armor: " . $config{'datacolor'} . $ARMORS[$p->{armor}]{name} .
+    $config{'systemcolor'} . "  Gold: " . $config{'datacolor'} . _fmt($p->{gold}) . $RST, 1);
+  writeline("", 1);
+
+  my $idx = 0;
+  for my $a (@ARMORS) {
+    next if $idx == 0; # Skip the Coat
+    my $afford = ($p->{gold} >= $a->{price}) ? $config{'datacolor'} : $config{'linecolor'};
+    my $own = ($idx == $p->{armor}) ? $config{'usercolor'} . " (owned)" : "";
+    writeline(sprintf("  %s%-2d%s %s%-22s%s DEF +%-3d %s%s%s",
+      $config{'promptcolor'}, $idx, $config{'themecolor'},
+      $afford, $a->{name}, $config{'themecolor'},
+      $a->{def},
+      $config{'systemcolor'}, _fmt($a->{price}) . " gold",
+      $own . $RST), 1);
+    $idx++;
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Buy which? (0 to leave) " . $RST);
+  my $choice = int(getline('text', 2, "", 1));
+
+  if ($choice > 0 && $choice <= $#ARMORS) {
+    my $a = $ARMORS[$choice];
+    if ($choice == $p->{armor}) {
+      writeline($config{'systemcolor'} . " You already own that armor!" . $RST, 1);
+    }
+    elsif ($p->{gold} < $a->{price}) {
+      writeline($config{'errorcolor'} . " You can't afford that!" . $RST, 1);
+    }
+    else {
+      if ($p->{armor} > 0) {
+        my $sell = int($ARMORS[$p->{armor}]{price} * 0.5);
+        $p->{gold} += $sell;
+        writeline($config{'systemcolor'} . " Sold your " . $ARMORS[$p->{armor}]{name} . " for " .
+          $config{'datacolor'} . _fmt($sell) . " gold" . $RST, 1);
+      }
+      $p->{gold} -= $a->{price};
+      $p->{armor} = $choice;
+      writeline($config{'usercolor'} . " You purchased the $a->{name}!" . $RST, 1);
+      door_save($DOOR_NAME, $p);
+    }
+  }
+  door_pause();
+}
+
+# ============================================================================
+# HEALER
+# ============================================================================
+
+sub _rd_healer {
+  my ($p) = @_;
+
+  door_header("The Healer");
+  writeline($config{'systemcolor'} . " A kind old woman looks up from her herbs." . $RST, 1);
+  writeline("", 1);
+
+  unless ($p->{alive}) {
+    my $cost = int($p->{gold} * 0.15);
+    $cost = 100 if $cost < 100;
+    writeline($config{'errorcolor'} . " You are dead!" . $RST, 1);
+    writeline($config{'systemcolor'} . " The healer can resurrect you for " .
+      $config{'datacolor'} . _fmt($cost) . " gold" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " Resurrect? (Y/N) " . $RST);
+    my $ch = uc(waitkey("")); writeline("", 1);
+    if ($ch eq 'Y') {
+      if ($p->{gold} >= $cost) {
+        $p->{gold} -= $cost;
+        $p->{alive} = 1;
+        $p->{hp} = int($p->{max_hp} * 0.5);
+        writeline($config{'usercolor'} . " You feel life flow back into your body!" . $RST, 1);
+        door_save($DOOR_NAME, $p);
+      } else {
+        writeline($config{'errorcolor'} . " You can't afford resurrection!" . $RST, 1);
+        # Free resurrection if broke
+        if ($p->{gold} < 50) {
+          writeline($config{'systemcolor'} . " The healer takes pity on you..." . $RST, 1);
+          $p->{alive} = 1;
+          $p->{hp} = int($p->{max_hp} * 0.25);
+          $p->{gold} = 0;
+          writeline($config{'usercolor'} . " You are brought back weakly." . $RST, 1);
+          door_save($DOOR_NAME, $p);
+        }
+      }
+    }
+    door_pause();
+    return;
+  }
+
+  if ($p->{hp} >= $p->{max_hp}) {
+    writeline($config{'systemcolor'} . " You are already at full health!" . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my $missing = $p->{max_hp} - $p->{hp};
+  my $cost_per_hp = int($p->{level} * 1.5) + 1;
+  my $full_cost = $missing * $cost_per_hp;
+
+  writeline($config{'systemcolor'} . " HP: " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" .
+    $config{'systemcolor'} . "  Gold: " . $config{'datacolor'} . _fmt($p->{gold}) . $RST, 1);
+  writeline($config{'systemcolor'} . " Full heal cost: " . $config{'datacolor'} . _fmt($full_cost) . " gold" .
+    $config{'systemcolor'} . " ($cost_per_hp gold per HP)" . $RST, 1);
+  writeline("", 1);
+
+  writeline("  " . $config{'promptcolor'} . "F" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Full Heal" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "H" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Heal Half" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Leave" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Choice? " . $RST);
+  my $ch = uc(getline('text', 1, "", 1));
+
+  if ($ch eq 'F') {
+    if ($p->{gold} >= $full_cost) {
+      $p->{gold} -= $full_cost;
+      $p->{hp} = $p->{max_hp};
+      writeline($config{'usercolor'} . " You are fully healed!" . $RST, 1);
+    } else {
+      # Heal what they can afford
+      my $can_heal = int($p->{gold} / $cost_per_hp);
+      if ($can_heal > 0) {
+        $p->{gold} -= $can_heal * $cost_per_hp;
+        $p->{hp} += $can_heal;
+        $p->{hp} = $p->{max_hp} if $p->{hp} > $p->{max_hp};
+        writeline($config{'systemcolor'} . " Healed $can_heal HP (all you could afford)." . $RST, 1);
+      } else {
+        writeline($config{'errorcolor'} . " You can't afford any healing!" . $RST, 1);
+      }
+    }
+  }
+  elsif ($ch eq 'H') {
+    my $half = int($missing / 2);
+    $half = 1 if $half < 1;
+    my $cost = $half * $cost_per_hp;
+    if ($p->{gold} >= $cost) {
+      $p->{gold} -= $cost;
+      $p->{hp} += $half;
+      writeline($config{'usercolor'} . " Healed $half HP." . $RST, 1);
+    } else {
+      writeline($config{'errorcolor'} . " You can't afford that!" . $RST, 1);
+    }
+  }
+
+  door_save($DOOR_NAME, $p);
+  door_pause();
+}
+
+# ============================================================================
+# THE INN
+# ============================================================================
+
+sub _rd_inn {
+  my ($p) = @_;
+
+  door_header("The Wayfarer's Inn");
+  writeline($config{'systemcolor'} . " The warm glow of the fireplace welcomes you." . $RST, 1);
+  writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . _fmt($p->{gold}) .
+    $config{'systemcolor'} . "  Bank: " . $config{'datacolor'} . _fmt($p->{bank}) . $RST, 1);
+  writeline("", 1);
+
+  writeline("  " . $config{'promptcolor'} . "C" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Chat with Violet" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "D" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Deposit Gold" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "W" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Withdraw Gold" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "G" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Gamble (50 gold)" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Leave" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Choice? " . $RST);
+  my $ch = uc(getline('text', 1, "", 1));
+
+  if ($ch eq 'C') {
+    _rd_violet($p);
+  }
+  elsif ($ch eq 'D') {
+    writeline($config{'systemcolor'} . " Deposit how much? (max " . _fmt($p->{gold}) . ") " . $RST);
+    my $amt = int(getline('text', 10, "", 1));
+    if ($amt > 0 && $amt <= $p->{gold}) {
+      $p->{gold} -= $amt;
+      $p->{bank} += $amt;
+      writeline($config{'usercolor'} . " Deposited " . _fmt($amt) . " gold." . $RST, 1);
+      door_save($DOOR_NAME, $p);
+    } else {
+      writeline($config{'systemcolor'} . " Never mind." . $RST, 1);
+    }
+  }
+  elsif ($ch eq 'W') {
+    writeline($config{'systemcolor'} . " Withdraw how much? (max " . _fmt($p->{bank}) . ") " . $RST);
+    my $amt = int(getline('text', 10, "", 1));
+    if ($amt > 0 && $amt <= $p->{bank}) {
+      $p->{bank} -= $amt;
+      $p->{gold} += $amt;
+      writeline($config{'usercolor'} . " Withdrew " . _fmt($amt) . " gold." . $RST, 1);
+      door_save($DOOR_NAME, $p);
+    } else {
+      writeline($config{'systemcolor'} . " Never mind." . $RST, 1);
+    }
+  }
+  elsif ($ch eq 'G') {
+    _rd_gamble($p);
+  }
+  door_pause();
+}
+
+sub _rd_violet {
+  my ($p) = @_;
+  writeline("", 1);
+  my @chat = (
+    "Violet smiles warmly. \"Rough day in the forest?\"",
+    "Violet pours you a drink. \"On the house, hero.\"",
+    "Violet leans in. \"I heard the Dragon was seen near the mountains...\"",
+    "Violet winks. \"You're looking stronger every day.\"",
+    "Violet whispers. \"Be careful in the deep forest at night.\"",
+    "Violet sighs. \"I wish someone would slay that awful Dragon.\"",
+    "Violet laughs. \"Another brave warrior! Don't die on me.\"",
+    "Violet tells you a rumor about hidden gems in the forest.",
+  );
+  my $line = $chat[int(rand(@chat))];
+  writeline($config{'datacolor'} . " $line" . $RST, 1);
+
+  # Small charm bonus
+  if (rand(100) < 25) {
+    $p->{charm}++;
+    writeline($config{'systemcolor'} . " Your charm increases!" . $RST, 1);
+  }
+}
+
+sub _rd_gamble {
+  my ($p) = @_;
+
+  if ($p->{gold} < 50) {
+    writeline($config{'errorcolor'} . " You need at least 50 gold to gamble!" . $RST, 1);
+    return;
+  }
+
+  $p->{gold} -= 50;
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " You place 50 gold on the table..." . $RST, 1);
+
+  my $roll = int(rand(100));
+  if ($roll < 40) {
+    writeline($config{'errorcolor'} . " You lose!" . $RST, 1);
+  }
+  elsif ($roll < 75) {
+    $p->{gold} += 100;
+    writeline($config{'usercolor'} . " You win 100 gold!" . $RST, 1);
+  }
+  elsif ($roll < 92) {
+    $p->{gold} += 250;
+    writeline($config{'usercolor'} . " Big win! You win 250 gold!" . $RST, 1);
+  }
+  else {
+    $p->{gold} += 1000;
+    writeline($config{'usercolor'} . " JACKPOT! You win 1,000 gold!" . $RST, 1);
+  }
+  door_save($DOOR_NAME, $p);
+}
+
+# ============================================================================
+# TRAINING GROUNDS
+# ============================================================================
+
+sub _rd_training {
+  my ($p) = @_;
+
+  door_header("Training Grounds");
+
+  if ($p->{level} >= $MAX_LEVEL) {
+    writeline($config{'usercolor'} . " You have reached the maximum level!" . $RST, 1);
+    writeline($config{'systemcolor'} . " There is nothing more the masters can teach you." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my $next = $LEVELS[$p->{level}];
+  my $title = $next->{title};
+
+  writeline($config{'systemcolor'} . " Current Level: " . $config{'datacolor'} . "$p->{level}" .
+    $config{'systemcolor'} . " (" . $LEVELS[$p->{level} - 1]{title} . ")" . $RST, 1);
+  writeline($config{'systemcolor'} . " Next Level: " . $config{'datacolor'} . ($p->{level} + 1) .
+    $config{'systemcolor'} . " ($title)" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Requirements:" . $RST, 1);
+
+  my $exp_ok  = $p->{exp} >= $next->{exp};
+  my $gold_ok = $p->{gold} >= $next->{gold};
+  my $exp_col  = $exp_ok  ? $config{'usercolor'} : $config{'errorcolor'};
+  my $gold_col = $gold_ok ? $config{'usercolor'} : $config{'errorcolor'};
+
+  writeline("  " . $config{'systemcolor'} . "Experience: " . $exp_col . _fmt($p->{exp}) . "/" . _fmt($next->{exp}) .
+    ($exp_ok ? " OK" : " NEED MORE") . $RST, 1);
+  writeline("  " . $config{'systemcolor'} . "Gold:       " . $gold_col . _fmt($p->{gold}) . "/" . _fmt($next->{gold}) .
+    ($gold_ok ? " OK" : " NEED MORE") . $RST, 1);
+  writeline("", 1);
+
+  if ($exp_ok && $gold_ok) {
+    writeline($config{'datacolor'} . " You are ready to advance!" . $RST, 1);
+    writeline($config{'systemcolor'} . " Train to level " . ($p->{level} + 1) . "? (Y/N) " . $RST);
+    my $ch = uc(waitkey("")); writeline("", 1);
+    if ($ch eq 'Y') {
+      $p->{gold} -= $next->{gold};
+      $p->{level}++;
+      my $lvl = $LEVELS[$p->{level} - 1];
+      $p->{max_hp} = $lvl->{hp};
+      $p->{hp}     = $lvl->{hp};
+      $p->{str}    = $lvl->{str};
+      $p->{def}    = $lvl->{def};
+      writeline("", 1);
+      writeline($config{'usercolor'} . " Congratulations! You are now a $lvl->{title}!" . $RST, 1);
+      writeline($config{'systemcolor'} . " Level " . $config{'datacolor'} . $p->{level} .
+        $config{'systemcolor'} . "  HP " . $config{'datacolor'} . $p->{max_hp} .
+        $config{'systemcolor'} . "  STR " . $config{'datacolor'} . $p->{str} .
+        $config{'systemcolor'} . "  DEF " . $config{'datacolor'} . $p->{def} . $RST, 1);
+      door_save($DOOR_NAME, $p);
+    }
+  } else {
+    writeline($config{'systemcolor'} . " You are not ready yet. Keep fighting!" . $RST, 1);
+  }
+  door_pause();
+}
+
+# ============================================================================
+# VIEW STATS
+# ============================================================================
+
+sub _rd_view_stats {
+  my ($p) = @_;
+  my $title  = $LEVELS[$p->{level} - 1]{title};
+  my $weapon = $WEAPONS[$p->{weapon}]{name};
+  my $armor  = $ARMORS[$p->{armor}]{name};
+
+  door_header("Character Sheet");
+
+  writeline($config{'usercolor'} . " $info{'handle'}" . $config{'systemcolor'} . " the " . $config{'datacolor'} . "$title" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Level:       " . $config{'datacolor'} . $p->{level} . $RST, 1);
+  writeline($config{'systemcolor'} . " Hit Points:  " . $config{'datacolor'} . "$p->{hp} / $p->{max_hp}" . $RST, 1);
+  writeline($config{'systemcolor'} . " Strength:    " . $config{'datacolor'} . $p->{str} .
+    $config{'systemcolor'} . " (+" . $WEAPONS[$p->{weapon}]{str} . " weapon)" . $RST, 1);
+  writeline($config{'systemcolor'} . " Defense:     " . $config{'datacolor'} . $p->{def} .
+    $config{'systemcolor'} . " (+" . $ARMORS[$p->{armor}]{def} . " armor)" . $RST, 1);
+  writeline($config{'systemcolor'} . " Experience:  " . $config{'datacolor'} . _fmt($p->{exp}) . $RST, 1);
+  writeline($config{'systemcolor'} . " Gold:        " . $config{'datacolor'} . _fmt($p->{gold}) . $RST, 1);
+  writeline($config{'systemcolor'} . " Bank:        " . $config{'datacolor'} . _fmt($p->{bank}) . $RST, 1);
+  writeline($config{'systemcolor'} . " Gems:        " . $config{'datacolor'} . $p->{gems} . $RST, 1);
+  writeline($config{'systemcolor'} . " Charm:       " . $config{'datacolor'} . $p->{charm} . $RST, 1);
+  writeline($config{'systemcolor'} . " Weapon:      " . $config{'datacolor'} . $weapon . $RST, 1);
+  writeline($config{'systemcolor'} . " Armor:       " . $config{'datacolor'} . $armor . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Kills:       " . $config{'datacolor'} . $p->{kills} . $RST, 1);
+  writeline($config{'systemcolor'} . " Deaths:      " . $config{'datacolor'} . $p->{deaths} . $RST, 1);
+  writeline($config{'systemcolor'} . " Dragon Kills:" . $config{'datacolor'} . " $p->{dragon_kills}" . $RST, 1);
+  writeline($config{'systemcolor'} . " Fights Left: " . $config{'datacolor'} . $p->{forest_fights} . $RST, 1);
+  writeline($config{'systemcolor'} . " Status:      " . ($p->{alive} ? $config{'usercolor'} . "Alive" : $config{'errorcolor'} . "Dead") . $RST, 1);
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# PLAYER LIST
+# ============================================================================
+
+sub _rd_player_list {
+  door_header("Warriors of Havenwood");
+
+  my $dir = door_data_dir($DOOR_NAME);
+  my @files;
+  if (opendir(my $dh, $dir)) {
+    @files = grep { /\.dat$/ && $_ ne "scores.dat" } readdir($dh);
+    closedir($dh);
+  }
+
+  if (@files == 0) {
+    writeline($config{'systemcolor'} . " No warriors have been seen." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline(sprintf("  %s%-18s %-4s %-14s %-6s %-6s%s",
+    $config{'systemcolor'}, "Name", "Lvl", "Title", "Kills", "Status", $RST), 1);
+  writeline($config{'linecolor'} . " " . ("-" x 56) . $RST, 1);
+
+  for my $file (sort @files) {
+    my $data;
+    eval { $data = lock_retrieve("$dir/$file"); };
+    next if $@ || !$data;
+
+    my $handle = $file;
+    $handle =~ s/\.dat$//;
+    $handle =~ s/_/ /g;
+
+    my $lvl = $data->{level} // 1;
+    my $title = $LEVELS[$lvl - 1]{title};
+    my $kills = $data->{kills} // 0;
+    my $alive = ($data->{alive} // 1) ? "Alive" : "Dead";
+    my $color = ($data->{alive} // 1) ? $config{'datacolor'} : $config{'errorcolor'};
+
+    writeline(sprintf("  %s%-18s %s%-4d %s%-14s %s%-6d %s%s%s",
+      $config{'usercolor'}, substr($handle, 0, 18),
+      $config{'datacolor'}, $lvl,
+      $config{'systemcolor'}, $title,
+      $config{'datacolor'}, $kills,
+      $color, $alive, $RST), 1);
+  }
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# THE RED DRAGON - Boss fight
+# ============================================================================
+
+sub _rd_dragon {
+  my ($p) = @_;
+
+  if ($p->{level} < 10) {
+    writeline("", 1);
+    writeline($config{'errorcolor'} . " You must be at least level 10 to face the Red Dragon!" . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  unless ($p->{alive}) {
+    writeline("", 1);
+    writeline($config{'errorcolor'} . " You are dead! Visit the healer first." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  door_header("The Dragon's Lair");
+  writeline($config{'errorcolor'} . " The ground shakes as you approach the lair." . $RST, 1);
+  writeline($config{'errorcolor'} . " Smoke and fire billow from the cave entrance." . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " This is a battle to the death. There is no running." . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Face the Red Dragon? (Y/N) " . $RST);
+  my $ch = uc(waitkey("")); writeline("", 1);
+  return unless $ch eq 'Y';
+
+  writeline("", 1);
+  writeline($config{'errorcolor'} . " THE RED DRAGON RISES BEFORE YOU!" . $RST, 1);
+  writeline("", 1);
+
+  my $dhp  = $RED_DRAGON{hp};
+  my $dstr = $RED_DRAGON{str};
+  my $ddef = $RED_DRAGON{def};
+
+  while ($dhp > 0 && $p->{hp} > 0) {
+    my $dhp_pct = int(($dhp / $RED_DRAGON{hp}) * 100);
+    writeline($config{'systemcolor'} . " Your HP: " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" .
+      $config{'systemcolor'} . "   Dragon HP: " . $config{'errorcolor'} . "$dhp_pct%" . $RST, 1);
+    writeline("", 1);
+    writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} . "ttack  " .
+              $config{'promptcolor'} . "U" . $config{'themecolor'} . "se Gem  " .
+              $config{'systemcolor'} . "? " . $RST);
+    my $move = uc(getline('text', 1, "", 1));
+
+    if ($move eq 'A') {
+      my $total_str = $p->{str} + $WEAPONS[$p->{weapon}]{str};
+      my $pdmg = int(rand($total_str) * 0.8) + int($total_str * 0.4);
+      $pdmg -= int($ddef * 0.2);
+      $pdmg = 1 if $pdmg < 1;
+      $dhp -= $pdmg;
+      writeline("", 1);
+      writeline($config{'usercolor'} . " You strike the Dragon for $pdmg damage!" . $RST, 1);
+    }
+    elsif ($move eq 'U') {
+      if ($p->{gems} > 0) {
+        $p->{gems}--;
+        my $gdmg = int($p->{str} * 3) + int(rand(100));
+        $dhp -= $gdmg;
+        writeline("", 1);
+        writeline($config{'datacolor'} . " The gem erupts with devastating power!" . $RST, 1);
+        writeline($config{'usercolor'} . " You blast the Dragon for $gdmg damage!" . $RST, 1);
+      } else {
+        writeline("", 1);
+        writeline($config{'systemcolor'} . " You have no gems!" . $RST, 1);
+      }
+    }
+    else {
+      writeline("", 1);
+      writeline($config{'systemcolor'} . " You hesitate..." . $RST, 1);
+    }
+
+    # Dragon attacks
+    if ($dhp > 0) {
+      my $total_def = $p->{def} + $ARMORS[$p->{armor}]{def};
+      my $mdmg = int(rand($dstr) * 0.8) + int($dstr * 0.3);
+      $mdmg -= int($total_def * 0.25);
+      $mdmg = 1 if $mdmg < 1;
+
+      # Dragon special attacks
+      my $special = int(rand(100));
+      if ($special < 15) {
+        $mdmg = int($mdmg * 1.5);
+        writeline($config{'errorcolor'} . " The Dragon breathes fire! $mdmg damage!" . $RST, 1);
+      }
+      elsif ($special < 25) {
+        $mdmg = int($mdmg * 1.3);
+        writeline($config{'errorcolor'} . " The Dragon whips its tail! $mdmg damage!" . $RST, 1);
+      }
+      else {
+        writeline($config{'errorcolor'} . " The Dragon claws you for $mdmg damage!" . $RST, 1);
+      }
+      $p->{hp} -= $mdmg;
+    }
+    writeline("", 1);
+  }
+
+  if ($p->{hp} <= 0) {
+    $p->{hp} = 0;
+    $p->{alive} = 0;
+    $p->{deaths}++;
+    writeline($config{'errorcolor'} . " The Red Dragon has slain you!" . $RST, 1);
+    writeline($config{'errorcolor'} . " Your charred remains crumble to ash." . $RST, 1);
+  } else {
+    writeline("", 1);
+    writeline($config{'usercolor'} . " *** YOU HAVE SLAIN THE RED DRAGON! ***" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " The beast falls with a thunderous crash!" . $RST, 1);
+    writeline($config{'systemcolor'} . " The village is saved!" . $RST, 1);
+    writeline("", 1);
+
+    $p->{dragon_kills}++;
+    $p->{exp}  += $RED_DRAGON{exp};
+    $p->{gold} += $RED_DRAGON{gold};
+
+    writeline($config{'systemcolor'} . " Experience: " . $config{'datacolor'} . "+" . _fmt($RED_DRAGON{exp}) . $RST, 1);
+    writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . "+" . _fmt($RED_DRAGON{gold}) . $RST, 1);
+
+    door_submit_score($DOOR_NAME, $p->{dragon_kills}, { level => $p->{level} });
+    door_broadcast($DOOR_NAME, "$info{'handle'} has slain the Red Dragon!");
+  }
+
+  door_save($DOOR_NAME, $p);
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# PVP - Attack sleeping players
+# ============================================================================
+
+sub _rd_pvp_attack {
+  my ($p) = @_;
+
+  unless ($p->{alive}) {
+    writeline($config{'errorcolor'} . " You are dead! Visit the healer first." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  if ($p->{pvp_fights} <= 0) {
+    writeline($config{'systemcolor'} . " No PvP attacks remaining today." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  door_header("The Dark Alley");
+  writeline($config{'systemcolor'} . " Attack a sleeping warrior..." . $RST, 1);
+  writeline("", 1);
+
+  # List attackable players
+  my @all = door_get_all_players($DOOR_NAME);
+  my @targets;
+  for my $name (@all) {
+    next if lc($name) eq lc($info{'handle'});
+    my $pd = door_load_player($DOOR_NAME, $name);
+    next unless $pd && $pd->{alive};
+    push @targets, { name => $name, data => $pd };
+  }
+
+  if (@targets == 0) {
+    writeline($config{'systemcolor'} . " No warriors are available to attack." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my $idx = 1;
+  for my $t (@targets) {
+    my $td = $t->{data};
+    my $title = $LEVELS[$td->{level} - 1]{title};
+    writeline(sprintf("  %s%-2d%s %s%-18s%s Lvl %-2d %s%s",
+      $config{'promptcolor'}, $idx, $config{'themecolor'},
+      $config{'usercolor'}, substr($t->{name}, 0, 18), $config{'systemcolor'},
+      $td->{level}, $title, $RST), 1);
+    $idx++;
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Attack whom? (0 to cancel) " . $RST);
+  my $choice = int(getline('text', 2, "", 1));
+  return if $choice <= 0 || $choice > @targets;
+
+  my $target = $targets[$choice - 1];
+  my $td = $target->{data};
+  my $tname = $target->{name};
+
+  $p->{pvp_fights}--;
+
+  writeline("", 1);
+  writeline($config{'errorcolor'} . " You sneak up on $tname!" . $RST, 1);
+  writeline("", 1);
+
+  # Simulate combat - attacker gets first strike advantage
+  my $total_str = $p->{str} + $WEAPONS[$p->{weapon}]{str};
+  my $total_def = $p->{def} + $ARMORS[$p->{armor}]{def};
+  my $t_str = $td->{str} + ($WEAPONS[$td->{weapon}]{str} // 0);
+  my $t_def = $td->{def} + ($ARMORS[$td->{armor}]{def} // 0);
+  my $t_hp = $td->{hp};
+
+  # First strike
+  my $pdmg = int(rand($total_str) * 0.9) + int($total_str * 0.4);
+  $pdmg -= int($t_def * 0.2);  # Defender has reduced defense (sleeping)
+  $pdmg = 1 if $pdmg < 1;
+  $t_hp -= $pdmg;
+  writeline($config{'usercolor'} . " You strike for $pdmg damage!" . $RST, 1);
+
+  # Target wakes up and fights back
+  my $rounds = 0;
+  while ($t_hp > 0 && $p->{hp} > 0 && $rounds < 10) {
+    # Target attacks
+    my $tdmg = int(rand($t_str) * 0.6) + int($t_str * 0.2);  # Groggy
+    $tdmg -= int($total_def * 0.3);
+    $tdmg = 1 if $tdmg < 1;
+    $p->{hp} -= $tdmg;
+    writeline($config{'errorcolor'} . " $tname fights back! $tdmg damage!" . $RST, 1);
+
+    # Player attacks
+    if ($p->{hp} > 0) {
+      $pdmg = int(rand($total_str) * 0.8) + int($total_str * 0.3);
+      $pdmg -= int($t_def * 0.3);
+      $pdmg = 1 if $pdmg < 1;
+      $t_hp -= $pdmg;
+      writeline($config{'usercolor'} . " You hit for $pdmg damage!" . $RST, 1);
+    }
+    $rounds++;
+  }
+
+  if ($t_hp <= 0) {
+    # Victory - take some gold
+    my $stolen = int($td->{gold} * 0.1);
+    $p->{gold} += $stolen;
+    $p->{kills}++;
+    $p->{exp} += int($td->{level} * 50);
+
+    # Update target's data
+    $td->{hp} = 0;
+    $td->{alive} = 0;
+    $td->{deaths}++;
+    $td->{gold} -= $stolen;
+    door_save_player($DOOR_NAME, $tname, $td);
+
+    writeline("", 1);
+    writeline($config{'usercolor'} . " You have defeated $tname!" . $RST, 1);
+    writeline($config{'systemcolor'} . " Stolen: " . $config{'datacolor'} . _fmt($stolen) . " gold" . $RST, 1);
+
+    # Send message to victim
+    door_send_message($DOOR_NAME, $tname, "$info{'handle'} attacked you while you slept and stole " . _fmt($stolen) . " gold!");
+
+    # Broadcast notable PvP kills
+    door_broadcast($DOOR_NAME, "$info{'handle'} has defeated $tname in combat!");
+
+  } elsif ($p->{hp} <= 0) {
+    $p->{hp} = 0;
+    $p->{alive} = 0;
+    $p->{deaths}++;
+    writeline("", 1);
+    writeline($config{'errorcolor'} . " $tname fought you off! You are defeated!" . $RST, 1);
+    door_send_message($DOOR_NAME, $tname, "$info{'handle'} tried to attack you but you fought them off!");
+  } else {
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " The fight ends in a stalemate." . $RST, 1);
+    door_send_message($DOOR_NAME, $tname, "$info{'handle'} attacked you while you slept! The fight was inconclusive.");
+  }
+
+  door_save($DOOR_NAME, $p);
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+# Format number with commas
+sub _fmt {
+  my ($n) = @_;
+  my $s = int($n);
+  1 while $s =~ s/^(-?\d+)(\d{3})/$1,$2/;
+  return $s;
+}
+
+1;

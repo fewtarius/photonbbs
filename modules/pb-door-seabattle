@@ -1,0 +1,555 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: Sea Battle (Battleship)
+# Based on the classic Battleship board game (Milton Bradley, 1967)
+#
+# Classic battleship game vs AI opponent
+#
+
+# ============================================================================
+# GAME CONSTANTS
+# ============================================================================
+
+my $GRID_SIZE = 10;
+
+my @SHIPS = (
+  { name => "Carrier",    size => 5 },
+  { name => "Battleship", size => 4 },
+  { name => "Cruiser",    size => 3 },
+  { name => "Submarine",  size => 3 },
+  { name => "Destroyer",  size => 2 },
+);
+
+# Cell states
+my $CELL_EMPTY  = ' ';
+my $CELL_SHIP   = 'O';
+my $CELL_HIT    = 'X';
+my $CELL_MISS   = '-';
+my $CELL_SUNK   = '#';
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+sub seabattle_main {
+  iamat($info{'handle'}, "Playing Sea Battle");
+
+  door_clear();
+  writeline("", 1);
+  writeline($config{'themecolor'} . "            S E A   B A T T L E" . $RST, 1);
+  writeline($config{'linecolor'}  . "          -------------------------" . $RST, 1);
+  writeline($config{'systemcolor'} . "    Classic Battleship - sink the enemy fleet!" . $RST, 1);
+  writeline("", 1);
+
+  # Check for incoming challenges
+  _sb_check_challenges();
+
+  my $mode = door_menu([
+    ['A', 'Battle the AI'],
+    ['C', 'Challenge a Player'],
+    ['W', 'Win/Loss Record'],
+    ['H', 'High Scores'],
+    ['Q', 'Quit'],
+  ], "Choose mode");
+
+  if ($mode eq 'A') {
+    _sb_play_ai();
+  } elsif ($mode eq 'C') {
+    _sb_challenge();
+  } elsif ($mode eq 'W') {
+    _sb_records();
+    door_pause();
+  } elsif ($mode eq 'H') {
+    door_show_scores("seabattle", "Sea Battle High Scores", "Score");
+    door_pause();
+  }
+
+  iamat($info{'handle'}, "Finished Sea Battle");
+}
+
+sub _sb_check_challenges {
+  my $msgs = door_get_messages("seabattle");
+  return unless @$msgs;
+  writeline("", 1);
+  for my $m (@$msgs) {
+    writeline($config{'usercolor'} . " Message from $m->{from}: " .
+      $config{'datacolor'} . $m->{message} . $RST, 1);
+  }
+  door_mark_messages_read("seabattle");
+  writeline("", 1);
+}
+
+sub _sb_records {
+  door_header("Win/Loss Record");
+  my @all = door_get_all_players("seabattle");
+  writeline(sprintf("  %s%-20s %s%-6s %-6s%s",
+    $config{'systemcolor'}, "Player", $config{'datacolor'}, "Wins", "Losses", $RST), 1);
+  writeline($config{'linecolor'} . " " . ("-" x 36) . $RST, 1);
+  for my $name (@all) {
+    my $pd = door_load_player("seabattle", $name);
+    next unless $pd;
+    my $color = ($name eq $info{'handle'}) ? $config{'usercolor'} : $config{'datacolor'};
+    writeline(sprintf("  %s%-20s %s%-6d %-6d%s",
+      $color, substr($name, 0, 20),
+      $config{'datacolor'}, $pd->{wins} // 0, $pd->{losses} // 0, $RST), 1);
+  }
+  writeline("", 1);
+}
+
+sub _sb_challenge {
+  my @all = door_get_all_players("seabattle");
+  my @targets = grep { lc($_) ne lc($info{'handle'}) } @all;
+
+  if (@targets == 0) {
+    writeline($config{'systemcolor'} . " No other players to challenge. Play AI first!" . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline("", 1);
+  my $idx = 1;
+  for my $t (@targets) {
+    writeline("  " . $config{'promptcolor'} . "$idx" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . $t . $RST, 1);
+    $idx++;
+  }
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Challenge whom? (0 cancel) " . $RST);
+  my $choice = int(getline('text', 2, "", 1));
+  return if $choice <= 0 || $choice > @targets;
+
+  my $target = $targets[$choice - 1];
+  door_send_message("seabattle", $target, "$info{'handle'} challenges you to Sea Battle! Play to defend.");
+
+  writeline($config{'usercolor'} . " Challenge sent to $target!" . $RST, 1);
+  writeline($config{'systemcolor'} . " Now play against AI - your score will be compared." . $RST, 1);
+  door_pause();
+
+  _sb_play_ai();
+}
+
+sub _sb_play_ai {
+
+  # Initialize grids
+  my %game;
+  $game{player_grid}  = _sb_empty_grid();   # Player's ships
+  $game{player_shots} = _sb_empty_grid();   # Player's shots at enemy
+  $game{enemy_grid}   = _sb_empty_grid();   # Enemy's ships
+  $game{enemy_shots}  = _sb_empty_grid();   # Enemy's shots at player
+  $game{player_ships} = [];
+  $game{enemy_ships}  = [];
+  $game{ai_mode}      = 'hunt';  # hunt or destroy
+  $game{ai_hits}      = [];      # Recent hits in destroy mode
+  $game{ai_dir}       = undef;   # Direction AI is exploring
+  $game{turn}         = 0;
+
+  # Place ships
+  _sb_place_ships_player(\%game);
+  _sb_place_ships_ai(\%game);
+
+  # Main game loop
+  my $game_over = 0;
+  while (!$game_over) {
+    _sb_display(\%game);
+
+    # Player's turn
+    my $result = _sb_player_fire(\%game);
+    last if $result eq 'quit';
+    $game{turn}++;
+
+    # Check win
+    if (_sb_all_sunk($game{enemy_ships})) {
+      _sb_display(\%game);
+      writeline($config{'usercolor'} . " You sank the entire enemy fleet! VICTORY!" . $RST, 1);
+      writeline($config{'systemcolor'} . " Completed in $game{turn} shots." . $RST, 1);
+
+      my $score = 1000 - ($game{turn} * 10);
+      $score = 100 if $score < 100;
+      door_submit_score("seabattle", $score, { shots => $game{turn} });
+      door_log_activity("seabattle", $info{'handle'} . " won Sea Battle in $game{turn} shots!");
+      # Track wins
+      my $record = door_load("seabattle") // { wins => 0, losses => 0 };
+      $record->{wins}++;
+      door_save("seabattle", $record);
+      $game_over = 1;
+      last;
+    }
+
+    # AI's turn
+    _sb_ai_fire(\%game);
+
+    # Check loss
+    if (_sb_all_sunk($game{player_ships})) {
+      _sb_display(\%game);
+      writeline($config{'errorcolor'} . " The enemy has sunk your fleet! DEFEAT!" . $RST, 1);
+      my $record = door_load("seabattle") // { wins => 0, losses => 0 };
+      $record->{losses}++;
+      door_save("seabattle", $record);
+      $game_over = 1;
+      last;
+    }
+  }
+
+  writeline("", 1);
+  if (door_yesno("View high scores?")) {
+    door_show_scores("seabattle", "Sea Battle High Scores", "Score");
+  }
+  door_pause("Press any key to return to the BBS...");
+  iamat($info{'handle'}, "Finished Sea Battle");
+}
+
+# ============================================================================
+# GRID MANAGEMENT
+# ============================================================================
+
+sub _sb_empty_grid {
+  my @grid;
+  for my $y (0 .. $GRID_SIZE - 1) {
+    for my $x (0 .. $GRID_SIZE - 1) {
+      $grid[$y][$x] = $CELL_EMPTY;
+    }
+  }
+  return \@grid;
+}
+
+# ============================================================================
+# SHIP PLACEMENT - PLAYER
+# ============================================================================
+
+sub _sb_place_ships_player {
+  my ($g) = @_;
+
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Place your fleet!" . $RST, 1);
+  writeline($config{'systemcolor'} . " Use coordinates like A5 and direction H(orizontal)/V(ertical)" . $RST, 1);
+  writeline("", 1);
+
+  for my $ship (@SHIPS) {
+    my $placed = 0;
+    while (!$placed) {
+      _sb_show_grid($g->{player_grid}, "Your Fleet", 1);
+      writeline($config{'promptcolor'} . " Place $ship->{name} ($ship->{size} spaces)" . $RST, 1);
+      writeline($config{'promptcolor'} . " Position (e.g. A5): " . $RST);
+      my $pos = getline(text, 4, "", 1);
+      chomp $pos;
+      $pos = uc($pos);
+
+      my ($py, $px) = _sb_parse_coord($pos);
+      if ($py < 0) {
+        writeline($config{'errorcolor'} . " Invalid coordinate." . $RST, 1);
+        next;
+      }
+
+      writeline($config{'promptcolor'} . " Direction [H]orizontal/[V]ertical: " . $RST);
+      my $dir = uc(waitkey("H"));
+      writeline("", 1);
+      my $horiz = ($dir eq 'H') ? 1 : 0;
+
+      if (_sb_can_place($g->{player_grid}, $py, $px, $ship->{size}, $horiz)) {
+        my @cells;
+        for my $i (0 .. $ship->{size} - 1) {
+          my $cy = $horiz ? $py : $py + $i;
+          my $cx = $horiz ? $px + $i : $px;
+          $g->{player_grid}[$cy][$cx] = $CELL_SHIP;
+          push @cells, [$cy, $cx];
+        }
+        push @{$g->{player_ships}}, { name => $ship->{name}, size => $ship->{size}, cells => \@cells, hits => 0 };
+        $placed = 1;
+      } else {
+        writeline($config{'errorcolor'} . " Can't place there - out of bounds or overlapping." . $RST, 1);
+      }
+    }
+  }
+}
+
+sub _sb_parse_coord {
+  my ($str) = @_;
+  return (-1, -1) unless $str =~ /^([A-J])(\d{1,2})$/i;
+  my $y = ord(uc($1)) - ord('A');
+  my $x = $2 - 1;
+  return (-1, -1) if $y < 0 || $y >= $GRID_SIZE || $x < 0 || $x >= $GRID_SIZE;
+  return ($y, $x);
+}
+
+sub _sb_can_place {
+  my ($grid, $y, $x, $size, $horiz) = @_;
+  for my $i (0 .. $size - 1) {
+    my $cy = $horiz ? $y : $y + $i;
+    my $cx = $horiz ? $x + $i : $x;
+    return 0 if $cy >= $GRID_SIZE || $cx >= $GRID_SIZE;
+    return 0 if $grid->[$cy][$cx] ne $CELL_EMPTY;
+  }
+  return 1;
+}
+
+# ============================================================================
+# SHIP PLACEMENT - AI
+# ============================================================================
+
+sub _sb_place_ships_ai {
+  my ($g) = @_;
+  for my $ship (@SHIPS) {
+    my $placed = 0;
+    while (!$placed) {
+      my $y = int(rand($GRID_SIZE));
+      my $x = int(rand($GRID_SIZE));
+      my $horiz = int(rand(2));
+      if (_sb_can_place($g->{enemy_grid}, $y, $x, $ship->{size}, $horiz)) {
+        my @cells;
+        for my $i (0 .. $ship->{size} - 1) {
+          my $cy = $horiz ? $y : $y + $i;
+          my $cx = $horiz ? $x + $i : $x;
+          $g->{enemy_grid}[$cy][$cx] = $CELL_SHIP;
+          push @cells, [$cy, $cx];
+        }
+        push @{$g->{enemy_ships}}, { name => $ship->{name}, size => $ship->{size}, cells => \@cells, hits => 0 };
+        $placed = 1;
+      }
+    }
+  }
+}
+
+# ============================================================================
+# DISPLAY
+# ============================================================================
+
+sub _sb_display {
+  my ($g) = @_;
+  door_clear();
+  writeline($config{'themecolor'} . " Sea Battle" . $config{'systemcolor'} . "  Turn: " .
+    $config{'datacolor'} . $g->{turn} . $RST, 1);
+  writeline("", 1);
+
+  # Show both grids side by side
+  writeline($config{'themecolor'} . "  Your Fleet            Enemy Waters" . $RST, 1);
+  writeline($config{'systemcolor'} . "   1234567890           1234567890" . $RST, 1);
+
+  for my $y (0 .. $GRID_SIZE - 1) {
+    my $row_label = chr(ord('A') + $y);
+    my $left = $config{'systemcolor'} . " $row_label " . $RST;
+    for my $x (0 .. $GRID_SIZE - 1) {
+      my $cell = $g->{player_grid}[$y][$x];
+      # Show enemy shots on our grid
+      if ($g->{enemy_shots}[$y][$x] eq $CELL_HIT) {
+        $left .= $config{'errorcolor'} . "X" . $RST;
+      } elsif ($g->{enemy_shots}[$y][$x] eq $CELL_MISS) {
+        $left .= $config{'linecolor'} . "-" . $RST;
+      } elsif ($cell eq $CELL_SHIP) {
+        $left .= $config{'usercolor'} . "O" . $RST;
+      } else {
+        $left .= $config{'linecolor'} . "." . $RST;
+      }
+    }
+
+    $left .= "       ";
+    $left .= $config{'systemcolor'} . " $row_label " . $RST;
+
+    for my $x (0 .. $GRID_SIZE - 1) {
+      my $shot = $g->{player_shots}[$y][$x];
+      if ($shot eq $CELL_HIT) {
+        $left .= $config{'errorcolor'} . "X" . $RST;
+      } elsif ($shot eq $CELL_SUNK) {
+        $left .= $config{'usercolor'} . "#" . $RST;
+      } elsif ($shot eq $CELL_MISS) {
+        $left .= $config{'linecolor'} . "-" . $RST;
+      } else {
+        $left .= $config{'linecolor'} . "." . $RST;
+      }
+    }
+    writeline($left, 1);
+  }
+  writeline("", 1);
+
+  # Ship status
+  _sb_show_ship_status($g->{player_ships}, "Your ships");
+}
+
+sub _sb_show_grid {
+  my ($grid, $title, $show_ships) = @_;
+  writeline("", 1);
+  writeline($config{'themecolor'} . " $title" . $RST, 1);
+  writeline($config{'systemcolor'} . "   1234567890" . $RST, 1);
+  for my $y (0 .. $GRID_SIZE - 1) {
+    my $row = $config{'systemcolor'} . " " . chr(ord('A') + $y) . " " . $RST;
+    for my $x (0 .. $GRID_SIZE - 1) {
+      my $cell = $grid->[$y][$x];
+      if ($cell eq $CELL_SHIP && $show_ships) {
+        $row .= $config{'usercolor'} . "O" . $RST;
+      } else {
+        $row .= $config{'linecolor'} . "." . $RST;
+      }
+    }
+    writeline($row, 1);
+  }
+}
+
+sub _sb_show_ship_status {
+  my ($ships, $label) = @_;
+  writeline($config{'systemcolor'} . " $label:" . $RST, 1);
+  for my $ship (@$ships) {
+    my $sunk = ($ship->{hits} >= $ship->{size});
+    my $color = $sunk ? $config{'errorcolor'} : $config{'usercolor'};
+    my $status = $sunk ? "SUNK" : "$ship->{hits}/$ship->{size} hit";
+    writeline("  " . $color . sprintf("%-12s %s", $ship->{name}, $status) . $RST, 1);
+  }
+}
+
+# ============================================================================
+# PLAYER FIRE
+# ============================================================================
+
+sub _sb_player_fire {
+  my ($g) = @_;
+
+  writeline($config{'promptcolor'} . " Fire at (e.g. A5, Q to quit): " . $RST);
+  my $input = getline(text, 4, "", 1);
+  chomp $input;
+  return 'quit' if uc($input) eq 'Q';
+
+  my ($ty, $tx) = _sb_parse_coord(uc($input));
+  if ($ty < 0) {
+    writeline($config{'errorcolor'} . " Invalid coordinate." . $RST, 1);
+    door_pause();
+    return 'invalid';
+  }
+
+  if ($g->{player_shots}[$ty][$tx] ne $CELL_EMPTY) {
+    writeline($config{'systemcolor'} . " Already fired there." . $RST, 1);
+    door_pause();
+    return 'repeat';
+  }
+
+  if ($g->{enemy_grid}[$ty][$tx] eq $CELL_SHIP) {
+    $g->{player_shots}[$ty][$tx] = $CELL_HIT;
+    # Check which ship was hit
+    my $sunk_name = "";
+    for my $ship (@{$g->{enemy_ships}}) {
+      for my $cell (@{$ship->{cells}}) {
+        if ($cell->[0] == $ty && $cell->[1] == $tx) {
+          $ship->{hits}++;
+          if ($ship->{hits} >= $ship->{size}) {
+            $sunk_name = $ship->{name};
+            # Mark all cells as sunk
+            for my $c (@{$ship->{cells}}) {
+              $g->{player_shots}[$c->[0]][$c->[1]] = $CELL_SUNK;
+            }
+          }
+          last;
+        }
+      }
+    }
+    if ($sunk_name) {
+      writeline($config{'usercolor'} . " HIT! You sank the $sunk_name!" . $RST, 1);
+    } else {
+      writeline($config{'usercolor'} . " HIT!" . $RST, 1);
+    }
+  } else {
+    $g->{player_shots}[$ty][$tx] = $CELL_MISS;
+    writeline($config{'systemcolor'} . " Miss." . $RST, 1);
+  }
+
+  return 'ok';
+}
+
+# ============================================================================
+# AI FIRE (Hunt and Destroy)
+# ============================================================================
+
+sub _sb_ai_fire {
+  my ($g) = @_;
+
+  my ($ty, $tx);
+
+  if ($g->{ai_mode} eq 'destroy' && @{$g->{ai_hits}}) {
+    # Destroy mode: fire adjacent to known hits
+    ($ty, $tx) = _sb_ai_destroy_target($g);
+    if ($ty < 0) {
+      # Couldn't find a target, switch to hunt
+      $g->{ai_mode} = 'hunt';
+      $g->{ai_hits} = [];
+    }
+  }
+
+  if ($g->{ai_mode} eq 'hunt' || $ty < 0) {
+    # Hunt mode: random checkerboard pattern
+    my $attempts = 0;
+    do {
+      $ty = int(rand($GRID_SIZE));
+      $tx = int(rand($GRID_SIZE));
+      $attempts++;
+      # Checkerboard pattern for efficiency
+      if (($ty + $tx) % 2 != 0 && $attempts < 50) {
+        $ty = -1;
+        next;
+      }
+    } while ($ty < 0 || $g->{enemy_shots}[$ty][$tx] ne $CELL_EMPTY);
+  }
+
+  # Fire
+  if ($g->{player_grid}[$ty][$tx] eq $CELL_SHIP) {
+    $g->{enemy_shots}[$ty][$tx] = $CELL_HIT;
+    my $sunk_name = "";
+    for my $ship (@{$g->{player_ships}}) {
+      for my $cell (@{$ship->{cells}}) {
+        if ($cell->[0] == $ty && $cell->[1] == $tx) {
+          $ship->{hits}++;
+          if ($ship->{hits} >= $ship->{size}) {
+            $sunk_name = $ship->{name};
+            # Clear AI tracking for this ship
+            $g->{ai_hits} = [grep { !_sb_cell_in_ship($_, $ship) } @{$g->{ai_hits}}];
+            $g->{ai_mode} = 'hunt' if @{$g->{ai_hits}} == 0;
+          }
+          last;
+        }
+      }
+    }
+    push @{$g->{ai_hits}}, [$ty, $tx];
+    $g->{ai_mode} = 'destroy';
+
+    my $coord = chr(ord('A') + $ty) . ($tx + 1);
+    if ($sunk_name) {
+      writeline($config{'errorcolor'} . " Enemy fires at $coord - HIT! Your $sunk_name is sunk!" . $RST, 1);
+    } else {
+      writeline($config{'errorcolor'} . " Enemy fires at $coord - HIT!" . $RST, 1);
+    }
+  } else {
+    $g->{enemy_shots}[$ty][$tx] = $CELL_MISS;
+    my $coord = chr(ord('A') + $ty) . ($tx + 1);
+    writeline($config{'systemcolor'} . " Enemy fires at $coord - miss." . $RST, 1);
+  }
+  door_pause();
+}
+
+sub _sb_ai_destroy_target {
+  my ($g) = @_;
+  # Try adjacent cells to known hits
+  my @dirs = ([0,1],[0,-1],[1,0],[-1,0]);
+  for my $hit (@{$g->{ai_hits}}) {
+    for my $dir (@dirs) {
+      my $ny = $hit->[0] + $dir->[0];
+      my $nx = $hit->[1] + $dir->[1];
+      next if $ny < 0 || $ny >= $GRID_SIZE || $nx < 0 || $nx >= $GRID_SIZE;
+      next if $g->{enemy_shots}[$ny][$nx] ne $CELL_EMPTY;
+      return ($ny, $nx);
+    }
+  }
+  return (-1, -1);
+}
+
+sub _sb_cell_in_ship {
+  my ($cell, $ship) = @_;
+  for my $c (@{$ship->{cells}}) {
+    return 1 if $c->[0] == $cell->[0] && $c->[1] == $cell->[1];
+  }
+  return 0;
+}
+
+sub _sb_all_sunk {
+  my ($ships) = @_;
+  for my $ship (@$ships) {
+    return 0 if $ship->{hits} < $ship->{size};
+  }
+  return 1;
+}
+
+1;

@@ -97,9 +97,114 @@ Now, any user with security level 500+ will see "SysOp Utilities" in the main me
 
 ---
 
-**Note:**  
-- Menu files are typically found in `data/` but may be in `menu/` depending on your deployment or configuration.
-- Internal commands and menu navigation are handled by the core [`pb-main`](modules/pb-main) module.
-- For external doors/utilities, ensure your scripts are executable and located in the `doorexec/` directory.
+## Native Door Game Development
+
+PhotonBBS includes a framework for building native Perl door games that integrate directly with the BBS. No external executables or DOS emulation required.
+
+### Architecture
+
+```
+sbin/photonbbs-client
+  |-- modules/pb-doorlib     (shared library: saves, scores, credits)
+  |-- modules/pb-door-*      (individual game modules)
+  |-- data/games.mnu         (games submenu definition)
+  |-- data/main.mnu          (main menu with all entries)
+```
+
+### Creating a New Door Game
+
+1. **Create the module**: `modules/pb-door-yourgame`
+2. **Define an entry point**: `sub yourgame_main { ... }`
+3. **Add require**: In `sbin/photonbbs-client`, add `require ($config{'home'}."/modules/pb-door-yourgame");`
+4. **Add menu entry**: In `data/games.mnu` and `data/main.mnu`, add `K|Your Game (Description)|yourgame_main|10|0|internal|0`
+
+### Module Template
+
+```perl
+#!/usr/bin/perl
+#
+# PhotonBBS Door: Your Game
+# Brief description
+#
+
+my $DOOR_NAME = "yourgame";
+
+sub yourgame_main {
+  iamat($info{'handle'}, "Playing Your Game");
+
+  # Title screen
+  door_clear();
+  writeline($config{'themecolor'} . " Your Game Title" . $RST, 1);
+
+  # Load saved data
+  my $save = door_load($DOOR_NAME);
+
+  # ... game logic ...
+
+  # Save progress
+  door_save($DOOR_NAME, { score => $score, level => $level });
+
+  # Submit high score
+  door_submit_score($DOOR_NAME, $score, { level => $level });
+
+  # Broadcast achievement
+  door_broadcast($DOOR_NAME, "$info{'handle'} scored $score!");
+
+  door_pause("Press any key to return...");
+  iamat($info{'handle'}, "Finished Your Game");
+}
+
+1;
+```
+
+### Doorlib API
+
+The `pb-doorlib` module provides these functions:
+
+| Function | Purpose |
+|----------|---------|
+| `door_save($game, \%data)` | Save player data (per-user, per-game) |
+| `door_load($game)` | Load player data (returns hashref or undef) |
+| `door_delete_save($game)` | Delete player save |
+| `door_save_shared($game, $file, \%data)` | Save shared game data |
+| `door_load_shared($game, $file)` | Load shared game data |
+| `door_submit_score($game, $score, \%meta)` | Submit to high score board |
+| `door_get_scores($game, $limit)` | Get top scores |
+| `door_show_scores($game, $title, $label)` | Display score board |
+| `door_get_credits($game)` | Get player's credit balance |
+| `door_add_credits($game, $amount)` | Add credits |
+| `door_sub_credits($game, $amount)` | Subtract credits (returns 0 if insufficient) |
+| `door_check_turns($game, $max)` | Check remaining turns today |
+| `door_use_turn($game)` | Consume a turn |
+| `door_broadcast($game, $msg)` | Send message to online users |
+| `door_send_message($game, $user, $msg)` | Send message to specific user |
+| `door_get_messages($game)` | Get pending messages |
+| `door_get_online_players($game)` | List online players in this game |
+| `door_clear()` | Clear screen |
+| `door_pause($msg)` | Wait for keypress |
+| `door_yesno($prompt)` | Y/N prompt (default Y) |
+| `door_noyes($prompt)` | Y/N prompt (default N) |
+| `door_getnum($prompt, $min, $max)` | Numeric input |
+| `door_menu(\@items)` | Display menu and get selection |
+| `door_money($amount)` | Format number with commas |
+| `door_log_activity($game, $msg)` | Log to activity file |
+
+### Data Storage
+
+Door game data is stored in `data/doors/<gamename>/`:
+- `<username>.dat` - Per-user save (Storable format)
+- `scores.dat` - High score board
+- `credits.dat` - Credit balances
+- `shared/` - Shared game state files
+
+### Existing Games
+
+See `modules/pb-door-*` for working examples. Key patterns:
+- All games start with `iamat()` to set user status
+- Use `waitkey()` for single-key input, `getline()` for text/numbers
+- Use theme colors: `$config{'themecolor'}`, `$config{'datacolor'}`, etc.
+- End all modules with `1;`
 
 ---
+
+
