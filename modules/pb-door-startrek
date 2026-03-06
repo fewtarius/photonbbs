@@ -4,6 +4,7 @@
 # A turn-based tactical Star Trek game based on the classic 1978 BASIC game
 #
 # Based on Super Star Trek (1978 BASIC, Mayfield/Leedom/Ahl)
+# Reference: SBBS Star Trek (Synchronet BBS)
 # and the FUZIX C port by Chris Nystrom / Alan Cox
 #
 # 8x8 galaxy, 64 quadrants, each with 8x8 sectors

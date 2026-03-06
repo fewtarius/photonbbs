@@ -3,6 +3,9 @@
 # PhotonBBS Door Library
 # Shared framework for native Perl door games
 #
+# Several games were inspired by door games from the Synchronet BBS
+# (SBBS) project (synchro.net). Individual game credits in each module.
+#
 # Provides standardized APIs for:
 #   - Game I/O (wrapping main:: functions)
 #   - Persistent data storage (Storable-based, per-door)

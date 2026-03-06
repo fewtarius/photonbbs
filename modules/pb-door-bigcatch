@@ -4,6 +4,7 @@
 # A comprehensive freshwater fishing simulation
 #
 # Inspired by Freshwater Fishing Simulator (Eric Hamilton, 1993-1995)
+# Reference: SBBS FatFish (Art, Fatcats BBS)
 # Rebuilt as native Perl for PhotonBBS
 #
 # Features: 27 fish species across 7 families, 8 lure types x 4 sizes,

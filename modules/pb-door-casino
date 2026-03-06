@@ -4,7 +4,7 @@
 # A native Perl casino with Blackjack, Roulette, Slots, and Video Poker
 #
 # Based on Milliway's Casino (SBBS) mechanics
-# All games use door credits system
+# Reference: Milliway's Casino (Charles Ezzell & Matthew Warner, 1987; SBBS port)
 #
 
 # ============================================================================

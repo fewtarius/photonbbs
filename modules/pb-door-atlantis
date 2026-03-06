@@ -1,6 +1,7 @@
 #!/usr/bin/perl
 #
 # PhotonBBS Door: Atlantis
+# Inspired by Atlantis (Russell Wallace, 1993; SBBS port by Stephen Hurd)
 # A fantasy underwater exploration and adventure game
 #
 # Explore sunken ruins, battle sea creatures, collect artifacts,

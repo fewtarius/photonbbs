@@ -87,6 +87,8 @@ PhotonBBS ships with 10 native Perl door games:
 - **1000 Miles** - Racing card game (2-4 players, AI opponents)
 - **PhotonMUD** - Full multi-user dungeon (see PHOTONMUD.md)
 
+Several games were inspired by door games from the [Synchronet BBS](https://synchro.net) (SBBS) project. All implementations are original Perl code. See individual game headers for specific credits.
+
 ### External Door Game Support
 
 PhotonBBS also supports classic external BBS doors via drop files:

@@ -3,7 +3,8 @@
 # PhotonBBS Door: DrugLord
 # A native Perl port of the classic dopewars/Drug Wars BBS game
 #
-# Based on the mechanics of dopewars 1.5.12 (GPL v2, Ben Webb)
+# Based on dopewars 1.5.12 (GPL v2, Ben Webb)
+# Reference: SBBS DrugLord (Art, Fatcats BBS)
 # and the original Drug Wars by John Dell / Happy Hacker Foundation
 #
 # Game: Buy and sell drugs across NYC locations over 31 days.
