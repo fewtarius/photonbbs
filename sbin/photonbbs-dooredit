@@ -1,0 +1,1249 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door Editor
+# Operator tool for managing all native door games
+#
+# Provides CRUD operations on:
+#   - Per-user game saves (Storable .dat)
+#   - Shared game data (scores, economies, leaderboards)
+#   - Bulk operations (reset, backup, restore)
+#
+
+use strict;
+use warnings;
+use FindBin;
+use lib "$FindBin::Bin/../modules";
+use Storable qw(store retrieve lock_store lock_retrieve dclone);
+use Fcntl qw(:flock);
+use File::Copy;
+use POSIX qw(strftime);
+
+# --- Load config and framework ---
+our %config;
+our %info;
+our %theme;
+our ($CLR, $RST, $BLD);
+
+require "$FindBin::Bin/../modules/pb-defaults";
+require "$config{'home'}/modules/pb-framework";
+
+chomp(my $os = `uname`);
+$| = 1;
+$info{'ext'} = "ans";
+applytheme($config{'deftheme'});
+colorize();
+
+my $datadir = "$config{'home'}$config{'data'}";
+my $doordir = "$datadir/doors";
+
+# ============================================================================
+# GAME REGISTRY
+# ============================================================================
+# Each game entry describes its data structures for the editor
+
+my @GAMES = (
+  {
+    id     => "reddragon",
+    name   => "Red Dragon",
+    fields => [qw(level hp max_hp str def gold bank exp weapon armor
+                  forest_fights pvp_fights charm gems dragon_kills deaths
+                  kills last_reset created alive)],
+    field_types => {
+      alive => 'bool', level => 'int', hp => 'int', max_hp => 'int',
+      str => 'int', def => 'int', gold => 'int', bank => 'int', exp => 'int',
+      weapon => 'int', armor => 'int', forest_fights => 'int',
+      pvp_fights => 'int', charm => 'int', gems => 'int',
+      dragon_kills => 'int', deaths => 'int', kills => 'int',
+      last_reset => 'epoch', created => 'epoch',
+    },
+    shared => ["scores.dat"],
+  },
+  {
+    id     => "startrader",
+    name   => "Star Trader",
+    fields => [qw(name sector credits ship_class holds fighters shields
+                  turns last_play experience kills deaths alignment
+                  mines_laid planets_owned total_trades total_profit)],
+    field_types => {
+      sector => 'int', credits => 'int', ship_class => 'int', holds => 'int',
+      fighters => 'int', shields => 'int', turns => 'int', experience => 'int',
+      kills => 'int', deaths => 'int', alignment => 'int', mines_laid => 'int',
+      planets_owned => 'int', total_trades => 'int', total_profit => 'int',
+    },
+    shared => ["scores.dat", "universe.dat"],
+  },
+  {
+    id     => "casino",
+    name   => "Casino",
+    fields => [],
+    field_types => {},
+    shared => ["scores.dat", "jackpot.dat"],
+    note   => "Casino uses BBS credits, not per-user saves",
+  },
+  {
+    id     => "druglord",
+    name   => "Drug Lord",
+    fields => [],
+    field_types => {},
+    shared => ["scores.dat", "economy.dat"],
+    note   => "Drug Lord is session-only, no persistent player saves",
+  },
+  {
+    id     => "seabattle",
+    name   => "Sea Battle",
+    fields => [qw(wins losses)],
+    field_types => { wins => 'int', losses => 'int' },
+    shared => ["scores.dat"],
+  },
+  {
+    id     => "startrek",
+    name   => "Star Trek",
+    fields => [qw(victories defeats total_kills best_rating)],
+    field_types => {
+      victories => 'int', defeats => 'int',
+      total_kills => 'int', best_rating => 'int',
+    },
+    shared => ["scores.dat", "federation.dat"],
+  },
+  {
+    id     => "bigcatch",
+    name   => "Big Catch",
+    fields => [qw(money rod_power fish_finder total_caught biggest
+                  lifetime_money)],
+    field_types => {
+      money => 'float', rod_power => 'int', fish_finder => 'bool',
+      total_caught => 'int', biggest => 'float', lifetime_money => 'float',
+    },
+    shared => ["scores.dat", "derby.dat"],
+    complex_fields => [qw(species_caught lures_owned)],
+  },
+  {
+    id     => "atlantis",
+    name   => "Atlantis",
+    fields => [qw(gold oxygen max_oxygen hp max_hp exp depth max_depth
+                  x y gear weapon tool turns dives creatures_killed
+                  artifacts_found atlantis_found last_reset created)],
+    field_types => {
+      gold => 'int', oxygen => 'int', max_oxygen => 'int', hp => 'int',
+      max_hp => 'int', exp => 'int', depth => 'int', max_depth => 'int',
+      x => 'int', y => 'int', gear => 'int', weapon => 'int', tool => 'int',
+      turns => 'int', dives => 'int', creatures_killed => 'int',
+      artifacts_found => 'int', atlantis_found => 'bool',
+      last_reset => 'epoch', created => 'epoch',
+    },
+    shared => ["scores.dat"],
+    complex_fields => [qw(artifacts explored map)],
+  },
+  {
+    id     => "1000miles",
+    name   => "1000 Miles",
+    fields => [qw(total hands_won hands_played)],
+    field_types => {
+      total => 'int', hands_won => 'int', hands_played => 'int',
+    },
+    shared => ["scores.dat"],
+  },
+);
+
+# Build lookup by id
+my %GAME_BY_ID;
+for my $g (@GAMES) { $GAME_BY_ID{$g->{id}} = $g; }
+
+# ============================================================================
+# DATA ACCESS
+# ============================================================================
+
+sub game_dir {
+  my ($game_id) = @_;
+  return "$doordir/$game_id";
+}
+
+sub list_players {
+  my ($game_id) = @_;
+  my $dir = game_dir($game_id);
+  return () unless -d $dir;
+  my @players;
+  opendir(my $dh, $dir) or return ();
+  for my $f (readdir($dh)) {
+    next unless $f =~ /^(.+)\.dat$/;
+    my $name = $1;
+    # Skip shared files
+    next if $name =~ /^(scores|derby|jackpot|economy|universe|federation|messages|world|galaxy|shared)/;
+    push @players, $name;
+  }
+  closedir($dh);
+  return sort @players;
+}
+
+sub load_player {
+  my ($game_id, $player_file) = @_;
+  my $file = game_dir($game_id) . "/$player_file.dat";
+  return undef unless -e $file;
+  my $data;
+  eval { $data = lock_retrieve($file); };
+  return $@ ? undef : $data;
+}
+
+sub save_player {
+  my ($game_id, $player_file, $data) = @_;
+  my $file = game_dir($game_id) . "/$player_file.dat";
+  eval { lock_store($data, $file); };
+  return $@ ? 0 : 1;
+}
+
+sub delete_player {
+  my ($game_id, $player_file) = @_;
+  my $file = game_dir($game_id) . "/$player_file.dat";
+  return unlink($file) if -e $file;
+  return 0;
+}
+
+sub load_shared {
+  my ($game_id, $filename) = @_;
+  my $file = game_dir($game_id) . "/$filename";
+  return undef unless -e $file;
+  my $data;
+  eval { $data = lock_retrieve($file); };
+  return $@ ? undef : $data;
+}
+
+sub save_shared {
+  my ($game_id, $filename, $data) = @_;
+  my $file = game_dir($game_id) . "/$filename";
+  eval { lock_store($data, $file); };
+  return $@ ? 0 : 1;
+}
+
+# ============================================================================
+# FORMATTING
+# ============================================================================
+
+sub fmt_value {
+  my ($val, $type) = @_;
+  $type //= 'str';
+  return "(undef)" unless defined $val;
+  if ($type eq 'bool') { return $val ? "Yes" : "No"; }
+  if ($type eq 'epoch') {
+    return $val > 0 ? strftime("%Y-%m-%d %H:%M", localtime($val)) : "Never";
+  }
+  if ($type eq 'float') { return sprintf("%.2f", $val); }
+  if ($type eq 'int') { return int($val); }
+  if (ref $val eq 'HASH') { return "{" . scalar(keys %$val) . " keys}"; }
+  if (ref $val eq 'ARRAY') { return "[" . scalar(@$val) . " items]"; }
+  return "$val";
+}
+
+sub parse_value {
+  my ($input, $type) = @_;
+  $type //= 'str';
+  if ($type eq 'bool') {
+    return 1 if $input =~ /^(1|y|yes|true)$/i;
+    return 0 if $input =~ /^(0|n|no|false)$/i;
+    return undef;
+  }
+  if ($type eq 'epoch') {
+    return int($input) if $input =~ /^\d+$/;
+    return undef;
+  }
+  if ($type eq 'int') {
+    return int($input) if $input =~ /^-?\d+$/;
+    return undef;
+  }
+  if ($type eq 'float') {
+    return $input + 0 if $input =~ /^-?[\d.]+$/;
+    return undef;
+  }
+  return $input;
+}
+
+sub header {
+  my ($title) = @_;
+  print "\e[2J\e[H";
+  writeline($config{'themecolor'} . " $title" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("=" x 60) . $RST, 1);
+  writeline("", 1);
+}
+
+sub divider {
+  writeline($config{'linecolor'} . " " . ("-" x 60) . $RST, 1);
+}
+
+sub pause_continue {
+  writeline($config{'systemcolor'} . " Press any key..." . $RST);
+  cbreak("on");
+  waitkey();
+  cbreak("off");
+  print "\n";
+}
+
+sub confirm {
+  my ($msg) = @_;
+  writeline($config{'promptcolor'} . " $msg " . $config{'systemcolor'} . "[y/N] " . $RST);
+  cbreak("on");
+  my $r = waitkey();
+  cbreak("off");
+  print "\n";
+  return ($r && $r =~ /^[Yy]$/) ? 1 : 0;
+}
+
+sub get_input {
+  my ($prompt, $maxlen) = @_;
+  $maxlen //= 40;
+  writeline($config{'promptcolor'} . " $prompt: " . $RST);
+  cbreak("off");
+  my $input = getline("text", $maxlen, "", 1);
+  chomp $input if defined $input;
+  return $input;
+}
+
+# ============================================================================
+# MAIN MENU
+# ============================================================================
+
+sub main_menu {
+  while (1) {
+    header("PhotonBBS Door Editor");
+    writeline($config{'systemcolor'} . " Games:" . $RST, 1);
+    writeline("", 1);
+
+    my $idx = 1;
+    my %sel_map;
+    for my $g (@GAMES) {
+      my $dir = game_dir($g->{id});
+      my @p = list_players($g->{id});
+      my $pcount = scalar @p;
+      my $note = $g->{note} ? " ($g->{note})" : "";
+      my $shared_count = 0;
+      for my $sf (@{$g->{shared}}) {
+        $shared_count++ if -e "$dir/$sf";
+      }
+      writeline(sprintf("  %s%2d%s %s%-18s%s %3d players  %d shared files%s",
+        $config{'promptcolor'}, $idx, $config{'themecolor'},
+        $config{'usercolor'}, $g->{name}, $config{'systemcolor'},
+        $pcount, $shared_count, $config{'datacolor'} . $note . $RST), 1);
+      $sel_map{$idx} = $g;
+      $idx++;
+    }
+
+    writeline("", 1);
+    divider();
+    writeline("", 1);
+    writeline("  " . $config{'promptcolor'} . "S" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Score Manager (all games)" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "B" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Backup All Door Data" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "R" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Reset Game (wipe all data)" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Quit" . $RST, 1);
+    writeline("", 1);
+
+    my $choice = get_input("Selection", 2);
+    return if !defined $choice || $choice eq '' || uc($choice) eq 'Q';
+
+    if (uc($choice) eq 'S') { score_manager_menu(); next; }
+    if (uc($choice) eq 'B') { backup_all(); next; }
+    if (uc($choice) eq 'R') { reset_game_menu(); next; }
+
+    my $num = int($choice);
+    if ($num >= 1 && exists $sel_map{$num}) {
+      game_menu($sel_map{$num});
+    }
+  }
+}
+
+# ============================================================================
+# PER-GAME MENU
+# ============================================================================
+
+sub game_menu {
+  my ($game) = @_;
+  while (1) {
+    header("$game->{name} Management");
+
+    my @players = list_players($game->{id});
+    writeline($config{'systemcolor'} . " Players: " .
+      $config{'datacolor'} . scalar(@players) . $RST, 1);
+
+    # Show shared files
+    my $dir = game_dir($game->{id});
+    for my $sf (@{$game->{shared}}) {
+      my $exists = (-e "$dir/$sf") ? "exists" : "not found";
+      writeline($config{'systemcolor'} . " Shared: " .
+        $config{'datacolor'} . "$sf ($exists)" . $RST, 1);
+    }
+    writeline("", 1);
+
+    writeline("  " . $config{'promptcolor'} . "L" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "List Players" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "V" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "View Player" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "E" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Edit Player" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "D" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Delete Player" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "S" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Shared Data" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "W" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Wipe All Players" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Back" . $RST, 1);
+    writeline("", 1);
+
+    my $choice = get_input("Command", 1);
+    return if !defined $choice || $choice eq '' || uc($choice) eq 'Q';
+    $choice = uc($choice);
+
+    if    ($choice eq 'L') { list_players_menu($game); }
+    elsif ($choice eq 'V') { view_player_menu($game); }
+    elsif ($choice eq 'E') { edit_player_menu($game); }
+    elsif ($choice eq 'D') { delete_player_menu($game); }
+    elsif ($choice eq 'S') { shared_data_menu($game); }
+    elsif ($choice eq 'W') { wipe_players_menu($game); }
+  }
+}
+
+# ============================================================================
+# PLAYER LISTING
+# ============================================================================
+
+sub list_players_menu {
+  my ($game) = @_;
+  header("$game->{name} - Players");
+
+  my @players = list_players($game->{id});
+  if (!@players) {
+    writeline($config{'systemcolor'} . " No players found." . $RST, 1);
+    pause_continue();
+    return;
+  }
+
+  writeline(sprintf("  %s%-4s %-20s%s", $config{'systemcolor'}, "#", "Player", $RST), 1);
+  divider();
+
+  my $idx = 1;
+  for my $p (@players) {
+    my $data = load_player($game->{id}, $p);
+    my $summary = "";
+    if ($data && @{$game->{fields}}) {
+      # Show first 3 key fields as summary
+      my @parts;
+      my $count = 0;
+      for my $f (@{$game->{fields}}) {
+        last if $count >= 4;
+        next unless defined $data->{$f};
+        my $type = $game->{field_types}{$f} // 'str';
+        push @parts, "$f=" . fmt_value($data->{$f}, $type);
+        $count++;
+      }
+      $summary = join(", ", @parts);
+    }
+    writeline(sprintf("  %s%3d%s %s%-20s%s %s",
+      $config{'promptcolor'}, $idx, $config{'themecolor'},
+      $config{'usercolor'}, $p, $config{'systemcolor'}, $summary . $RST), 1);
+    $idx++;
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Total: " . scalar(@players) . " players" . $RST, 1);
+  pause_continue();
+}
+
+# ============================================================================
+# SELECT PLAYER (shared helper)
+# ============================================================================
+
+sub select_player {
+  my ($game) = @_;
+  my @players = list_players($game->{id});
+  if (!@players) {
+    writeline($config{'systemcolor'} . " No players found." . $RST, 1);
+    pause_continue();
+    return undef;
+  }
+
+  writeline(sprintf("  %s%-4s %-20s%s", $config{'systemcolor'}, "#", "Player", $RST), 1);
+  my $idx = 1;
+  for my $p (@players) {
+    writeline(sprintf("  %s%3d%s %s%-20s%s",
+      $config{'promptcolor'}, $idx, $config{'themecolor'},
+      $config{'usercolor'}, $p . $RST), 1);
+    $idx++;
+  }
+  writeline("", 1);
+
+  my $choice = get_input("Player # (0 cancel)", 3);
+  return undef if !defined $choice || $choice eq '' || $choice eq '0';
+  my $num = int($choice);
+  return undef if $num < 1 || $num > @players;
+  return $players[$num - 1];
+}
+
+# ============================================================================
+# VIEW PLAYER
+# ============================================================================
+
+sub view_player_menu {
+  my ($game) = @_;
+  header("$game->{name} - View Player");
+
+  my $pfile = select_player($game);
+  return unless $pfile;
+
+  my $data = load_player($game->{id}, $pfile);
+  unless ($data) {
+    writeline($config{'errorcolor'} . " Failed to load player data." . $RST, 1);
+    pause_continue();
+    return;
+  }
+
+  show_player_data($game, $pfile, $data);
+  pause_continue();
+}
+
+sub show_player_data {
+  my ($game, $pfile, $data) = @_;
+
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Player: " .
+    $config{'usercolor'} . $pfile . $RST, 1);
+  divider();
+
+  # Show registered fields first
+  if (@{$game->{fields}}) {
+    for my $f (@{$game->{fields}}) {
+      my $type = $game->{field_types}{$f} // 'str';
+      my $val = $data->{$f};
+      writeline(sprintf("  %s%-20s%s %s%s",
+        $config{'systemcolor'}, $f, $config{'themecolor'},
+        $config{'datacolor'}, fmt_value($val, $type) . $RST), 1);
+    }
+  }
+
+  # Show complex fields
+  if ($game->{complex_fields}) {
+    writeline("", 1);
+    for my $cf (@{$game->{complex_fields}}) {
+      my $val = $data->{$cf};
+      if (ref $val eq 'HASH') {
+        writeline($config{'systemcolor'} . "  $cf: " .
+          $config{'datacolor'} . scalar(keys %$val) . " entries" . $RST, 1);
+        my $count = 0;
+        for my $k (sort keys %$val) {
+          last if $count >= 10;
+          writeline($config{'datacolor'} . "    $k = $val->{$k}" . $RST, 1);
+          $count++;
+        }
+        if (scalar(keys %$val) > 10) {
+          writeline($config{'systemcolor'} . "    ... and " .
+            (scalar(keys %$val) - 10) . " more" . $RST, 1);
+        }
+      } elsif (ref $val eq 'ARRAY') {
+        writeline($config{'systemcolor'} . "  $cf: " .
+          $config{'datacolor'} . scalar(@$val) . " items" . $RST, 1);
+      } elsif (defined $val) {
+        writeline($config{'systemcolor'} . "  $cf: " .
+          $config{'datacolor'} . "$val" . $RST, 1);
+      }
+    }
+  }
+
+  # Show any extra fields not in registry
+  my %known;
+  for my $f (@{$game->{fields}}) { $known{$f} = 1; }
+  for my $cf (@{$game->{complex_fields} // []}) { $known{$cf} = 1; }
+  my @extra = grep { !$known{$_} } sort keys %$data;
+  if (@extra) {
+    writeline("", 1);
+    writeline($config{'systemcolor'} . "  Additional fields:" . $RST, 1);
+    for my $f (@extra) {
+      my $val = $data->{$f};
+      if (ref $val) {
+        writeline(sprintf("  %s%-20s%s %s%s",
+          $config{'systemcolor'}, $f, $config{'themecolor'},
+          $config{'datacolor'}, fmt_value($val) . $RST), 1);
+      } else {
+        writeline(sprintf("  %s%-20s%s %s%s",
+          $config{'systemcolor'}, $f, $config{'themecolor'},
+          $config{'datacolor'}, (defined $val ? $val : "(undef)") . $RST), 1);
+      }
+    }
+  }
+}
+
+# ============================================================================
+# EDIT PLAYER
+# ============================================================================
+
+sub edit_player_menu {
+  my ($game) = @_;
+
+  if (!@{$game->{fields}}) {
+    writeline($config{'errorcolor'} . " This game has no editable per-user fields." . $RST, 1);
+    if ($game->{note}) {
+      writeline($config{'systemcolor'} . " Note: $game->{note}" . $RST, 1);
+    }
+    pause_continue();
+    return;
+  }
+
+  header("$game->{name} - Edit Player");
+
+  my $pfile = select_player($game);
+  return unless $pfile;
+
+  my $data = load_player($game->{id}, $pfile);
+  unless ($data) {
+    writeline($config{'errorcolor'} . " Failed to load player data." . $RST, 1);
+    pause_continue();
+    return;
+  }
+
+  my $editing = 1;
+  while ($editing) {
+    header("$game->{name} - Editing: $pfile");
+    show_player_data($game, $pfile, $data);
+    writeline("", 1);
+    divider();
+    writeline("", 1);
+
+    # Build field selection
+    writeline($config{'systemcolor'} . " Enter field name to edit, or:" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "S" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Save changes" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "X" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Cancel (discard)" . $RST, 1);
+    writeline("", 1);
+
+    my $field = get_input("Field name or command", 30);
+    return if !defined $field || $field eq '';
+
+    if (uc($field) eq 'S') {
+      if (save_player($game->{id}, $pfile, $data)) {
+        writeline($config{'usercolor'} . " Saved." . $RST, 1);
+      } else {
+        writeline($config{'errorcolor'} . " Save failed!" . $RST, 1);
+      }
+      pause_continue();
+      return;
+    }
+    if (uc($field) eq 'X') { return; }
+
+    # Find the field
+    my $type = $game->{field_types}{$field};
+    if (!defined $type && !exists $data->{$field}) {
+      writeline($config{'errorcolor'} . " Unknown field: $field" . $RST, 1);
+      pause_continue();
+      next;
+    }
+    $type //= 'str';
+
+    my $current = $data->{$field};
+    if (ref $current) {
+      writeline($config{'errorcolor'} . " Cannot edit complex field '$field' directly." . $RST, 1);
+      writeline($config{'systemcolor'} . " Use shared data manager for complex structures." . $RST, 1);
+      pause_continue();
+      next;
+    }
+
+    writeline($config{'systemcolor'} . " Current: " .
+      $config{'datacolor'} . fmt_value($current, $type) . $RST, 1);
+    my $new = get_input("New value ($type)", 40);
+    next if !defined $new || $new eq '';
+
+    my $parsed = parse_value($new, $type);
+    if (!defined $parsed) {
+      writeline($config{'errorcolor'} . " Invalid value for type '$type'" . $RST, 1);
+      pause_continue();
+      next;
+    }
+    $data->{$field} = $parsed;
+    writeline($config{'usercolor'} . " Set $field = " . fmt_value($parsed, $type) . $RST, 1);
+    pause_continue();
+  }
+}
+
+# ============================================================================
+# DELETE PLAYER
+# ============================================================================
+
+sub delete_player_menu {
+  my ($game) = @_;
+  header("$game->{name} - Delete Player");
+
+  my $pfile = select_player($game);
+  return unless $pfile;
+
+  if (confirm("Delete $pfile from $game->{name}? This cannot be undone.")) {
+    if (delete_player($game->{id}, $pfile)) {
+      writeline($config{'usercolor'} . " Deleted $pfile." . $RST, 1);
+    } else {
+      writeline($config{'errorcolor'} . " Failed to delete." . $RST, 1);
+    }
+    pause_continue();
+  }
+}
+
+# ============================================================================
+# WIPE ALL PLAYERS
+# ============================================================================
+
+sub wipe_players_menu {
+  my ($game) = @_;
+  header("$game->{name} - Wipe All Players");
+
+  my @players = list_players($game->{id});
+  writeline($config{'errorcolor'} . " WARNING: This will delete ALL " .
+    scalar(@players) . " player saves for $game->{name}!" . $RST, 1);
+  writeline("", 1);
+
+  writeline($config{'systemcolor'} . " Type the game name to confirm: " . $RST);
+  cbreak("off");
+  my $input = getline("text", 30, "", 1);
+  chomp $input if defined $input;
+
+  if (lc($input // '') ne lc($game->{name})) {
+    writeline($config{'systemcolor'} . " Cancelled." . $RST, 1);
+    pause_continue();
+    return;
+  }
+
+  my ($deleted, $failed) = (0, 0);
+  for my $p (@players) {
+    if (delete_player($game->{id}, $p)) { $deleted++; }
+    else { $failed++; }
+  }
+  writeline($config{'usercolor'} . " Deleted $deleted player(s)." . $RST, 1);
+  writeline($config{'errorcolor'} . " Failed: $failed" . $RST, 1) if $failed;
+  pause_continue();
+}
+
+# ============================================================================
+# SHARED DATA MANAGEMENT
+# ============================================================================
+
+sub shared_data_menu {
+  my ($game) = @_;
+  while (1) {
+    header("$game->{name} - Shared Data");
+
+    my $dir = game_dir($game->{id});
+    my $idx = 1;
+    my @files;
+    for my $sf (@{$game->{shared}}) {
+      my $path = "$dir/$sf";
+      my $exists = -e $path;
+      my $size = $exists ? -s $path : 0;
+      writeline(sprintf("  %s%2d%s %s%-20s%s %s (%s bytes)",
+        $config{'promptcolor'}, $idx, $config{'themecolor'},
+        $config{'usercolor'}, $sf, $config{'systemcolor'},
+        $exists ? "exists" : "NOT FOUND",
+        $exists ? $size : "-") . $RST, 1);
+      push @files, $sf;
+      $idx++;
+    }
+
+    # Also list any other .dat files in the dir
+    if (-d $dir && opendir(my $dh, $dir)) {
+      my %known = map { $_ => 1 } @{$game->{shared}};
+      for my $f (sort readdir($dh)) {
+        next unless $f =~ /\.dat$/;
+        next if $f =~ /^[a-z_-]+\.dat$/;  # Player files
+        next if $known{$f};
+        # Check if it's a shared file we haven't listed
+        writeline(sprintf("  %s%2d%s %s%-20s%s (unlisted shared)",
+          $config{'promptcolor'}, $idx, $config{'themecolor'},
+          $config{'datacolor'}, $f . $RST), 1);
+        push @files, $f;
+        $idx++;
+      }
+      closedir($dh);
+    }
+
+    writeline("", 1);
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Back" . $RST, 1);
+    writeline("", 1);
+
+    my $choice = get_input("View file # (0 back)", 2);
+    return if !defined $choice || $choice eq '' || $choice eq '0' || uc($choice) eq 'Q';
+
+    my $num = int($choice);
+    if ($num >= 1 && $num <= @files) {
+      view_shared_file($game, $files[$num - 1]);
+    }
+  }
+}
+
+sub view_shared_file {
+  my ($game, $filename) = @_;
+
+  if ($filename eq 'scores.dat') {
+    view_scores($game);
+    return;
+  }
+
+  my $data = load_shared($game->{id}, $filename);
+  unless (defined $data) {
+    writeline($config{'errorcolor'} . " Cannot load $filename" . $RST, 1);
+    pause_continue();
+    return;
+  }
+
+  header("$game->{name} - $filename");
+  dump_structure($data, "  ", 0);
+  writeline("", 1);
+
+  if (confirm("Edit this data?")) {
+    edit_shared_data($game, $filename, $data);
+  } else {
+    if (confirm("Delete this file?")) {
+      my $path = game_dir($game->{id}) . "/$filename";
+      unlink $path;
+      writeline($config{'usercolor'} . " Deleted $filename" . $RST, 1);
+      pause_continue();
+    }
+  }
+}
+
+sub dump_structure {
+  my ($data, $indent, $depth) = @_;
+  $depth //= 0;
+  return if $depth > 5;  # Prevent infinite recursion
+
+  if (ref $data eq 'HASH') {
+    my @keys = sort keys %$data;
+    my $count = 0;
+    for my $k (@keys) {
+      last if $count >= 30 && $depth > 0;
+      my $v = $data->{$k};
+      if (ref $v eq 'HASH') {
+        writeline($config{'systemcolor'} . "${indent}$k: " .
+          $config{'datacolor'} . "{" . scalar(keys %$v) . " keys}" . $RST, 1);
+        dump_structure($v, "$indent  ", $depth + 1) if $depth < 2;
+      } elsif (ref $v eq 'ARRAY') {
+        writeline($config{'systemcolor'} . "${indent}$k: " .
+          $config{'datacolor'} . "[" . scalar(@$v) . " items]" . $RST, 1);
+        if (@$v <= 5 && $depth < 3) {
+          dump_structure($v, "$indent  ", $depth + 1);
+        }
+      } else {
+        writeline(sprintf("%s${indent}%-20s%s %s",
+          $config{'systemcolor'}, $k, $config{'themecolor'},
+          $config{'datacolor'} . (defined $v ? $v : "(undef)") . $RST), 1);
+      }
+      $count++;
+    }
+    if (@keys > 30 && $depth > 0) {
+      writeline($config{'systemcolor'} . "${indent}... and " .
+        (@keys - 30) . " more keys" . $RST, 1);
+    }
+  } elsif (ref $data eq 'ARRAY') {
+    my $count = 0;
+    for my $item (@$data) {
+      last if $count >= 20;
+      if (ref $item eq 'HASH') {
+        my $summary = join(", ", map { "$_=" . ($item->{$_} // "?") }
+          grep { !ref($item->{$_}) } (sort keys %$item)[0..3]);
+        writeline($config{'datacolor'} . "${indent}[$count] $summary" . $RST, 1);
+      } elsif (ref $item) {
+        writeline($config{'datacolor'} . "${indent}[$count] " . ref($item) . $RST, 1);
+      } else {
+        writeline($config{'datacolor'} . "${indent}[$count] $item" . $RST, 1);
+      }
+      $count++;
+    }
+    if (@$data > 20) {
+      writeline($config{'systemcolor'} . "${indent}... and " .
+        (@$data - 20) . " more items" . $RST, 1);
+    }
+  } else {
+    writeline($config{'datacolor'} . "${indent}" . (defined $data ? $data : "(undef)") . $RST, 1);
+  }
+}
+
+sub edit_shared_data {
+  my ($game, $filename, $data) = @_;
+
+  # For known structures, provide targeted editing
+  if ($filename eq 'derby.dat' && ref $data eq 'HASH' && $data->{entries}) {
+    edit_derby($game, $data);
+    return;
+  }
+  if ($filename eq 'jackpot.dat' && ref $data eq 'HASH') {
+    edit_jackpot($game, $data);
+    return;
+  }
+  if ($filename eq 'economy.dat' && ref $data eq 'HASH') {
+    edit_economy($game, $data);
+    return;
+  }
+  if ($filename eq 'federation.dat' && ref $data eq 'HASH') {
+    edit_federation($game, $data);
+    return;
+  }
+
+  # Generic hash editor for unknown structures
+  if (ref $data eq 'HASH') {
+    edit_generic_hash($game, $filename, $data);
+  } else {
+    writeline($config{'errorcolor'} . " Cannot edit this data type directly." . $RST, 1);
+    pause_continue();
+  }
+}
+
+# ============================================================================
+# SPECIFIC SHARED DATA EDITORS
+# ============================================================================
+
+sub edit_derby {
+  my ($game, $data) = @_;
+  my $entries = $data->{entries};
+
+  while (1) {
+    header("$game->{name} - Derby Standings");
+    my @names = sort { $entries->{$b}{biggest} <=> $entries->{$a}{biggest} } keys %$entries;
+    my $idx = 1;
+    for my $n (@names) {
+      my $e = $entries->{$n};
+      writeline(sprintf("  %s%2d%s %s%-18s%s Biggest: %.1flb  Caught: %d  Species: %d  Earned: \$%.2f",
+        $config{'promptcolor'}, $idx, $config{'themecolor'},
+        $config{'usercolor'}, $n, $config{'datacolor'},
+        $e->{biggest} // 0, $e->{total} // 0, $e->{species} // 0,
+        $e->{earned} // 0) . $RST, 1);
+      $idx++;
+    }
+
+    writeline("", 1);
+    writeline("  " . $config{'promptcolor'} . "D" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Delete entry" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "C" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Clear all" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Save & back" . $RST, 1);
+    writeline("", 1);
+
+    my $choice = get_input("Command", 2);
+    return if !defined $choice || $choice eq '' || uc($choice) eq 'Q';
+
+    if (uc($choice) eq 'D') {
+      my $del = get_input("Entry # to delete", 3);
+      my $num = int($del // 0);
+      if ($num >= 1 && $num <= @names) {
+        delete $entries->{$names[$num - 1]};
+        save_shared($game->{id}, "derby.dat", $data);
+        writeline($config{'usercolor'} . " Deleted." . $RST, 1);
+        pause_continue();
+      }
+    } elsif (uc($choice) eq 'C') {
+      if (confirm("Clear entire derby?")) {
+        $data->{entries} = {};
+        save_shared($game->{id}, "derby.dat", $data);
+        writeline($config{'usercolor'} . " Derby cleared." . $RST, 1);
+        pause_continue();
+        return;
+      }
+    }
+  }
+}
+
+sub edit_jackpot {
+  my ($game, $data) = @_;
+  header("Casino - Jackpot Pool");
+
+  dump_structure($data, "  ", 0);
+  writeline("", 1);
+
+  if (exists $data->{pool}) {
+    my $new = get_input("New pool amount (current: $data->{pool})", 12);
+    if (defined $new && $new =~ /^\d+$/) {
+      $data->{pool} = int($new);
+      save_shared($game->{id}, "jackpot.dat", $data);
+      writeline($config{'usercolor'} . " Jackpot pool set to $data->{pool}" . $RST, 1);
+    }
+  }
+  pause_continue();
+}
+
+sub edit_economy {
+  my ($game, $data) = @_;
+  header("Drug Lord - Economy State");
+  dump_structure($data, "  ", 0);
+  writeline("", 1);
+
+  if (confirm("Reset economy to default?")) {
+    unlink game_dir($game->{id}) . "/economy.dat";
+    writeline($config{'usercolor'} . " Economy reset." . $RST, 1);
+  }
+  pause_continue();
+}
+
+sub edit_federation {
+  my ($game, $data) = @_;
+  header("Star Trek - Federation Tracker");
+  dump_structure($data, "  ", 0);
+  writeline("", 1);
+
+  if (confirm("Reset federation tracker?")) {
+    unlink game_dir($game->{id}) . "/federation.dat";
+    writeline($config{'usercolor'} . " Federation tracker reset." . $RST, 1);
+  }
+  pause_continue();
+}
+
+sub edit_generic_hash {
+  my ($game, $filename, $data) = @_;
+  while (1) {
+    header("$game->{name} - $filename");
+    dump_structure($data, "  ", 0);
+    writeline("", 1);
+
+    writeline($config{'systemcolor'} . " Enter key name to edit, or:" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "S" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Save" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "X" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Cancel" . $RST, 1);
+    writeline("", 1);
+
+    my $key = get_input("Key or command", 30);
+    return if !defined $key || $key eq '' || uc($key) eq 'X';
+
+    if (uc($key) eq 'S') {
+      save_shared($game->{id}, $filename, $data);
+      writeline($config{'usercolor'} . " Saved." . $RST, 1);
+      pause_continue();
+      return;
+    }
+
+    if (exists $data->{$key} && !ref($data->{$key})) {
+      writeline($config{'systemcolor'} . " Current: " .
+        $config{'datacolor'} . $data->{$key} . $RST, 1);
+      my $new = get_input("New value", 40);
+      if (defined $new && $new ne '') {
+        $data->{$key} = $new;
+        writeline($config{'usercolor'} . " Set $key = $new" . $RST, 1);
+        pause_continue();
+      }
+    } elsif (exists $data->{$key}) {
+      writeline($config{'errorcolor'} . " Cannot edit complex value directly." . $RST, 1);
+      pause_continue();
+    } else {
+      writeline($config{'errorcolor'} . " Key '$key' not found." . $RST, 1);
+      pause_continue();
+    }
+  }
+}
+
+# ============================================================================
+# SCORE MANAGER
+# ============================================================================
+
+sub score_manager_menu {
+  while (1) {
+    header("Score Manager - All Games");
+
+    my $idx = 1;
+    my @games_with_scores;
+    for my $g (@GAMES) {
+      my $scores = load_shared($g->{id}, "scores.dat");
+      my $count = $scores ? (ref $scores eq 'ARRAY' ? scalar @$scores : 0) : 0;
+      writeline(sprintf("  %s%2d%s %s%-18s%s %d scores",
+        $config{'promptcolor'}, $idx, $config{'themecolor'},
+        $config{'usercolor'}, $g->{name}, $config{'systemcolor'}, $count) . $RST, 1);
+      push @games_with_scores, $g;
+      $idx++;
+    }
+
+    writeline("", 1);
+    writeline("  " . $config{'promptcolor'} . "C" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Clear all scores (all games)" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "Back" . $RST, 1);
+    writeline("", 1);
+
+    my $choice = get_input("Selection", 2);
+    return if !defined $choice || $choice eq '' || uc($choice) eq 'Q';
+
+    if (uc($choice) eq 'C') {
+      if (confirm("Clear ALL scores for ALL games?")) {
+        for my $g (@GAMES) {
+          my $path = game_dir($g->{id}) . "/scores.dat";
+          unlink $path if -e $path;
+        }
+        writeline($config{'usercolor'} . " All scores cleared." . $RST, 1);
+        pause_continue();
+      }
+      next;
+    }
+
+    my $num = int($choice);
+    if ($num >= 1 && $num <= @games_with_scores) {
+      view_scores($games_with_scores[$num - 1]);
+    }
+  }
+}
+
+sub view_scores {
+  my ($game) = @_;
+  my $scores = load_shared($game->{id}, "scores.dat");
+
+  header("$game->{name} - High Scores");
+
+  if (!$scores || !@$scores) {
+    writeline($config{'systemcolor'} . " No scores recorded." . $RST, 1);
+    pause_continue();
+    return;
+  }
+
+  writeline(sprintf("  %s%-4s %-20s %12s %s%s",
+    $config{'systemcolor'}, "#", "Player", "Score", "Date", $RST), 1);
+  divider();
+
+  my $idx = 1;
+  for my $entry (@$scores) {
+    my $extra = "";
+    for my $k (sort keys %$entry) {
+      next if $k =~ /^(handle|score|date|timestamp)$/;
+      $extra .= " $k=$entry->{$k}" unless ref $entry->{$k};
+    }
+    writeline(sprintf("  %s%3d%s %s%-20s%s %12s %s%s",
+      $config{'promptcolor'}, $idx, $config{'themecolor'},
+      $config{'usercolor'}, $entry->{handle} // "?",
+      $config{'datacolor'}, $entry->{score} // 0,
+      $entry->{date} // "", $config{'systemcolor'} . $extra . $RST), 1);
+    $idx++;
+  }
+
+  writeline("", 1);
+
+  my $choice = get_input("[D]elete entry, [C]lear all, [Q]uit", 2);
+  if (uc($choice // '') eq 'D') {
+    my $del = get_input("Entry # to delete", 3);
+    my $num = int($del // 0);
+    if ($num >= 1 && $num <= @$scores) {
+      splice(@$scores, $num - 1, 1);
+      save_shared($game->{id}, "scores.dat", $scores);
+      writeline($config{'usercolor'} . " Deleted." . $RST, 1);
+      pause_continue();
+    }
+  } elsif (uc($choice // '') eq 'C') {
+    if (confirm("Clear all scores for $game->{name}?")) {
+      save_shared($game->{id}, "scores.dat", []);
+      writeline($config{'usercolor'} . " Scores cleared." . $RST, 1);
+      pause_continue();
+    }
+  }
+}
+
+# ============================================================================
+# BACKUP
+# ============================================================================
+
+sub backup_all {
+  header("Backup All Door Data");
+
+  my $timestamp = strftime("%Y%m%d_%H%M%S", localtime());
+  my $backup_dir = "$datadir/doors_backup_$timestamp";
+
+  unless (-d $doordir) {
+    writeline($config{'errorcolor'} . " No door data directory found." . $RST, 1);
+    pause_continue();
+    return;
+  }
+
+  writeline($config{'systemcolor'} . " Backing up $doordir" . $RST, 1);
+  writeline($config{'systemcolor'} . " To: $backup_dir" . $RST, 1);
+  writeline("", 1);
+
+  if (!confirm("Proceed?")) { return; }
+
+  # Use File::Copy::Recursive if available, fall back to system cp
+  my $ret = system("cp", "-a", $doordir, $backup_dir);
+  if ($ret == 0) {
+    writeline($config{'usercolor'} . " Backup complete: $backup_dir" . $RST, 1);
+  } else {
+    writeline($config{'errorcolor'} . " Backup failed! (exit code: $ret)" . $RST, 1);
+  }
+  pause_continue();
+}
+
+# ============================================================================
+# RESET GAME
+# ============================================================================
+
+sub reset_game_menu {
+  header("Reset Game Data");
+
+  writeline($config{'errorcolor'} . " WARNING: This permanently deletes ALL data for a game." . $RST, 1);
+  writeline("", 1);
+
+  my $idx = 1;
+  my %sel_map;
+  for my $g (@GAMES) {
+    writeline(sprintf("  %s%2d%s %s%-18s%s",
+      $config{'promptcolor'}, $idx, $config{'themecolor'},
+      $config{'usercolor'}, $g->{name} . $RST), 1);
+    $sel_map{$idx} = $g;
+    $idx++;
+  }
+
+  writeline("", 1);
+  my $choice = get_input("Game # to reset (0 cancel)", 2);
+  return if !defined $choice || $choice eq '' || $choice eq '0';
+
+  my $num = int($choice);
+  return unless $num >= 1 && exists $sel_map{$num};
+  my $game = $sel_map{$num};
+
+  writeline("", 1);
+  writeline($config{'errorcolor'} . " This will delete ALL player saves, scores, and" . $RST, 1);
+  writeline($config{'errorcolor'} . " shared data for $game->{name}!" . $RST, 1);
+  writeline("", 1);
+
+  writeline($config{'systemcolor'} . " Type RESET to confirm: " . $RST);
+  cbreak("off");
+  my $input = getline("text", 10, "", 1);
+  chomp $input if defined $input;
+
+  if (($input // '') ne 'RESET') {
+    writeline($config{'systemcolor'} . " Cancelled." . $RST, 1);
+    pause_continue();
+    return;
+  }
+
+  my $dir = game_dir($game->{id});
+  if (-d $dir) {
+    my $count = 0;
+    if (opendir(my $dh, $dir)) {
+      for my $f (readdir($dh)) {
+        next if $f =~ /^\./;
+        unlink "$dir/$f" and $count++;
+      }
+      closedir($dh);
+    }
+    writeline($config{'usercolor'} . " Deleted $count files from $game->{name}." . $RST, 1);
+  } else {
+    writeline($config{'systemcolor'} . " No data directory found for $game->{name}." . $RST, 1);
+  }
+  pause_continue();
+}
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
+
+sub main {
+  writeline($config{'themecolor'} . " PhotonBBS Door Editor" . $RST, 1);
+  writeline($config{'systemcolor'} . " Loading..." . $RST, 1);
+
+  unless (-d $doordir) {
+    mkdir $doordir;
+    writeline($config{'systemcolor'} . " Created door data directory: $doordir" . $RST, 1);
+  }
+
+  main_menu();
+
+  writeline($config{'systemcolor'} . " Exiting Door Editor." . $RST, 1);
+}
+
+main();

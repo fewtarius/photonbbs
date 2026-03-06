@@ -1,17 +1,10 @@
-# PhotonBBS - Terminal Tavern - Menu Commands (PIPE separated)
+# PhotonBBS - Terminal Tavern - Games Menu
 #
-# Fields:
-# 1 - Key (what to type at the menu prompt)
-# 2 - Description (shown in menu)
-# 3 - Script to execute (for external) or subroutine (for internal)
-# 4 - Minimum Security required to run command
-# 5 - Command Hidden (1 = hidden unless sysop, 0 = visible)
-# 6 - Type of command (external, internal)
-# 7 - Concurrency Limit (0 = unlimited)
+# Accessible via /games or /doors from teleconference
+#
 ########################################################################
-# KEY|DESCRIPTION|SCRIPT_OR_SUB|SECLEVEL|HIDDEN|TYPE
+# KEY|DESCRIPTION|SCRIPT_OR_SUB|SECLEVEL|HIDDEN|TYPE|CONCURRENCY
 ########################################################################
-# ---- Online Games ----
 A|Enter PhotonMUD (Multi-User Dungeon)|photonmud|10|0|external|0
 B|Legend of the Red Dragon|lord.sh|10|0|external|0
 C|Red Dragon (Native RPG)|reddragon_main|10|0|internal|0
@@ -28,10 +21,3 @@ M|Barren Realms Elite|bre.sh|10|0|external|0
 N|Operation Overkill II (Combat)|ooii.sh|10|0|external|0
 O|Simpsons Door|simp.sh|10|0|external|0
 P|Darkness|darkness.sh|10|0|external|0
-# ---- Admin Tools ----
-U|Door Game Editor (Game Data)|photonbbs-dooredit|500|1|external|0
-V|PhotonMUD Editor (World Builder)|photonmud-editor|500|1|external|0
-W|User Editor (Account Management)|useredit|500|1|external|0
-X|Bulletin Editor (News Management)|bulledit|500|1|external|0
-Y|DOS Emulator (Legacy Games)|dosemu.sh|900|1|external|0
-Z|System Shell (Admin Access)|shell.sh|900|1|external|0

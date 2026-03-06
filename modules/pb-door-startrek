@@ -1,0 +1,833 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: Star Trek
+# A turn-based tactical Star Trek game based on the classic 1978 BASIC game
+#
+# Based on Super Star Trek (1978 BASIC, Mayfield/Leedom/Ahl)
+# and the FUZIX C port by Chris Nystrom / Alan Cox
+#
+# 8x8 galaxy, 64 quadrants, each with 8x8 sectors
+# Hunt Klingons, dock at starbases, use phasers and torpedoes
+#
+
+# ============================================================================
+# GAME CONSTANTS
+# ============================================================================
+
+my $GALAXY_SIZE   = 12;  # 12x12 quadrants (144 quadrants vs 64)
+my $SECTOR_SIZE   = 8;   # 8x8 sectors per quadrant
+my $START_ENERGY  = 5000;
+my $START_TORPS   = 15;
+my $MAX_SHIELDS   = 2500;
+
+# Sector content types
+my $S_EMPTY    = '.';
+my $S_STAR     = '*';
+my $S_KLINGON  = 'K';
+my $S_BASE     = 'B';
+my $S_SHIP     = 'E';
+
+# Device names and indices
+my @DEVICES = ('Warp Engines', 'Short Range Sensors', 'Long Range Sensors',
+               'Phasers', 'Photon Torpedoes', 'Damage Control',
+               'Shield Control', 'Library Computer');
+my $D_WARP = 0; my $D_SRS = 1; my $D_LRS = 2; my $D_PHASER = 3;
+my $D_TORP = 4; my $D_DAMAGE = 5; my $D_SHIELD = 6; my $D_COMPUTER = 7;
+
+# Quadrant names
+my @QUADRANT_NAMES = (
+  "Antares",   "Rigel",     "Procyon",   "Vega",
+  "Canopus",   "Altair",    "Sagittarius","Pollux",
+  "Sirius",    "Deneb",     "Capella",   "Betelgeuse",
+  "Aldebaran", "Regulus",   "Arcturus",  "Spica",
+);
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+sub startrek_main {
+  iamat($info{'handle'}, "Playing Star Trek");
+
+  _st_intro();
+
+  my %game = _st_init_game();
+  _st_new_quadrant(\%game);
+
+  while (!$game{game_over}) {
+    _st_command_loop(\%game);
+  }
+
+  _st_end_game(\%game);
+  iamat($info{'handle'}, "Finished Star Trek");
+}
+
+# ============================================================================
+# INTRO SCREEN
+# ============================================================================
+
+sub _st_intro {
+  door_clear();
+  writeline("", 1);
+  writeline($config{'themecolor'} . "           S T A R   T R E K" . $RST, 1);
+  writeline($config{'linecolor'}  . "       =============================" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  It is stardate 2100. The Federation is" . $RST, 1);
+  writeline($config{'systemcolor'} . "  under attack by Klingon warships." . $RST, 1);
+  writeline("", 1);
+  writeline($config{'datacolor'} . "  As captain of the USS Enterprise, you" . $RST, 1);
+  writeline($config{'datacolor'} . "  must destroy all Klingons before time" . $RST, 1);
+  writeline($config{'datacolor'} . "  runs out. Dock at starbases to refuel." . $RST, 1);
+  writeline("", 1);
+  door_pause("Press any key to begin your mission...");
+}
+
+# ============================================================================
+# GAME INITIALIZATION
+# ============================================================================
+
+sub _st_init_game {
+  my %g;
+
+  $g{stardate}     = 2100;
+  $g{time_limit}   = 25 + int(rand(10));  # 25-34 stardates
+  $g{energy}       = $START_ENERGY;
+  $g{shields}      = 0;
+  $g{torps}        = $START_TORPS;
+  $g{damage}       = [map { 0 } 0 .. 7];  # No damage
+  $g{docked}       = 0;
+  $g{game_over}    = 0;
+  $g{won}          = 0;
+  $g{klingons_left}= 0;
+  $g{bases_left}   = 0;
+  $g{stars_total}  = 0;
+
+  # Enterprise position
+  $g{quad_y} = int(rand($GALAXY_SIZE));
+  $g{quad_x} = int(rand($GALAXY_SIZE));
+  $g{sect_y} = int(rand($SECTOR_SIZE));
+  $g{sect_x} = int(rand($SECTOR_SIZE));
+
+  # Generate galaxy map: each cell = KBS (klingons * 100 + bases * 10 + stars)
+  # Plus a visited flag
+  $g{galaxy} = [];
+  for my $y (0 .. $GALAXY_SIZE - 1) {
+    for my $x (0 .. $GALAXY_SIZE - 1) {
+      my $klingons = 0;
+      my $r = rand(100);
+      if ($r < 5)     { $klingons = 3; }
+      elsif ($r < 15) { $klingons = 2; }
+      elsif ($r < 40) { $klingons = 1; }
+
+      my $bases = (rand(100) < 12) ? 1 : 0;
+      my $stars = 1 + int(rand(8));
+
+      $g{galaxy}[$y][$x] = {
+        klingons => $klingons,
+        bases    => $bases,
+        stars    => $stars,
+        visited  => 0,
+      };
+      $g{klingons_left} += $klingons;
+      $g{bases_left}    += $bases;
+      $g{stars_total}   += $stars;
+    }
+  }
+
+  # Ensure at least some klingons and at least one base
+  if ($g{klingons_left} < 5) {
+    for (1 .. 5 - $g{klingons_left}) {
+      my $y = int(rand($GALAXY_SIZE));
+      my $x = int(rand($GALAXY_SIZE));
+      $g{galaxy}[$y][$x]{klingons}++;
+      $g{klingons_left}++;
+    }
+  }
+  if ($g{bases_left} == 0) {
+    my $y = int(rand($GALAXY_SIZE));
+    my $x = int(rand($GALAXY_SIZE));
+    $g{galaxy}[$y][$x]{bases} = 1;
+    $g{bases_left} = 1;
+  }
+
+  $g{klingons_start} = $g{klingons_left};
+
+  # Current quadrant data
+  $g{sector}   = [];  # 8x8 sector grid
+  $g{kdata}    = [];  # Klingon positions in current quadrant
+
+  return %g;
+}
+
+# ============================================================================
+# ENTER A NEW QUADRANT
+# ============================================================================
+
+sub _st_new_quadrant {
+  my ($g) = @_;
+  my $qy = $g->{quad_y};
+  my $qx = $g->{quad_x};
+  my $qi = $g->{galaxy}[$qy][$qx];
+  $qi->{visited} = 1;
+
+  # Clear sector
+  $g->{sector} = [];
+  for my $y (0 .. $SECTOR_SIZE - 1) {
+    for my $x (0 .. $SECTOR_SIZE - 1) {
+      $g->{sector}[$y][$x] = $S_EMPTY;
+    }
+  }
+
+  # Place Enterprise
+  $g->{sector}[$g->{sect_y}][$g->{sect_x}] = $S_SHIP;
+
+  # Place Klingons
+  $g->{kdata} = [];
+  for (1 .. $qi->{klingons}) {
+    my ($ky, $kx) = _st_find_empty($g);
+    $g->{sector}[$ky][$kx] = $S_KLINGON;
+    push @{$g->{kdata}}, { y => $ky, x => $kx, energy => 200 + int(rand(200)) };
+  }
+
+  # Place bases
+  for (1 .. $qi->{bases}) {
+    my ($by, $bx) = _st_find_empty($g);
+    $g->{sector}[$by][$bx] = $S_BASE;
+    $g->{base_y} = $by;
+    $g->{base_x} = $bx;
+  }
+
+  # Place stars
+  for (1 .. $qi->{stars}) {
+    my ($sy, $sx) = _st_find_empty($g);
+    $g->{sector}[$sy][$sx] = $S_STAR;
+  }
+
+  # Check if docked
+  _st_check_docked($g);
+
+  # Announce
+  my $qname = _st_quadrant_name($qy, $qx);
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Entering quadrant: " . $config{'usercolor'} . $qname . $RST, 1);
+  if ($qi->{klingons} > 0) {
+    writeline($config{'errorcolor'} . " Combat alert! $qi->{klingons} Klingon(s) detected!" . $RST, 1);
+  }
+  writeline("", 1);
+}
+
+sub _st_find_empty {
+  my ($g) = @_;
+  my ($y, $x);
+  do {
+    $y = int(rand($SECTOR_SIZE));
+    $x = int(rand($SECTOR_SIZE));
+  } while ($g->{sector}[$y][$x] ne $S_EMPTY);
+  return ($y, $x);
+}
+
+sub _st_quadrant_name {
+  my ($y, $x) = @_;
+  my $idx = ($y < 4 ? $y : $y - 4) * 4 + ($x < 4 ? 0 : 2) + ($y < 4 ? 0 : 1);
+  $idx = $idx % scalar @QUADRANT_NAMES;
+  my $suffix = ($x % 4 < 2) ? " I" : " II";
+  return $QUADRANT_NAMES[$idx] . $suffix;
+}
+
+# ============================================================================
+# COMMAND LOOP
+# ============================================================================
+
+sub _st_command_loop {
+  my ($g) = @_;
+
+  _st_short_range_scan($g);
+
+  my @opts = (
+    ['N', 'Navigate (warp)'],
+    ['S', 'Short range scan'],
+    ['L', 'Long range scan'],
+    ['P', 'Fire phasers'],
+    ['T', 'Fire torpedoes'],
+    ['H', 'Raise shields'],
+    ['D', 'Damage report'],
+    ['C', 'Star chart'],
+    ['Q', 'Resign commission'],
+  );
+
+  my $cmd = door_menu(\@opts, "Captain");
+
+  if ($cmd eq 'N')    { _st_navigate($g); }
+  elsif ($cmd eq 'S') { _st_short_range_scan($g); door_pause(); }
+  elsif ($cmd eq 'L') { _st_long_range_scan($g); door_pause(); }
+  elsif ($cmd eq 'P') { _st_phasers($g); }
+  elsif ($cmd eq 'T') { _st_torpedoes($g); }
+  elsif ($cmd eq 'H') { _st_shields($g); }
+  elsif ($cmd eq 'D') { _st_damage_report($g); door_pause(); }
+  elsif ($cmd eq 'C') { _st_star_chart($g); door_pause(); }
+  elsif ($cmd eq 'Q') {
+    if (door_noyes("Resign your commission?")) {
+      $g->{game_over} = 1;
+    }
+  }
+
+  # Check for game end conditions
+  if ($g->{klingons_left} <= 0) {
+    $g->{game_over} = 1;
+    $g->{won} = 1;
+  }
+  if ($g->{energy} + $g->{shields} <= 0) {
+    writeline($config{'errorcolor'} . " The Enterprise has run out of energy." . $RST, 1);
+    $g->{game_over} = 1;
+  }
+  if ($g->{stardate} >= 2100 + $g->{time_limit}) {
+    writeline($config{'errorcolor'} . " Time has run out! The Federation has fallen." . $RST, 1);
+    $g->{game_over} = 1;
+  }
+}
+
+# ============================================================================
+# SHORT RANGE SCAN
+# ============================================================================
+
+sub _st_short_range_scan {
+  my ($g) = @_;
+
+  door_clear();
+
+  if ($g->{damage}[$D_SRS] < 0) {
+    writeline($config{'errorcolor'} . " Short range sensors are damaged." . $RST, 1);
+    return;
+  }
+
+  writeline($config{'themecolor'} . " Short Range Scan - " .
+    _st_quadrant_name($g->{quad_y}, $g->{quad_x}) . $RST, 1);
+  writeline("", 1);
+
+  # Sector grid
+  writeline($config{'systemcolor'} . "     1 2 3 4 5 6 7 8" . $RST, 1);
+  for my $y (0 .. $SECTOR_SIZE - 1) {
+    my $line = sprintf(" %s%d%s  ", $config{'systemcolor'}, $y + 1, $RST);
+    for my $x (0 .. $SECTOR_SIZE - 1) {
+      my $cell = $g->{sector}[$y][$x];
+      if ($cell eq $S_SHIP)    { $line .= $config{'usercolor'} . "E " . $RST; }
+      elsif ($cell eq $S_KLINGON) { $line .= $config{'errorcolor'} . "K " . $RST; }
+      elsif ($cell eq $S_BASE) { $line .= $config{'promptcolor'} . "B " . $RST; }
+      elsif ($cell eq $S_STAR) { $line .= $config{'datacolor'} . "* " . $RST; }
+      else { $line .= $config{'linecolor'} . ". " . $RST; }
+    }
+    # Status on right side
+    if ($y == 0) { $line .= "  " . $config{'systemcolor'} . "Stardate: " . $config{'datacolor'} . $g->{stardate}; }
+    if ($y == 1) { $line .= "  " . $config{'systemcolor'} . "Energy:   " . $config{'datacolor'} . $g->{energy}; }
+    if ($y == 2) { $line .= "  " . $config{'systemcolor'} . "Shields:  " . $config{'datacolor'} . $g->{shields}; }
+    if ($y == 3) { $line .= "  " . $config{'systemcolor'} . "Torpedoes:" . $config{'datacolor'} . " $g->{torps}"; }
+    if ($y == 4) { $line .= "  " . $config{'systemcolor'} . "Klingons: " . $config{'errorcolor'} . $g->{klingons_left}; }
+    if ($y == 5) { $line .= "  " . $config{'systemcolor'} . "Bases:    " . $config{'datacolor'} . $g->{bases_left}; }
+    if ($y == 6) { $line .= "  " . $config{'systemcolor'} . "Time left:" . $config{'datacolor'} . " " . (2100 + $g->{time_limit} - $g->{stardate}); }
+    if ($y == 7) { $line .= "  " . ($g->{docked} ? $config{'usercolor'} . "DOCKED" : ""); }
+
+    writeline($line . $RST, 1);
+  }
+  writeline("", 1);
+}
+
+# ============================================================================
+# LONG RANGE SCAN
+# ============================================================================
+
+sub _st_long_range_scan {
+  my ($g) = @_;
+
+  if ($g->{damage}[$D_LRS] < 0) {
+    writeline($config{'errorcolor'} . " Long range sensors are damaged." . $RST, 1);
+    return;
+  }
+
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Long Range Scan" . $RST, 1);
+  writeline($config{'linecolor'} . " +-----+-----+-----+" . $RST, 1);
+
+  for my $dy (-1 .. 1) {
+    my $line = $config{'linecolor'} . " |" . $RST;
+    for my $dx (-1 .. 1) {
+      my $qy = $g->{quad_y} + $dy;
+      my $qx = $g->{quad_x} + $dx;
+      if ($qy >= 0 && $qy < $GALAXY_SIZE && $qx >= 0 && $qx < $GALAXY_SIZE) {
+        my $qi = $g->{galaxy}[$qy][$qx];
+        $qi->{visited} = 1;
+        my $kbs = sprintf(" %d%d%d ", $qi->{klingons}, $qi->{bases}, $qi->{stars});
+        my $c = $qi->{klingons} > 0 ? $config{'errorcolor'} : $config{'datacolor'};
+        $line .= $c . $kbs . $config{'linecolor'} . "|" . $RST;
+      } else {
+        $line .= " *** " . $config{'linecolor'} . "|" . $RST;
+      }
+    }
+    writeline($line, 1);
+    writeline($config{'linecolor'} . " +-----+-----+-----+" . $RST, 1);
+  }
+  writeline($config{'systemcolor'} . " Format: Klingons/Bases/Stars" . $RST, 1);
+  writeline("", 1);
+}
+
+# ============================================================================
+# NAVIGATE (WARP)
+# ============================================================================
+
+sub _st_navigate {
+  my ($g) = @_;
+
+  if ($g->{damage}[$D_WARP] < 0) {
+    writeline($config{'errorcolor'} . " Warp engines are damaged." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline($config{'systemcolor'} . " Course (1-8): 1=N, 2=NE, 3=E, 4=SE, 5=S, 6=SW, 7=W, 8=NW" . $RST, 1);
+  my $course = door_getnum("Course:", 8);
+  return if $course == 0;
+
+  writeline($config{'systemcolor'} . " Warp factor (1-8, 1=1 sector, 8=8 sectors):" . $RST, 1);
+  my $warp = door_getnum("Warp:", 8);
+  return if $warp == 0;
+
+  my $energy_cost = int($warp * 8 + 10);
+  if ($energy_cost > $g->{energy}) {
+    writeline($config{'errorcolor'} . " Insufficient energy ($energy_cost needed)." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  # Direction vectors (course 1-8 maps to compass directions)
+  my @dy = (-1, -1, 0, 1, 1, 1, 0, -1);
+  my @dx = (0, 1, 1, 1, 0, -1, -1, -1);
+  my $ci = $course - 1;
+
+  $g->{energy} -= $energy_cost;
+
+  # Clear current position
+  $g->{sector}[$g->{sect_y}][$g->{sect_x}] = $S_EMPTY;
+
+  my $new_sy = $g->{sect_y};
+  my $new_sx = $g->{sect_x};
+  my $new_qy = $g->{quad_y};
+  my $new_qx = $g->{quad_x};
+
+  for (1 .. $warp) {
+    $new_sy += $dy[$ci];
+    $new_sx += $dx[$ci];
+
+    # Check for quadrant boundary crossing
+    if ($new_sy < 0 || $new_sy >= $SECTOR_SIZE || $new_sx < 0 || $new_sx >= $SECTOR_SIZE) {
+      $new_qy += $dy[$ci];
+      $new_qx += $dx[$ci];
+      $new_sy = ($new_sy + $SECTOR_SIZE) % $SECTOR_SIZE;
+      $new_sx = ($new_sx + $SECTOR_SIZE) % $SECTOR_SIZE;
+
+      # Check galaxy boundary
+      if ($new_qy < 0 || $new_qy >= $GALAXY_SIZE || $new_qx < 0 || $new_qx >= $GALAXY_SIZE) {
+        $new_qy = ($new_qy + $GALAXY_SIZE) % $GALAXY_SIZE;
+        $new_qx = ($new_qx + $GALAXY_SIZE) % $GALAXY_SIZE;
+        writeline($config{'errorcolor'} . " Deflected by galactic barrier!" . $RST, 1);
+        last;
+      }
+
+      # Entering new quadrant
+      $g->{quad_y} = $new_qy;
+      $g->{quad_x} = $new_qx;
+      $g->{sect_y} = $new_sy;
+      $g->{sect_x} = $new_sx;
+      $g->{docked} = 0;
+      _st_new_quadrant($g);
+
+      # Klingons attack on arrival
+      _st_klingons_attack($g) if @{$g->{kdata}};
+      _st_advance_time($g, 1);
+      _st_repair_damage($g, $warp);
+      return;
+    }
+
+    # Check for collision with star or base
+    if ($g->{sector}[$new_sy][$new_sx] eq $S_STAR) {
+      writeline($config{'errorcolor'} . " Blocked by star at sector " . ($new_sy+1) . "," . ($new_sx+1) . "!" . $RST, 1);
+      $new_sy -= $dy[$ci];
+      $new_sx -= $dx[$ci];
+      last;
+    }
+    if ($g->{sector}[$new_sy][$new_sx] eq $S_KLINGON) {
+      writeline($config{'errorcolor'} . " Blocked by Klingon!" . $RST, 1);
+      $new_sy -= $dy[$ci];
+      $new_sx -= $dx[$ci];
+      last;
+    }
+  }
+
+  # Place Enterprise at new position
+  $g->{sect_y} = $new_sy;
+  $g->{sect_x} = $new_sx;
+  $g->{sector}[$new_sy][$new_sx] = $S_SHIP;
+
+  _st_check_docked($g);
+
+  # Klingons attack
+  _st_klingons_attack($g) if @{$g->{kdata}};
+  _st_advance_time($g, 1);
+  _st_repair_damage($g, $warp);
+}
+
+# ============================================================================
+# PHASERS
+# ============================================================================
+
+sub _st_phasers {
+  my ($g) = @_;
+
+  if ($g->{damage}[$D_PHASER] < 0) {
+    writeline($config{'errorcolor'} . " Phasers are damaged." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  if (@{$g->{kdata}} == 0) {
+    writeline($config{'systemcolor'} . " No Klingons in this quadrant." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline($config{'systemcolor'} . " Energy available: $g->{energy}" . $RST, 1);
+  my $energy = door_getamount("Phaser energy to fire:", $g->{energy});
+  return if $energy <= 0;
+
+  $g->{energy} -= $energy;
+
+  # Distribute energy among Klingons
+  my $per_klingon = int($energy / scalar @{$g->{kdata}});
+
+  my @destroyed;
+  for my $ki (0 .. $#{$g->{kdata}}) {
+    my $k = $g->{kdata}[$ki];
+    my $dist = _st_distance($g->{sect_y}, $g->{sect_x}, $k->{y}, $k->{x});
+    $dist = 1 if $dist < 1;
+    my $damage = int($per_klingon / $dist * (0.6 + rand(0.4)));
+    $k->{energy} -= $damage;
+
+    if ($k->{energy} <= 0) {
+      writeline($config{'usercolor'} . " Klingon at " . ($k->{y}+1) . "," . ($k->{x}+1) .
+        " destroyed! ($damage damage)" . $RST, 1);
+      $g->{sector}[$k->{y}][$k->{x}] = $S_EMPTY;
+      $g->{galaxy}[$g->{quad_y}][$g->{quad_x}]{klingons}--;
+      $g->{klingons_left}--;
+      push @destroyed, $ki;
+    } else {
+      writeline($config{'datacolor'} . " Klingon at " . ($k->{y}+1) . "," . ($k->{x}+1) .
+        " hit for $damage (shields at $k->{energy})" . $RST, 1);
+    }
+  }
+
+  # Remove destroyed klingons (reverse order to preserve indices)
+  for my $ki (reverse @destroyed) {
+    splice @{$g->{kdata}}, $ki, 1;
+  }
+
+  # Klingons return fire
+  _st_klingons_attack($g) if @{$g->{kdata}};
+  door_pause();
+}
+
+# ============================================================================
+# TORPEDOES
+# ============================================================================
+
+sub _st_torpedoes {
+  my ($g) = @_;
+
+  if ($g->{damage}[$D_TORP] < 0) {
+    writeline($config{'errorcolor'} . " Torpedo tubes are damaged." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  if ($g->{torps} <= 0) {
+    writeline($config{'errorcolor'} . " No torpedoes remaining." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline($config{'systemcolor'} . " Course (1-8): 1=N, 2=NE, 3=E, 4=SE, 5=S, 6=SW, 7=W, 8=NW" . $RST, 1);
+  my $course = door_getnum("Torpedo course:", 8);
+  return if $course == 0;
+
+  $g->{torps}--;
+
+  my @dy = (-1, -1, 0, 1, 1, 1, 0, -1);
+  my @dx = (0, 1, 1, 1, 0, -1, -1, -1);
+  my $ci = $course - 1;
+
+  my $ty = $g->{sect_y};
+  my $tx = $g->{sect_x};
+
+  writeline($config{'themecolor'} . " Torpedo track:" . $RST, 1);
+
+  for (1 .. $SECTOR_SIZE) {
+    $ty += $dy[$ci];
+    $tx += $dx[$ci];
+
+    last if $ty < 0 || $ty >= $SECTOR_SIZE || $tx < 0 || $tx >= $SECTOR_SIZE;
+
+    writeline($config{'datacolor'} . "  " . ($ty+1) . "," . ($tx+1) . $RST, 1);
+
+    if ($g->{sector}[$ty][$tx] eq $S_KLINGON) {
+      writeline($config{'usercolor'} . " Klingon destroyed at " . ($ty+1) . "," . ($tx+1) . "!" . $RST, 1);
+      $g->{sector}[$ty][$tx] = $S_EMPTY;
+      $g->{galaxy}[$g->{quad_y}][$g->{quad_x}]{klingons}--;
+      $g->{klingons_left}--;
+      # Remove from kdata
+      $g->{kdata} = [grep { $_->{y} != $ty || $_->{x} != $tx } @{$g->{kdata}}];
+      last;
+    }
+    if ($g->{sector}[$ty][$tx] eq $S_STAR) {
+      writeline($config{'datacolor'} . " Torpedo absorbed by star." . $RST, 1);
+      last;
+    }
+    if ($g->{sector}[$ty][$tx] eq $S_BASE) {
+      writeline($config{'errorcolor'} . " You destroyed a starbase!" . $RST, 1);
+      $g->{sector}[$ty][$tx] = $S_EMPTY;
+      $g->{galaxy}[$g->{quad_y}][$g->{quad_x}]{bases}--;
+      $g->{bases_left}--;
+      last;
+    }
+  }
+
+  # Klingons attack
+  _st_klingons_attack($g) if @{$g->{kdata}};
+  door_pause();
+}
+
+# ============================================================================
+# SHIELDS
+# ============================================================================
+
+sub _st_shields {
+  my ($g) = @_;
+
+  if ($g->{damage}[$D_SHIELD] < 0) {
+    writeline($config{'errorcolor'} . " Shield control is damaged." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my $total = $g->{energy} + $g->{shields};
+  writeline($config{'systemcolor'} . " Total energy: $total (shields: $g->{shields})" . $RST, 1);
+  my $new_shields = door_getamount("Energy to shields:", $total);
+  return if $new_shields < 0;
+
+  $new_shields = $MAX_SHIELDS if $new_shields > $MAX_SHIELDS;
+  my $diff = $new_shields - $g->{shields};
+  if ($diff > $g->{energy}) {
+    writeline($config{'errorcolor'} . " Insufficient energy." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  $g->{shields} = $new_shields;
+  $g->{energy} -= $diff;
+  writeline($config{'usercolor'} . " Shields set to $g->{shields}." . $RST, 1);
+  door_pause();
+}
+
+# ============================================================================
+# KLINGON ATTACK
+# ============================================================================
+
+sub _st_klingons_attack {
+  my ($g) = @_;
+  return if $g->{docked};  # Safe when docked
+
+  for my $k (@{$g->{kdata}}) {
+    my $dist = _st_distance($g->{sect_y}, $g->{sect_x}, $k->{y}, $k->{x});
+    $dist = 1 if $dist < 1;
+    my $damage = int($k->{energy} / (3 + rand(2)) / $dist);
+    next if $damage <= 0;
+
+    if ($g->{shields} > 0) {
+      $g->{shields} -= $damage;
+      if ($g->{shields} < 0) {
+        $g->{energy} += $g->{shields};
+        $g->{shields} = 0;
+      }
+      writeline($config{'errorcolor'} . " Klingon at " . ($k->{y}+1) . "," . ($k->{x}+1) .
+        " hits for $damage! Shields at $g->{shields}" . $RST, 1);
+    } else {
+      $g->{energy} -= $damage;
+      writeline($config{'errorcolor'} . " Klingon at " . ($k->{y}+1) . "," . ($k->{x}+1) .
+        " hits for $damage! Hull damage! Energy: $g->{energy}" . $RST, 1);
+
+      # Random device damage
+      if (rand(100) < 40) {
+        my $dev = int(rand(8));
+        $g->{damage}[$dev] -= 1 + int(rand(3));
+        writeline($config{'errorcolor'} . " $DEVICES[$dev] damaged!" . $RST, 1);
+      }
+    }
+  }
+}
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+sub _st_check_docked {
+  my ($g) = @_;
+  $g->{docked} = 0;
+  for my $dy (-1 .. 1) {
+    for my $dx (-1 .. 1) {
+      my $ny = $g->{sect_y} + $dy;
+      my $nx = $g->{sect_x} + $dx;
+      next if $ny < 0 || $ny >= $SECTOR_SIZE || $nx < 0 || $nx >= $SECTOR_SIZE;
+      if ($g->{sector}[$ny][$nx] eq $S_BASE) {
+        $g->{docked} = 1;
+        $g->{energy} = $START_ENERGY;
+        $g->{torps}  = $START_TORPS;
+        $g->{shields} = 0;
+        writeline($config{'usercolor'} . " Docked at starbase. Energy and torpedoes replenished." . $RST, 1);
+        return;
+      }
+    }
+  }
+}
+
+sub _st_distance {
+  my ($y1, $x1, $y2, $x2) = @_;
+  return sqrt(($y2-$y1)**2 + ($x2-$x1)**2);
+}
+
+sub _st_advance_time {
+  my ($g, $amount) = @_;
+  $g->{stardate} += $amount;
+}
+
+sub _st_repair_damage {
+  my ($g, $warp) = @_;
+  for my $i (0 .. 7) {
+    if ($g->{damage}[$i] < 0) {
+      $g->{damage}[$i] += 1;  # Repair 1 point per turn
+      $g->{damage}[$i] = 0 if $g->{damage}[$i] > 0;
+      if ($g->{damage}[$i] == 0) {
+        writeline($config{'usercolor'} . " $DEVICES[$i] repaired." . $RST, 1);
+      }
+    }
+  }
+  # Docked repairs everything instantly
+  if ($g->{docked}) {
+    for my $i (0 .. 7) {
+      if ($g->{damage}[$i] < 0) {
+        $g->{damage}[$i] = 0;
+        writeline($config{'usercolor'} . " $DEVICES[$i] repaired at starbase." . $RST, 1);
+      }
+    }
+  }
+}
+
+sub _st_damage_report {
+  my ($g) = @_;
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Damage Report" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 40) . $RST, 1);
+  for my $i (0 .. 7) {
+    my $status = $g->{damage}[$i];
+    my $color = $status < 0 ? $config{'errorcolor'} : $config{'usercolor'};
+    my $stext = $status < 0 ? "DAMAGED ($status)" : "OK";
+    writeline(sprintf("  %s%-22s %s%s%s",
+      $config{'systemcolor'}, $DEVICES[$i], $color, $stext, $RST), 1);
+  }
+  writeline("", 1);
+}
+
+sub _st_star_chart {
+  my ($g) = @_;
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Star Chart" . $RST, 1);
+  writeline($config{'systemcolor'} . "     1    2    3    4    5    6    7    8" . $RST, 1);
+
+  for my $y (0 .. $GALAXY_SIZE - 1) {
+    my $line = sprintf(" %s%d%s  ", $config{'systemcolor'}, $y + 1, $RST);
+    for my $x (0 .. $GALAXY_SIZE - 1) {
+      my $qi = $g->{galaxy}[$y][$x];
+      if ($y == $g->{quad_y} && $x == $g->{quad_x}) {
+        $line .= $config{'usercolor'} . sprintf("%d%d%d", $qi->{klingons}, $qi->{bases}, $qi->{stars}) .
+          $RST . "  ";
+      } elsif ($qi->{visited}) {
+        my $c = $qi->{klingons} > 0 ? $config{'errorcolor'} : $config{'datacolor'};
+        $line .= $c . sprintf("%d%d%d", $qi->{klingons}, $qi->{bases}, $qi->{stars}) . $RST . "  ";
+      } else {
+        $line .= $config{'linecolor'} . "***" . $RST . "  ";
+      }
+    }
+    writeline($line, 1);
+  }
+  writeline($config{'systemcolor'} . " Format: Klingons/Bases/Stars  *** = unexplored" . $RST, 1);
+  writeline("", 1);
+}
+
+# ============================================================================
+# GAME OVER
+# ============================================================================
+
+sub _st_end_game {
+  my ($g) = @_;
+
+  door_clear();
+  writeline("", 1);
+
+  if ($g->{won}) {
+    my $time_used = $g->{stardate} - 2100;
+    my $rating = int(($g->{klingons_start} * 1000) / ($time_used > 0 ? $time_used : 1));
+
+    writeline($config{'usercolor'} . "           V I C T O R Y !" . $RST, 1);
+    writeline($config{'linecolor'}  . "       =============================" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . "  All $g->{klingons_start} Klingons destroyed in $time_used stardates." . $RST, 1);
+    writeline($config{'systemcolor'} . "  Efficiency rating: " . $config{'datacolor'} . "$rating" . $RST, 1);
+    writeline("", 1);
+
+    door_submit_score("startrek", $rating, { klingons => $g->{klingons_start}, time => $time_used });
+    door_log_activity("startrek", $info{'handle'} . " saved the Federation! Rating: $rating");
+
+    # Update shared kill tracking
+    my $tracker = door_load_shared("startrek", "federation.dat") // { total_kills => 0, campaigns => 0 };
+    $tracker->{total_kills} += $g->{klingons_start};
+    $tracker->{campaigns}++;
+    door_save_shared("startrek", "federation.dat", $tracker);
+
+    # Broadcast notable victories
+    if ($rating > 500) {
+      door_broadcast("startrek", "Captain $info{'handle'} saved the Federation with a $rating rating!");
+    }
+
+    # Track personal record
+    my $record = door_load("startrek") // { victories => 0, defeats => 0, total_kills => 0, best_rating => 0 };
+    $record->{victories}++;
+    $record->{total_kills} += $g->{klingons_start};
+    $record->{best_rating} = $rating if $rating > ($record->{best_rating} // 0);
+    door_save("startrek", $record);
+
+    if (door_yesno("View high scores?")) {
+      door_show_scores("startrek", "Star Trek High Scores", "Rating");
+    }
+  } else {
+    writeline($config{'errorcolor'} . "        M I S S I O N   F A I L E D" . $RST, 1);
+    writeline($config{'linecolor'}  . "       =============================" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . "  The Enterprise has been lost." . $RST, 1);
+    writeline($config{'systemcolor'} . "  $g->{klingons_left} Klingons remain." . $RST, 1);
+
+    my $record = door_load("startrek") // { victories => 0, defeats => 0, total_kills => 0, best_rating => 0 };
+    $record->{defeats}++;
+    $record->{total_kills} += ($g->{klingons_start} - $g->{klingons_left});
+    door_save("startrek", $record);
+  }
+
+  writeline("", 1);
+  door_pause("Press any key to return to the BBS...");
+}
+
+1;

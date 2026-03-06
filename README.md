@@ -41,9 +41,9 @@ PhotonBBS is a comprehensive telnet-based bulletin board system (BBS) and multi-
 
 **Integrated BBS and MUD**: PhotonBBS seamlessly combines traditional BBS features (chat, bulletins, door games) with PhotonMUD, a fully-featured multi-user dungeon with procedurally-generated worlds, dynamic combat, and persistent gameplay.
 
-**Modular Architecture**: Built with extensibility in mind, PhotonBBS uses a modular Perl-based architecture that makes it easy to add new features, customize behavior, and integrate external door games.
+**Modular Architecture**: Built with extensibility in mind, PhotonBBS uses a modular Perl-based architecture that makes it easy to add new features, customize behavior, and integrate door games.
 
-**Classic BBS Revival**: Support for traditional BBS door games like Legend of the Red Dragon, Trade Wars 2002, and many others, allowing preservation of classic DOS gaming.
+**10 Built-in Door Games**: Native Perl door games including Red Dragon, Star Trader, Casino, Drug Lord, Sea Battle, Star Trek, Big Catch, Atlantis, 1000 Miles, plus PhotonMUD - all with save/load, high scores, and credits system.
 
 **Modern Deployment**: Containerized deployment via Docker ensures easy installation and portability across Linux, macOS, and Windows.
 
@@ -56,7 +56,9 @@ PhotonBBS is a comprehensive telnet-based bulletin board system (BBS) and multi-
 - System bulletins and oneliners
 - Customizable menu system
 - Theme support with ANSI colors
-- Classic BBS door game support
+- 10 native door games with save/load and high scores
+- External BBS door game support (DOOR.SYS, DORINFO)
+- Door game operator tools (data editor, score management)
 - Administrative tools and utilities
 
 ### PhotonMUD - The Multi-User Dungeon
@@ -70,19 +72,27 @@ PhotonBBS is a comprehensive telnet-based bulletin board system (BBS) and multi-
 - Multiplayer exploration and interaction
 - Unique world generation every campaign
 
-### Door Game Support
+### Native Door Games
 
-PhotonBBS supports classic BBS door games through multiple drop file formats:
+PhotonBBS ships with 10 native Perl door games:
+
+- **Red Dragon** - Fantasy RPG (forest, combat, town, dragon boss)
+- **Star Trader** - Space trading (sectors, commodities, ship upgrades)
+- **Casino** - Card and dice games (blackjack, poker, craps, slots, roulette)
+- **Drug Lord** - Street empire (30-day campaign, buy/sell, police)
+- **Sea Battle** - Naval combat (Battleship-style grid targeting)
+- **Star Trek** - Space exploration (galaxy navigation, Klingon combat)
+- **Big Catch** - Fishing simulation (5 lakes, tackle shop, tournaments)
+- **Atlantis** - Underwater adventure (diving, creatures, artifacts)
+- **1000 Miles** - Racing card game (2-4 players, AI opponents)
+- **PhotonMUD** - Full multi-user dungeon (see PHOTONMUD.md)
+
+### External Door Game Support
+
+PhotonBBS also supports classic external BBS doors via drop files:
 - DOOR.SYS
 - DORINFO1.DEF
 - DORINFOx.DEF
-
-Pre-configured support for popular doors:
-- Trade Wars 2002 - Space trading and combat
-- Legend of the Red Dragon (LORD) - Fantasy RPG adventure
-- Barren Realms Elite (BRE) - Space strategy
-- Operation Overkill II - Post-apocalyptic combat
-- And many more
 
 ## Quick Start
 
