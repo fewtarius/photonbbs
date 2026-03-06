@@ -1,0 +1,1047 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: Big Catch
+# A comprehensive freshwater fishing simulation
+#
+# Inspired by Freshwater Fishing Simulator (Eric Hamilton, 1993-1995)
+# Reference: SBBS FatFish (Art, Fatcats BBS)
+# Rebuilt as native Perl for PhotonBBS
+#
+# Features: 27 fish species across 7 families, 8 lure types x 4 sizes,
+# retrieve speed system, fish fighting mini-game (bear down / give line),
+# 12 named lakes with structure/depth/bottom types, depth finder display,
+# 4-slot tournament system, weather effects, daily fish restocking,
+# competitive derby leaderboard
+#
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+my $DOOR_NAME  = "bigcatch";
+my $LAKE_W     = 40;    # Map width
+my $LAKE_H     = 20;    # Map height
+my $MAX_FISH   = 60;    # Fish per lake
+my $LIVEWELL   = 10;    # Max fish in livewell
+my $MAX_TOURS  = 4;     # Tournament slots
+my $TOUR_LIMIT = 5;     # Fish per tournament
+
+# Depth in feet (0-50)
+my $MAX_DEPTH  = 50;
+
+# ============================================================================
+# FISH SPECIES (27 species, 7 families)
+# ============================================================================
+#
+# Each species has: name, family, min/max depth (ft), min/max weight (lbs),
+# fight (1-10), structure preference, lure preferences, price per lb
+
+my @FISH = (
+  # Bass family - structure-oriented
+  { name => "Largemouth Bass",  fam => "Bass",    mind => 3,  maxd => 20, minw => 1.0,  maxw => 14.0,
+    fight => 7, struct => "weed",   lure => [qw(worm crank spinner)], price => 3.50 },
+  { name => "Smallmouth Bass",  fam => "Bass",    mind => 5,  maxd => 30, minw => 0.8,  maxw => 8.0,
+    fight => 8, struct => "rock",   lure => [qw(jig crank minnow)],   price => 4.00 },
+  { name => "Striped Bass",     fam => "Bass",    mind => 10, maxd => 40, minw => 2.0,  maxw => 35.0,
+    fight => 9, struct => "open",   lure => [qw(spoon minnow jig)],   price => 3.00 },
+  { name => "White Bass",       fam => "Bass",    mind => 5,  maxd => 25, minw => 0.5,  maxw => 4.0,
+    fight => 5, struct => "open",   lure => [qw(spinner minnow jig)], price => 2.50 },
+  { name => "Rock Bass",        fam => "Bass",    mind => 3,  maxd => 15, minw => 0.3,  maxw => 2.0,
+    fight => 3, struct => "rock",   lure => [qw(jig worm minnow)],    price => 2.00 },
+
+  # Panfish - shallow cover
+  { name => "Bluegill",         fam => "Panfish", mind => 1,  maxd => 12, minw => 0.1,  maxw => 1.5,
+    fight => 2, struct => "weed",   lure => [qw(jig worm spinner)],   price => 1.50 },
+  { name => "Crappie",          fam => "Panfish", mind => 3,  maxd => 18, minw => 0.2,  maxw => 3.0,
+    fight => 3, struct => "timber", lure => [qw(jig minnow spinner)], price => 2.50 },
+  { name => "Redear Sunfish",   fam => "Panfish", mind => 2,  maxd => 15, minw => 0.1,  maxw => 2.5,
+    fight => 2, struct => "weed",   lure => [qw(worm jig)],           price => 2.00 },
+
+  # Catfish - deep bottom-feeders
+  { name => "Channel Catfish",  fam => "Catfish", mind => 5,  maxd => 35, minw => 1.0,  maxw => 30.0,
+    fight => 6, struct => "sandy",  lure => [qw(worm minnow)],        price => 2.00 },
+  { name => "Blue Catfish",     fam => "Catfish", mind => 10, maxd => 45, minw => 2.0,  maxw => 60.0,
+    fight => 8, struct => "sandy",  lure => [qw(worm minnow spoon)],  price => 1.75 },
+  { name => "Flathead Catfish", fam => "Catfish", mind => 8,  maxd => 40, minw => 1.5,  maxw => 50.0,
+    fight => 9, struct => "timber", lure => [qw(minnow worm)],        price => 1.50 },
+  { name => "Brown Bullhead",   fam => "Catfish", mind => 2,  maxd => 20, minw => 0.3,  maxw => 3.0,
+    fight => 2, struct => "sandy",  lure => [qw(worm)],               price => 1.00 },
+
+  # Walleye/Perch - structure edges
+  { name => "Yellow Perch",     fam => "Perch",   mind => 3,  maxd => 25, minw => 0.2,  maxw => 2.5,
+    fight => 2, struct => "weed",   lure => [qw(jig minnow spinner)], price => 3.50 },
+  { name => "Walleye",          fam => "Perch",   mind => 8,  maxd => 35, minw => 1.0,  maxw => 15.0,
+    fight => 6, struct => "rock",   lure => [qw(jig minnow crank)],   price => 5.00 },
+  { name => "Sauger",           fam => "Perch",   mind => 8,  maxd => 30, minw => 0.5,  maxw => 5.0,
+    fight => 4, struct => "rock",   lure => [qw(jig minnow)],         price => 4.00 },
+  { name => "Pickerel",         fam => "Perch",   mind => 2,  maxd => 15, minw => 0.5,  maxw => 5.0,
+    fight => 5, struct => "weed",   lure => [qw(spinner minnow spoon)], price => 2.50 },
+
+  # Pike - shallow weeds, ambush predators
+  { name => "Northern Pike",    fam => "Pike",    mind => 3,  maxd => 20, minw => 2.0,  maxw => 30.0,
+    fight => 8, struct => "weed",   lure => [qw(spoon spinner spinnerbait)], price => 2.00 },
+  { name => "Muskellunge",      fam => "Pike",    mind => 5,  maxd => 25, minw => 5.0,  maxw => 50.0,
+    fight =>10, struct => "weed",   lure => [qw(spoon minnow crank)], price => 3.50 },
+
+  # Trout - cool deep water
+  { name => "Lake Trout",       fam => "Trout",   mind => 15, maxd => 50, minw => 1.0,  maxw => 40.0,
+    fight => 7, struct => "open",   lure => [qw(spoon minnow jig)],   price => 4.50 },
+  { name => "Brook Trout",      fam => "Trout",   mind => 2,  maxd => 15, minw => 0.2,  maxw => 5.0,
+    fight => 5, struct => "rock",   lure => [qw(spinner minnow worm)], price => 5.00 },
+  { name => "Brown Trout",      fam => "Trout",   mind => 3,  maxd => 25, minw => 0.5,  maxw => 20.0,
+    fight => 7, struct => "rock",   lure => [qw(crank minnow spinner)], price => 4.50 },
+  { name => "Rainbow Trout",    fam => "Trout",   mind => 3,  maxd => 20, minw => 0.3,  maxw => 15.0,
+    fight => 8, struct => "open",   lure => [qw(spinner spoon minnow)], price => 5.00 },
+  { name => "Cutthroat Trout",  fam => "Trout",   mind => 2,  maxd => 18, minw => 0.2,  maxw => 8.0,
+    fight => 6, struct => "rock",   lure => [qw(spinner worm minnow)], price => 5.50 },
+
+  # Salmon - deep open water
+  { name => "Coho Salmon",      fam => "Salmon",  mind => 15, maxd => 45, minw => 3.0,  maxw => 20.0,
+    fight => 9, struct => "open",   lure => [qw(spoon spinner minnow)], price => 6.00 },
+  { name => "King Salmon",      fam => "Salmon",  mind => 20, maxd => 50, minw => 5.0,  maxw => 50.0,
+    fight =>10, struct => "open",   lure => [qw(spoon minnow)],       price => 7.00 },
+  { name => "Kokanee Salmon",   fam => "Salmon",  mind => 15, maxd => 40, minw => 0.5,  maxw => 5.0,
+    fight => 5, struct => "open",   lure => [qw(spinner spoon)],      price => 6.50 },
+  { name => "Atlantic Salmon",  fam => "Salmon",  mind => 10, maxd => 40, minw => 3.0,  maxw => 30.0,
+    fight => 9, struct => "open",   lure => [qw(spoon spinner minnow)], price => 8.00 },
+);
+
+# Build index by name
+my %FISH_IDX;
+for my $i (0 .. $#FISH) { $FISH_IDX{$FISH[$i]{name}} = $i; }
+
+# ============================================================================
+# LURE TYPES (8 types x 4 sizes = 32 lures)
+# ============================================================================
+#
+# Lure behavior: topwater stays on surface. Diving lures go deeper with faster
+# retrieve. Sinking lures drop with slower retrieve.
+# Size matters: tiny/small for panfish, medium for general, large for trophy
+
+my @LURE_TYPES = (
+  { type => "Topwater",     behavior => "top",   depths => [0, 0, 0, 0] },
+  { type => "Crankbait",    behavior => "dive",  depths => [5, 12, 20, 30] },
+  { type => "Spinnerbait",  behavior => "dive",  depths => [3, 8, 14, 22] },
+  { type => "Spinner",      behavior => "dive",  depths => [2, 6, 10, 16] },
+  { type => "Jig",          behavior => "sink",  depths => [30, 20, 10, 3] },
+  { type => "Worm",         behavior => "sink",  depths => [35, 22, 12, 5] },
+  { type => "Spoon",        behavior => "sink",  depths => [25, 18, 10, 2] },
+  { type => "Minnow",       behavior => "dive",  depths => [3, 8, 15, 25] },
+);
+
+my @LURE_SIZES = (
+  { name => "Tiny",   minfish => 0.1, maxfish => 3.0,  strike_mod => 1.3 },
+  { name => "Small",  minfish => 0.2, maxfish => 8.0,  strike_mod => 1.1 },
+  { name => "Medium", minfish => 0.5, maxfish => 25.0, strike_mod => 1.0 },
+  { name => "Large",  minfish => 2.0, maxfish => 60.0, strike_mod => 0.8 },
+);
+
+my @SPEEDS = ("Stop", "Slow", "Medium", "Fast");
+
+# ============================================================================
+# LAKE STRUCTURE
+# ============================================================================
+
+my @SURFACE_TYPES = (
+  { id => 0, name => "Open Water",     char => '~', color => "\e[34m" },
+  { id => 1, name => "Lily Pads",      char => '%', color => "\e[32m" },
+  { id => 2, name => "Weed Beds",      char => '"', color => "\e[32;1m" },
+  { id => 3, name => "Timber",         char => '|', color => "\e[33m" },
+  { id => 4, name => "Brush",          char => '*', color => "\e[33;1m" },
+  { id => 5, name => "Dock",           char => '=', color => "\e[37;1m" },
+  { id => 6, name => "Pilions",        char => '!', color => "\e[37m" },
+);
+
+my @BOTTOM_TYPES = (
+  { id => 0, name => "Sandy",       struct => "sandy" },
+  { id => 1, name => "Rocky",       struct => "rock" },
+  { id => 2, name => "Large Rocks", struct => "rock" },
+  { id => 3, name => "Muddy",       struct => "sandy" },
+);
+
+my %STRUCT_MAP = (
+  "open"   => [0],
+  "weed"   => [1, 2],
+  "timber" => [3, 4],
+  "rock"   => [1, 2],
+  "sandy"  => [0],
+);
+
+my @WEATHER = (
+  { name => "Clear & Sunny",     bite_mod => 0.7, depth_mod => 1.2 },
+  { name => "Slightly Overcast", bite_mod => 1.0, depth_mod => 1.0 },
+  { name => "Cloudy",            bite_mod => 1.3, depth_mod => 0.8 },
+  { name => "Light Rain",        bite_mod => 1.5, depth_mod => 0.7 },
+  { name => "Heavy Rain",        bite_mod => 0.8, depth_mod => 0.6 },
+);
+
+# ============================================================================
+# LAKE DEFINITIONS (12 named lakes)
+# ============================================================================
+
+my @LAKES = (
+  { name => "Lake Wilson",        max_depth => 30, species => [0,1,2,4,5,6,7,8,10,13,20,21],
+    desc => "Good all-around lake with mixed structure" },
+  { name => "Henry River Bend",   max_depth => 35, species => [0,1,2,4,5,7,8,9,10,19],
+    desc => "Deep river bend with catfish and bass" },
+  { name => "Shady Creek",        max_depth => 25, species => [0,1,5,6,7,8,9,10,20,21],
+    desc => "Reservoir with heavy weed cover" },
+  { name => "Lake Crescent",      max_depth => 40, species => [0,1,2,4,5,7,8,9,12,13,19,20,21],
+    desc => "Deep clear lake with walleye and trout" },
+  { name => "Gilley River Dam",   max_depth => 45, species => [1,2,4,5,7,8,9,10,15,16,17,18,22,23,24,25,26],
+    desc => "Trophy water with pike, muskie, and salmon" },
+  { name => "Darvin Pond",        max_depth => 20, species => [0,2,5,8,10,11,12,13,14,20,21],
+    desc => "Small pond loaded with perch and bullheads" },
+  { name => "Willow Lake",        max_depth => 30, species => [0,1,2,4,5,6,7,8,9,10,12,13,19,23],
+    desc => "Timber-heavy lake good for crappie" },
+  { name => "South Harpeth River",max_depth => 25, species => [0,1,3,4,5,6,7,12,16],
+    desc => "Rocky river with smallmouth and pike" },
+  { name => "Lake Thornton",      max_depth => 35, species => [0,2,5,8,10,11,12,13,14,20,21,23],
+    desc => "Deep lake with varied bottom and walleye" },
+  { name => "Hunter Lake",        max_depth => 40, species => [0,1,2,4,5,6,7,8,9,12,13,16,19],
+    desc => "Large lake with plenty of structure" },
+  { name => "Meadow Marsh",       max_depth => 15, species => [0,5,6,7,11,12,15,16],
+    desc => "Shallow marsh perfect for pike and panfish" },
+  { name => "Kingston Coves",     max_depth => 50, species => [0,1,2,3,4,5,6,7,8,9,12,13,17,18,22,23,24,25,26],
+    desc => "Premier deep lake with trophy fish" },
+);
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+sub bigcatch_main {
+  iamat($info{'handle'}, "Playing Big Catch");
+
+  eval { require "$config{'home'}/modules/pb-doorlib"; } unless defined &door_load;
+
+  my $save = door_load($DOOR_NAME) // {};
+  my %game = (
+    money          => $save->{money} // 200,
+    rod_power      => $save->{rod_power} // 1,
+    fish_finder    => $save->{fish_finder} // 0,
+    total_caught   => $save->{total_caught} // 0,
+    biggest        => $save->{biggest} // 0,
+    species_caught => $save->{species_caught} // {},
+    lifetime_money => $save->{lifetime_money} // 0,
+    lures_owned    => $save->{lures_owned} // _bc_default_lures(),
+    lake_idx   => -1,
+    weather    => $WEATHER[int(rand(@WEATHER))],
+    boat_y     => 0,
+    boat_x     => 0,
+    lake       => [],
+    surface    => [],
+    bottom     => [],
+    fish       => [],
+    livewell   => [],
+    lure_type  => 0,
+    lure_size  => 1,
+    speed      => 2,
+    lure_depth => 0,
+    casting    => 0,
+    quit       => 0,
+  );
+
+  door_show_messages($DOOR_NAME);
+  _bc_title_screen(\%game);
+  _bc_choose_lake(\%game);
+  return if $game{quit};
+
+  _bc_generate_lake(\%game);
+  _bc_stock_lake(\%game);
+
+  while (!$game{quit}) {
+    _bc_display(\%game);
+    _bc_command(\%game);
+  }
+
+  _bc_sell_catch(\%game) if @{$game{livewell}};
+
+  door_save($DOOR_NAME, {
+    money          => $game{money},
+    rod_power      => $game{rod_power},
+    fish_finder    => $game{fish_finder},
+    total_caught   => $game{total_caught},
+    biggest        => $game{biggest},
+    species_caught => $game{species_caught},
+    lifetime_money => $game{lifetime_money},
+    lures_owned    => $game{lures_owned},
+  });
+
+  _bc_update_derby(\%game);
+  iamat($info{'handle'}, "Finished Big Catch");
+}
+
+sub _bc_default_lures {
+  return { "Small Spinner" => 1, "Small Worm" => 1, "Tiny Jig" => 1 };
+}
+
+# ============================================================================
+# TITLE SCREEN
+# ============================================================================
+
+sub _bc_title_screen {
+  my ($g) = @_;
+  door_clear();
+  writeline("", 1);
+  writeline($config{'themecolor'} . "              B I G   C A T C H" . $RST, 1);
+  writeline($config{'linecolor'}  . "         Freshwater Fishing Simulation" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  Weather: " . $config{'datacolor'} . $g->{weather}{name} . $RST, 1);
+  writeline($config{'systemcolor'} . "  Money:   " . $config{'datacolor'} . _bc_money($g->{money}) . $RST, 1);
+  writeline($config{'systemcolor'} . "  Caught:  " . $config{'datacolor'} . "$g->{total_caught} lifetime" . $RST, 1);
+  writeline($config{'systemcolor'} . "  Biggest: " . $config{'datacolor'} . sprintf("%.1f lbs", $g->{biggest}) . $RST, 1);
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# LAKE SELECTION
+# ============================================================================
+
+sub _bc_choose_lake {
+  my ($g) = @_;
+  door_clear();
+  writeline($config{'themecolor'} . " Choose a Lake" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 60) . $RST, 1);
+  writeline("", 1);
+
+  for my $i (0 .. $#LAKES) {
+    my $l = $LAKES[$i];
+    writeline(sprintf("  %s%2d%s %s%-24s%s %dft %d species",
+      $config{'promptcolor'}, $i + 1, $config{'themecolor'},
+      $config{'usercolor'}, $l->{name}, $config{'systemcolor'},
+      $l->{max_depth}, scalar(@{$l->{species}})) . $RST, 1);
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Select lake (1-" . scalar(@LAKES) . ", 0 quit): " . $RST);
+  my $choice = int(getline('text', 2, "", 1));
+
+  if ($choice < 1 || $choice > @LAKES) {
+    $g->{quit} = 1;
+    return;
+  }
+  $g->{lake_idx} = $choice - 1;
+}
+
+# ============================================================================
+# LAKE GENERATION
+# ============================================================================
+
+sub _bc_generate_lake {
+  my ($g) = @_;
+  my $lake = $LAKES[$g->{lake_idx}];
+  my $md = $lake->{max_depth};
+
+  for my $y (0 .. $LAKE_H - 1) {
+    for my $x (0 .. $LAKE_W - 1) {
+      if ($y == 0 || $y == $LAKE_H-1 || $x == 0 || $x == $LAKE_W-1) {
+        $g->{lake}[$y][$x] = -1;
+        $g->{surface}[$y][$x] = -1;
+        $g->{bottom}[$y][$x] = 0;
+        next;
+      }
+
+      my $cx = ($x - $LAKE_W/2) / ($LAKE_W/2 - 2);
+      my $cy = ($y - $LAKE_H/2) / ($LAKE_H/2 - 2);
+      my $dist = sqrt($cx*$cx + $cy*$cy);
+      my $noise = sin($x * 0.7) * 0.15 + cos($y * 0.9) * 0.12 + sin(($x+$y) * 0.5) * 0.1;
+      $dist += $noise;
+
+      if ($dist > 0.95) {
+        $g->{lake}[$y][$x] = -1;
+        $g->{surface}[$y][$x] = -1;
+        $g->{bottom}[$y][$x] = 0;
+      } else {
+        my $depth_pct = (0.95 - $dist) / 0.95;
+        my $depth = int($depth_pct * $md + rand(5) - 2);
+        $depth = 1 if $depth < 1;
+        $depth = $md if $depth > $md;
+        $g->{lake}[$y][$x] = $depth;
+
+        if ($depth <= 8 && rand(100) < 40) {
+          $g->{surface}[$y][$x] = int(rand(5)) + 1;
+        } elsif ($depth <= 15 && rand(100) < 15) {
+          $g->{surface}[$y][$x] = int(rand(3)) + 1;
+        } else {
+          $g->{surface}[$y][$x] = 0;
+        }
+
+        if ($depth > 25) {
+          $g->{bottom}[$y][$x] = rand(100) < 60 ? 0 : 1;
+        } elsif ($depth > 10) {
+          $g->{bottom}[$y][$x] = int(rand(3));
+        } else {
+          $g->{bottom}[$y][$x] = rand(100) < 40 ? 1 : (rand(100) < 50 ? 2 : 0);
+        }
+      }
+    }
+  }
+
+  $g->{boat_y} = int($LAKE_H / 2);
+  for my $x (1 .. $LAKE_W - 2) {
+    if ($g->{lake}[$g->{boat_y}][$x] > 0) { $g->{boat_x} = $x; last; }
+  }
+}
+
+# ============================================================================
+# FISH STOCKING
+# ============================================================================
+
+sub _bc_stock_lake {
+  my ($g) = @_;
+  my $lake = $LAKES[$g->{lake_idx}];
+  $g->{fish} = [];
+
+  for (1 .. $MAX_FISH) {
+    my $sp_idx = $lake->{species}[int(rand(scalar @{$lake->{species}}))];
+    my $sp = $FISH[$sp_idx];
+    my ($fy, $fx, $att) = (0, 0, 0);
+    do {
+      $fy = 1 + int(rand($LAKE_H - 2));
+      $fx = 1 + int(rand($LAKE_W - 2));
+      $att++;
+    } while (($g->{lake}[$fy][$fx] < $sp->{mind} || $g->{lake}[$fy][$fx] > $sp->{maxd} ||
+              $g->{lake}[$fy][$fx] < 0) && $att < 80);
+    next if $att >= 80;
+
+    my $range = $sp->{maxw} - $sp->{minw};
+    my $weight = $sp->{minw} + $range * (rand(0.5) + rand(0.5));
+    $weight = $sp->{minw} + $range * (0.8 + rand(0.2)) if rand(100) < 3;
+    $weight = sprintf("%.2f", $weight) + 0;
+
+    push @{$g->{fish}}, {
+      species => $sp_idx, y => $fy, x => $fx,
+      weight => $weight, depth => $g->{lake}[$fy][$fx],
+      active => rand(100) < 60 ? 1 : 0,
+    };
+  }
+}
+
+# ============================================================================
+# DISPLAY
+# ============================================================================
+
+sub _bc_display {
+  my ($g) = @_;
+  door_clear();
+  my $lake = $LAKES[$g->{lake_idx}];
+  my $lure = _bc_current_lure_name($g);
+  my $boat_depth = $g->{lake}[$g->{boat_y}][$g->{boat_x}];
+
+  writeline($config{'themecolor'} . " " . $lake->{name} .
+    $config{'systemcolor'} . "  " . $g->{weather}{name} .
+    "  Livewell: " . $config{'datacolor'} . scalar(@{$g->{livewell}}) . "/$LIVEWELL" .
+    $config{'systemcolor'} . "  " . $config{'datacolor'} . _bc_money($g->{money}) . $RST, 1);
+
+  for my $y (0 .. $LAKE_H - 1) {
+    my $line = " ";
+    for my $x (0 .. $LAKE_W - 1) {
+      if ($y == $g->{boat_y} && $x == $g->{boat_x}) {
+        $line .= $config{'usercolor'} . "@" . $RST; next;
+      }
+      if ($g->{fish_finder}) {
+        my $dist = abs($y - $g->{boat_y}) + abs($x - $g->{boat_x});
+        if ($dist <= 5) {
+          my $fh = 0;
+          for my $f (@{$g->{fish}}) {
+            if ($f->{y} == $y && $f->{x} == $x && $f->{active}) {
+              $line .= $config{'errorcolor'} . "o" . $RST; $fh = 1; last;
+            }
+          }
+          next if $fh;
+        }
+      }
+      my $depth = $g->{lake}[$y][$x];
+      if ($depth < 0) {
+        $line .= $config{'promptcolor'} . "#" . $RST;
+      } else {
+        my $surf = $g->{surface}[$y][$x];
+        if ($surf > 0 && $surf <= $#SURFACE_TYPES) {
+          $line .= $SURFACE_TYPES[$surf]{color} . $SURFACE_TYPES[$surf]{char} . $RST;
+        } elsif ($depth <= 5) {  $line .= "\e[36m~" . $RST;
+        } elsif ($depth <= 15) { $line .= "\e[34m~" . $RST;
+        } elsif ($depth <= 30) { $line .= "\e[34;1m~" . $RST;
+        } else {                 $line .= "\e[35m~" . $RST;
+        }
+      }
+    }
+    writeline($line, 1);
+  }
+
+  writeline("", 1);
+  my $sn = $g->{surface}[$g->{boat_y}][$g->{boat_x}] >= 0
+    ? $SURFACE_TYPES[$g->{surface}[$g->{boat_y}][$g->{boat_x}]]{name} : "Land";
+  my $bn = $BOTTOM_TYPES[$g->{bottom}[$g->{boat_y}][$g->{boat_x}]]{name};
+  writeline($config{'systemcolor'} . " Depth:" . $config{'datacolor'} . " ${boat_depth}ft" .
+    $config{'systemcolor'} . " Surface:" . $config{'datacolor'} . " $sn" .
+    $config{'systemcolor'} . " Bottom:" . $config{'datacolor'} . " $bn" .
+    $config{'systemcolor'} . " Lure:" . $config{'datacolor'} . " $lure" . $RST, 1);
+  writeline($config{'linecolor'} . " WASD=move C=cast T=tackle L=livewell F=finder S=shop H=scores Q=quit" . $RST, 1);
+}
+
+# ============================================================================
+# DEPTH FINDER
+# ============================================================================
+
+sub _bc_depth_finder {
+  my ($g) = @_;
+  door_clear();
+  writeline($config{'themecolor'} . " Depth Finder" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 45) . $RST, 1);
+
+  my $range = 5;
+  my ($by, $bx) = ($g->{boat_y}, $g->{boat_x});
+
+  my $hdr = "     ";
+  for my $dx (-$range .. $range) {
+    my $x = $bx + $dx;
+    if ($dx == 0) { $hdr .= $config{'usercolor'} . " @@ " . $RST; }
+    elsif ($x >= 0 && $x < $LAKE_W && $g->{lake}[$by][$x] >= 0) { $hdr .= "    "; }
+    else { $hdr .= " ## "; }
+  }
+  writeline($hdr, 1);
+
+  for my $row (0 .. 9) {
+    my $depth_at = ($row + 1) * 5;
+    my $line = sprintf(" %s%3dft%s", $config{'linecolor'}, $depth_at, $RST);
+    for my $dx (-$range .. $range) {
+      my $x = $bx + $dx;
+      if ($x < 0 || $x >= $LAKE_W) { $line .= " ## "; next; }
+      my $d = $g->{lake}[$by][$x];
+      if ($d < 0) {
+        $line .= $config{'promptcolor'} . " ## " . $RST;
+      } elsif ($d < $depth_at) {
+        my @ch = ('..', '**', 'OO', '~~');
+        $line .= $config{'promptcolor'} . " " . $ch[$g->{bottom}[$by][$x]] . " " . $RST;
+      } else {
+        my $fish_here = 0;
+        if ($g->{fish_finder}) {
+          for my $f (@{$g->{fish}}) {
+            if ($f->{x} == $x && $f->{y} == $by && abs($f->{depth} - $depth_at) < 5) {
+              $fish_here = 1; last;
+            }
+          }
+        }
+        if ($fish_here) { $line .= $config{'errorcolor'} . " <> " . $RST; }
+        elsif ($g->{surface}[$by][$x] > 0 && $depth_at <= 10) {
+          my $s = $g->{surface}[$by][$x];
+          $line .= $SURFACE_TYPES[$s]{color} . " " . $SURFACE_TYPES[$s]{char} x 2 . " " . $RST;
+        } else { $line .= "\e[34m .. " . $RST; }
+      }
+    }
+    writeline($line, 1);
+  }
+
+  writeline("", 1);
+  my $bd = $g->{lake}[$by][$bx];
+  my $sn = $g->{surface}[$by][$bx] >= 0 ? $SURFACE_TYPES[$g->{surface}[$by][$bx]]{name} : "Land";
+  my $bn = $BOTTOM_TYPES[$g->{bottom}[$by][$bx]]{name};
+  writeline($config{'systemcolor'} . " Under boat: ${bd}ft  Surface: $sn  Bottom: $bn" . $RST, 1);
+  door_pause();
+}
+
+# ============================================================================
+# COMMAND HANDLER
+# ============================================================================
+
+sub _bc_command {
+  my ($g) = @_;
+  writeline($config{'promptcolor'} . " > " . $RST);
+  my $cmd = lc(waitkey(""));
+  writeline("", 1);
+
+  if    ($cmd eq 'w' || $cmd eq "\e[A") { _bc_move($g, -1, 0); }
+  elsif ($cmd eq 'x' || $cmd eq "\e[B") { _bc_move($g, 1, 0); }
+  elsif ($cmd eq 'a' || $cmd eq "\e[D") { _bc_move($g, 0, -1); }
+  elsif ($cmd eq 'd' || $cmd eq "\e[C") { _bc_move($g, 0, 1); }
+  elsif ($cmd eq 'c') { _bc_cast($g); }
+  elsif ($cmd eq 't') { _bc_tackle_box($g); }
+  elsif ($cmd eq 'l') { _bc_show_livewell($g); }
+  elsif ($cmd eq 'f') { _bc_depth_finder($g); }
+  elsif ($cmd eq 's') { _bc_shop($g); }
+  elsif ($cmd eq 'h') { _bc_scores($g); }
+  elsif ($cmd eq 'q') {
+    writeline($config{'systemcolor'} . " Quit fishing? (Y/N) " . $RST);
+    my $yn = uc(waitkey("")); writeline("", 1);
+    $g->{quit} = 1 if $yn eq 'Y';
+  }
+  _bc_move_fish($g);
+}
+
+sub _bc_move {
+  my ($g, $dy, $dx) = @_;
+  my ($ny, $nx) = ($g->{boat_y} + $dy, $g->{boat_x} + $dx);
+  return if $ny < 0 || $ny >= $LAKE_H || $nx < 0 || $nx >= $LAKE_W;
+  return if $g->{lake}[$ny][$nx] < 0;
+  $g->{boat_y} = $ny; $g->{boat_x} = $nx;
+}
+
+sub _bc_move_fish {
+  my ($g) = @_;
+  for my $f (@{$g->{fish}}) {
+    next if rand(100) < 30;
+    my $sp = $FISH[$f->{species}];
+    my ($dy, $dx) = (int(rand(3)) - 1, int(rand(3)) - 1);
+    my ($ny, $nx) = ($f->{y} + $dy, $f->{x} + $dx);
+    next if $ny < 1 || $ny >= $LAKE_H-1 || $nx < 1 || $nx >= $LAKE_W-1;
+    my $depth = $g->{lake}[$ny][$nx];
+    next if $depth < 0;
+    if ($depth >= $sp->{mind} && $depth <= $sp->{maxd}) {
+      $f->{y} = $ny; $f->{x} = $nx; $f->{depth} = $depth;
+    } elsif (rand(100) < 15) {
+      $f->{y} = $ny; $f->{x} = $nx; $f->{depth} = $depth;
+    }
+    $f->{active} = (rand(100) < 50 * $g->{weather}{bite_mod}) ? 1 : 0;
+  }
+}
+
+# ============================================================================
+# TACKLE BOX
+# ============================================================================
+
+sub _bc_tackle_box {
+  my ($g) = @_;
+  door_clear();
+  writeline($config{'themecolor'} . " Tackle Box" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 55) . $RST, 1);
+  writeline("", 1);
+
+  my @owned;
+  my $idx = 1;
+  for my $ti (0 .. $#LURE_TYPES) {
+    for my $si (0 .. $#LURE_SIZES) {
+      my $name = "$LURE_SIZES[$si]{name} $LURE_TYPES[$ti]{type}";
+      next unless $g->{lures_owned}{$name};
+      my $lt = $LURE_TYPES[$ti];
+      my $di;
+      if ($lt->{behavior} eq 'top') { $di = "Surface"; }
+      elsif ($lt->{behavior} eq 'dive') {
+        $di = sprintf("S:%d M:%d F:%dft", $lt->{depths}[1], $lt->{depths}[2], $lt->{depths}[3]);
+      } else {
+        $di = sprintf("S:%d M:%d F:%dft", $lt->{depths}[0], $lt->{depths}[1], $lt->{depths}[2]);
+      }
+      my $cur = ($ti == $g->{lure_type} && $si == $g->{lure_size}) ? " <--" : "";
+      writeline(sprintf("  %s%2d%s %s%-20s%s %s%s%s",
+        $config{'promptcolor'}, $idx, $config{'themecolor'},
+        $config{'usercolor'}, $name, $config{'systemcolor'}, $di,
+        $config{'errorcolor'}, $cur . $RST), 1);
+      push @owned, { ti => $ti, si => $si, name => $name };
+      $idx++;
+    }
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Select lure (0 cancel): " . $RST);
+  my $choice = int(getline('text', 2, "", 1));
+  if ($choice >= 1 && $choice <= @owned) {
+    my $sel = $owned[$choice - 1];
+    $g->{lure_type} = $sel->{ti}; $g->{lure_size} = $sel->{si};
+    writeline($config{'usercolor'} . " Equipped: $sel->{name}" . $RST, 1);
+    door_pause();
+  }
+}
+
+# ============================================================================
+# CASTING
+# ============================================================================
+
+sub _bc_cast {
+  my ($g) = @_;
+  my $boat_depth = $g->{lake}[$g->{boat_y}][$g->{boat_x}];
+
+  if ($boat_depth <= 0) {
+    writeline($config{'errorcolor'} . " Can't cast from land!" . $RST, 1);
+    door_pause(); return;
+  }
+  if (@{$g->{livewell}} >= $LIVEWELL) {
+    writeline($config{'errorcolor'} . " Livewell full! Sell your catch." . $RST, 1);
+    door_pause(); return;
+  }
+
+  writeline($config{'systemcolor'} . " Retrieve: [1]Stop [2]Slow [3]Medium [4]Fast " . $RST);
+  my $sc = int(waitkey("") // "3");
+  $sc = 3 if $sc < 1 || $sc > 4;
+  $g->{speed} = $sc - 1;
+
+  my $lt = $LURE_TYPES[$g->{lure_type}];
+  my $lure_depth = $lt->{depths}[$g->{speed}];
+  $lure_depth = $boat_depth if $lure_depth > $boat_depth;
+  $g->{lure_depth} = $lure_depth;
+
+  my $lname = _bc_current_lure_name($g);
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Casting $lname... $SPEEDS[$g->{speed}]  Depth: ${lure_depth}ft" . $RST, 1);
+
+  my @cands;
+  for my $f (@{$g->{fish}}) {
+    next unless $f->{active};
+    my $sp = $FISH[$f->{species}];
+    my $dist = abs($f->{y} - $g->{boat_y}) + abs($f->{x} - $g->{boat_x});
+    next if $dist > 4;
+    next if abs($f->{depth} - $lure_depth) > 10;
+
+    my $ltype = lc($lt->{type});
+    my $lmatch = 0;
+    for my $p (@{$sp->{lure}}) { if ($ltype =~ /\Q$p\E/i) { $lmatch = 1; last; } }
+
+    my $ls = $LURE_SIZES[$g->{lure_size}];
+    next if $f->{weight} < $ls->{minfish} || $f->{weight} > $ls->{maxfish};
+
+    my $surface = $g->{surface}[$f->{y}][$f->{x}];
+    my $smatch = 0;
+    if (exists $STRUCT_MAP{$sp->{struct}}) {
+      for my $sid (@{$STRUCT_MAP{$sp->{struct}}}) {
+        if ($surface == $sid) { $smatch = 1; last; }
+      }
+    }
+    $smatch = 1 if $sp->{struct} eq 'open' && $surface == 0;
+
+    my $chance = 25 + ($lmatch ? 20 : 0) + ($smatch ? 10 : 0);
+    $chance -= abs($f->{depth} - $lure_depth) * 2;
+    $chance -= $dist * 5;
+    $chance = int($chance * $g->{weather}{bite_mod} * $ls->{strike_mod});
+    $chance = 5 if $chance < 5; $chance = 85 if $chance > 85;
+    push @cands, { fish => $f, chance => $chance };
+  }
+
+  if (!@cands) {
+    my @m = ("No bites here.", "Nothing interested.", "Try different water.", "No takers.");
+    writeline($config{'systemcolor'} . " " . $m[int(rand(@m))] . $RST, 1);
+    door_pause(); return;
+  }
+
+  for my $c (sort { $b->{chance} <=> $a->{chance} } @cands) {
+    if (rand(100) < $c->{chance}) { _bc_strike($g, $c->{fish}); return; }
+  }
+
+  my @m = ("A nibble... but no hookup.", "Something bumped the lure.", "A swirl, but no strike.");
+  writeline($config{'systemcolor'} . " " . $m[int(rand(@m))] . $RST, 1);
+  door_pause();
+}
+
+# ============================================================================
+# STRIKE AND FIGHT
+# ============================================================================
+
+sub _bc_strike {
+  my ($g, $fish) = @_;
+  my $sp = $FISH[$fish->{species}];
+
+  writeline("", 1);
+  writeline($config{'usercolor'} . " Strike!" . $RST, 1);
+  writeline($config{'systemcolor'} . " Hit H to hook!" . $RST, 1);
+  writeline($config{'promptcolor'} . " > " . $RST);
+  my $key = lc(waitkey(""));
+
+  if ($key ne 'h') {
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " Too slow! It spit the lure." . $RST, 1);
+    door_pause(); return;
+  }
+
+  writeline("", 1);
+  writeline($config{'usercolor'} . " Hooked!" . $RST, 1);
+
+  my $line_test = $g->{rod_power} * 5 + 4;
+  my $tension = int(rand(20));
+  my $energy = int($sp->{fight} * 3 + $fish->{weight} * 0.5);
+  my $distance = 4 + int($sp->{fight} / 2);
+  my $max_t = $line_test * 3;
+
+  while ($distance > 0 && $tension < $max_t && $energy > 0) {
+    my $pull = int(rand($sp->{fight} * 2)) + int($fish->{weight} * 0.3);
+
+    if ($pull > $line_test) {
+      writeline($config{'errorcolor'} . " Be careful - pulling the drag!" . $RST, 1);
+    }
+    $tension += $pull;
+
+    my $pct = $tension * 100 / $max_t;
+    my $fl = int($pct / 100 * 25); $fl = 25 if $fl > 25;
+    my $bar = "[" . ("=" x $fl) . (" " x (25 - $fl)) . "]";
+    my $tc = $pct > 75 ? $config{'errorcolor'} : $pct > 40 ? $config{'promptcolor'} : $config{'usercolor'};
+
+    writeline($config{'systemcolor'} . " Line: " . $tc . $bar .
+      $config{'systemcolor'} . " Dist:" . $config{'datacolor'} . "$distance" .
+      $config{'systemcolor'} . " Energy:" . $config{'datacolor'} . "$energy" . $RST, 1);
+    writeline($config{'systemcolor'} . " [R]eel  [B]ear Down  [G]ive 'em Line " . $RST);
+    my $action = lc(waitkey(""));
+    writeline("", 1);
+
+    if ($action eq 'r') {
+      $distance--; $tension += int(rand(5)) + 2; $energy -= 1;
+    } elsif ($action eq 'b') {
+      $tension += int(rand($sp->{fight})) + 3; $energy -= 3;
+      $distance-- if rand(100) < 40;
+    } elsif ($action eq 'g') {
+      $tension -= int(rand(15)) + 10; $tension = 0 if $tension < 0;
+      $distance++ if rand(100) < 30; $energy -= 1;
+    } else {
+      $tension -= int(rand(8)); $tension = 0 if $tension < 0;
+    }
+
+    if ($energy > 0 && rand(100) < 15) {
+      my @ev = ("The fish jumps!", "Making a run!", "Diving deep!");
+      writeline($config{'datacolor'} . " " . $ev[int(rand(@ev))] . $RST, 1);
+      $tension += int(rand(10));
+    }
+  }
+
+  if ($tension >= $max_t) {
+    writeline("", 1);
+    writeline($config{'errorcolor'} . " He snapped the line!" . $RST, 1);
+    door_pause(); return;
+  }
+
+  if ($distance <= 0 || $energy <= 0) {
+    writeline("", 1);
+    writeline($config{'usercolor'} . " You caught a $sp->{name}!" . $RST, 1);
+    writeline($config{'datacolor'} . " Weight: " . sprintf("%.2f", $fish->{weight}) . " lbs" . $RST, 1);
+
+    push @{$g->{livewell}}, {
+      species => $sp->{name}, weight => $fish->{weight}, price => $sp->{price},
+    };
+    $g->{total_caught}++;
+    $g->{biggest} = $fish->{weight} if $fish->{weight} > $g->{biggest};
+    $g->{species_caught}{$sp->{name}} = ($g->{species_caught}{$sp->{name}} // 0) + 1;
+
+    $g->{fish} = [grep { $_ != $fish } @{$g->{fish}}];
+    _bc_spawn_one($g);
+
+    if ($fish->{weight} >= $sp->{maxw} * 0.7) {
+      door_submit_score($DOOR_NAME, int($fish->{weight} * 100),
+        { species => $sp->{name}, weight => sprintf("%.2f lbs", $fish->{weight}) });
+    }
+    if ($fish->{weight} >= $sp->{maxw} * 0.8) {
+      door_broadcast($DOOR_NAME,
+        sprintf("%s caught a trophy %s (%.2f lbs)!", $info{'handle'}, $sp->{name}, $fish->{weight}));
+    }
+  }
+  door_pause();
+}
+
+sub _bc_spawn_one {
+  my ($g) = @_;
+  my $lake = $LAKES[$g->{lake_idx}];
+  my $si = $lake->{species}[int(rand(scalar @{$lake->{species}}))];
+  my $sp = $FISH[$si];
+  my ($fy, $fx, $att) = (0, 0, 0);
+  do {
+    $fy = 1 + int(rand($LAKE_H - 2)); $fx = 1 + int(rand($LAKE_W - 2)); $att++;
+  } while (($g->{lake}[$fy][$fx] < $sp->{mind} || $g->{lake}[$fy][$fx] > $sp->{maxd} ||
+            $g->{lake}[$fy][$fx] < 0) && $att < 80);
+  return if $att >= 80;
+  my $w = $sp->{minw} + ($sp->{maxw} - $sp->{minw}) * (rand(0.5) + rand(0.5));
+  push @{$g->{fish}}, {
+    species => $si, y => $fy, x => $fx,
+    weight => sprintf("%.2f", $w) + 0, depth => $g->{lake}[$fy][$fx],
+    active => rand(100) < 50 ? 1 : 0,
+  };
+}
+
+# ============================================================================
+# LIVEWELL
+# ============================================================================
+
+sub _bc_show_livewell {
+  my ($g) = @_;
+  door_clear();
+  writeline($config{'themecolor'} . " Livewell (" . scalar(@{$g->{livewell}}) . "/$LIVEWELL)" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+
+  if (!@{$g->{livewell}}) {
+    writeline($config{'systemcolor'} . " Empty!" . $RST, 1);
+  } else {
+    my ($tw, $tv) = (0, 0);
+    writeline(sprintf("  %s%-3s %-20s %8s %8s%s", $config{'systemcolor'}, "#", "Species", "Weight", "Value", $RST), 1);
+    for my $i (0 .. $#{$g->{livewell}}) {
+      my $f = $g->{livewell}[$i];
+      my $v = $f->{weight} * $f->{price};
+      $tw += $f->{weight}; $tv += $v;
+      writeline(sprintf("  %s%-3d %s%-20s %s%7.2f %s%8s%s",
+        $config{'promptcolor'}, $i+1, $config{'usercolor'}, $f->{species},
+        $config{'datacolor'}, $f->{weight}, $config{'datacolor'}, _bc_money($v), $RST), 1);
+    }
+    writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+    writeline(sprintf("  %s%-24s %7.2f %s%s",
+      $config{'systemcolor'}, "Total:", $tw, _bc_money($tv), $RST), 1);
+  }
+  writeline("", 1);
+
+  if (@{$g->{livewell}}) {
+    writeline($config{'systemcolor'} . " [S]ell  [R]elease  [any]back " . $RST);
+    my $cmd = lc(waitkey(""));
+    if ($cmd eq 's') { _bc_sell_catch($g); }
+    elsif ($cmd eq 'r') {
+      writeline("", 1);
+      writeline($config{'systemcolor'} . " Release which? (0 cancel) " . $RST);
+      my $ch = int(getline('text', 2, "", 1));
+      if ($ch >= 1 && $ch <= @{$g->{livewell}}) {
+        my $rel = splice(@{$g->{livewell}}, $ch - 1, 1);
+        writeline($config{'usercolor'} . " Released $rel->{species}." . $RST, 1);
+        door_pause();
+      }
+    }
+  } else { door_pause(); }
+}
+
+sub _bc_sell_catch {
+  my ($g) = @_;
+  my $total = 0;
+  for my $f (@{$g->{livewell}}) { $total += $f->{weight} * $f->{price}; }
+  $total = sprintf("%.2f", $total) + 0;
+  $g->{money} += $total; $g->{lifetime_money} += $total;
+  writeline("", 1);
+  writeline($config{'usercolor'} . " Sold " . scalar(@{$g->{livewell}}) . " fish for " . _bc_money($total) . "!" . $RST, 1);
+  $g->{livewell} = [];
+  door_pause();
+}
+
+# ============================================================================
+# SHOP
+# ============================================================================
+
+sub _bc_shop {
+  my ($g) = @_;
+  my $shopping = 1;
+  while ($shopping) {
+    door_clear();
+    writeline($config{'themecolor'} . " Fonzo's Tackle & Bait" . $RST, 1);
+    writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+    writeline($config{'systemcolor'} . " Balance: " . $config{'datacolor'} . _bc_money($g->{money}) . $RST, 1);
+    writeline("", 1);
+
+    my @items;
+    my $idx = 1;
+    my @rods = (
+      { name => "6 lb Test Line",   power => 1, price => 0 },
+      { name => "10 lb Test Line",  power => 2, price => 150 },
+      { name => "15 lb Test Line",  power => 3, price => 400 },
+      { name => "20 lb Test Line",  power => 4, price => 800 },
+      { name => "30 lb Test Line",  power => 5, price => 1500 },
+    );
+
+    writeline($config{'systemcolor'} . " -- Line Upgrades --" . $RST, 1);
+    for my $r (@rods) {
+      next if $r->{power} <= $g->{rod_power};
+      writeline(sprintf("  %s%2d%s %s%-22s%s %s",
+        $config{'promptcolor'}, $idx, $config{'themecolor'},
+        $config{'usercolor'}, $r->{name}, $config{'datacolor'}, _bc_money($r->{price}) . $RST), 1);
+      push @items, { type => 'rod', data => $r }; $idx++;
+    }
+
+    unless ($g->{fish_finder}) {
+      writeline("", 1);
+      writeline($config{'systemcolor'} . " -- Electronics --" . $RST, 1);
+      writeline(sprintf("  %s%2d%s %s%-22s%s %s",
+        $config{'promptcolor'}, $idx, $config{'themecolor'},
+        $config{'usercolor'}, "Fish Finder", $config{'datacolor'}, _bc_money(500) . $RST), 1);
+      push @items, { type => 'finder', price => 500 }; $idx++;
+    }
+
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " -- Lures --" . $RST, 1);
+    for my $ti (0 .. $#LURE_TYPES) {
+      for my $si (0 .. $#LURE_SIZES) {
+        my $name = "$LURE_SIZES[$si]{name} $LURE_TYPES[$ti]{type}";
+        next if $g->{lures_owned}{$name};
+        my $price = 20 + ($si * 15) + ($ti * 10);
+        writeline(sprintf("  %s%2d%s %s%-22s%s %s",
+          $config{'promptcolor'}, $idx, $config{'themecolor'},
+          $config{'usercolor'}, $name, $config{'datacolor'}, _bc_money($price) . $RST), 1);
+        push @items, { type => 'lure', name => $name, price => $price, ti => $ti, si => $si }; $idx++;
+      }
+    }
+
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " Buy (0 exit): " . $RST);
+    my $ch = int(getline('text', 2, "", 1));
+    if ($ch < 1 || $ch > @items) { $shopping = 0; next; }
+
+    my $item = $items[$ch - 1];
+    if ($item->{type} eq 'rod') {
+      if ($g->{money} >= $item->{data}{price}) {
+        $g->{money} -= $item->{data}{price}; $g->{rod_power} = $item->{data}{power};
+        writeline($config{'usercolor'} . " Upgraded to $item->{data}{name}!" . $RST, 1);
+      } else { writeline($config{'errorcolor'} . " Not enough money." . $RST, 1); }
+    } elsif ($item->{type} eq 'finder') {
+      if ($g->{money} >= $item->{price}) {
+        $g->{money} -= $item->{price}; $g->{fish_finder} = 1;
+        writeline($config{'usercolor'} . " Fish Finder installed!" . $RST, 1);
+      } else { writeline($config{'errorcolor'} . " Not enough money." . $RST, 1); }
+    } elsif ($item->{type} eq 'lure') {
+      if ($g->{money} >= $item->{price}) {
+        $g->{money} -= $item->{price}; $g->{lures_owned}{$item->{name}} = 1;
+        writeline($config{'usercolor'} . " Bought $item->{name}!" . $RST, 1);
+      } else { writeline($config{'errorcolor'} . " Not enough money." . $RST, 1); }
+    }
+    door_pause();
+  }
+}
+
+# ============================================================================
+# SCORES AND DERBY
+# ============================================================================
+
+sub _bc_scores {
+  my ($g) = @_;
+  door_show_scores($DOOR_NAME, "Big Catch - Trophy Fish", "Weight");
+  _bc_show_derby($g);
+  door_pause();
+}
+
+sub _bc_show_derby {
+  my ($g) = @_;
+  my $derby = door_load_shared($DOOR_NAME, "derby.dat");
+  return unless $derby && $derby->{entries} && keys %{$derby->{entries}};
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Fishing Derby Standings" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 58) . $RST, 1);
+  writeline(sprintf("  %s%-18s %8s %8s %8s %8s%s",
+    $config{'systemcolor'}, "Angler", "Biggest", "Caught", "Species", "Earned", $RST), 1);
+  my @s = sort { $derby->{entries}{$b}{biggest} <=> $derby->{entries}{$a}{biggest} }
+          keys %{$derby->{entries}};
+  for my $n (@s[0 .. ($#s > 14 ? 14 : $#s)]) {
+    my $e = $derby->{entries}{$n};
+    my $c = (lc($n) eq lc($info{'handle'})) ? $config{'usercolor'} : $config{'datacolor'};
+    writeline(sprintf("  %s%-18s %s%7.1flb %8d %8d %8s%s",
+      $c, substr($n, 0, 18), $config{'datacolor'}, $e->{biggest},
+      $e->{total}, $e->{species}, _bc_money($e->{earned} // 0), $RST), 1);
+  }
+  writeline("", 1);
+}
+
+sub _bc_update_derby {
+  my ($g) = @_;
+  my $derby = door_load_shared($DOOR_NAME, "derby.dat") // { entries => {} };
+  my $e = $derby->{entries}{$info{'handle'}} // { biggest => 0, total => 0, species => 0, earned => 0 };
+  $e->{biggest} = $g->{biggest} if $g->{biggest} > ($e->{biggest} // 0);
+  $e->{total} = $g->{total_caught};
+  $e->{species} = scalar(keys %{$g->{species_caught}});
+  $e->{earned} = $g->{lifetime_money};
+  $derby->{entries}{$info{'handle'}} = $e;
+  door_save_shared($DOOR_NAME, "derby.dat", $derby);
+
+  if ($g->{biggest} > 0) {
+    my $max = 0;
+    for my $v (values %{$derby->{entries}}) { $max = $v->{biggest} if $v->{biggest} > $max; }
+    if ($g->{biggest} >= $max) {
+      door_broadcast($DOOR_NAME, sprintf("%s holds the Big Catch record: %.1f lbs!", $info{'handle'}, $g->{biggest}));
+    }
+  }
+}
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+sub _bc_money { return sprintf("\$%.2f", $_[0]); }
+
+sub _bc_current_lure_name {
+  my ($g) = @_;
+  return "$LURE_SIZES[$g->{lure_size}]{name} $LURE_TYPES[$g->{lure_type}]{type}";
+}
+
+1;

@@ -200,22 +200,30 @@ sub run_menu_command {
 }
 
 sub show_menu {
-    my ($menufile, $menustack) = @_;
+    my ($menufile, $menustack, $opts) = @_;
     $menustack ||= [];
-    my $main_menu = ($menufile =~ /main\.mnu$/i);
+    $opts ||= {};
+    my $submenu_mode = $opts->{'submenu'} || 0;
+    my $main_menu = !$submenu_mode && ($menufile =~ /main\.mnu$/i);
 
     # Determine menu base name and directory
     my ($basename) = $menufile =~ /([^\/\\]+)\.mnu$/i;
     my $menudir = $menufile; $menudir =~ s/\/[^\/]+$//;
 
     # Internal commands
-    my @internal_commands = (
-        ['&',  $theme{'cmd_teleconf'}      // "Teleconference",          sub { menu_teleconference() } ],
-        ['#',  $theme{'cmd_whosonline'}    // "Who's online",            sub { whosonline() } ],
-        ['%',  $theme{'cmd_oneliners'}     // "Write on the wall",       sub { oneliners() } ],
-        ['@',  $theme{'cmd_bulletins'}     // "Read System Bulletins",   sub { bulletins() } ],
-        ['!',  $theme{'cmd_exit'}          // "Log Off and Exit",        sub { menu_exit($main_menu) } ],
-        ['S',  "Security Dashboard",       sub { 
+    my @internal_commands;
+    if ($submenu_mode) {
+        @internal_commands = (
+            ['!',  $opts->{'back_label'} // "Back", sub { return 'exit'; } ],
+        );
+    } else {
+        @internal_commands = (
+            ['&',  $theme{'cmd_teleconf'}      // "Teleconference",          sub { menu_teleconference() } ],
+            ['#',  $theme{'cmd_whosonline'}    // "Who's online",            sub { whosonline() } ],
+            ['%',  $theme{'cmd_oneliners'}     // "Write on the wall",       sub { oneliners() } ],
+            ['@',  $theme{'cmd_bulletins'}     // "Read System Bulletins",   sub { bulletins() } ],
+            ['!',  $theme{'cmd_exit'}          // "Log Off and Exit",        sub { menu_exit($main_menu) } ],
+            ['S',  "Security Dashboard",       sub { 
             # Only allow sysops
             if ($info{'security'} >= $config{'sec_sysop'}) {
                 # Load security modules on demand
@@ -235,7 +243,8 @@ sub show_menu {
                 return 0;
             }
         }],
-    );
+        );
+    }
 
     while (1) {
         my $shown_static = 0;
@@ -267,7 +276,11 @@ sub show_menu {
 
         my @choices;
         unless ($shown_static) {
-            writeline($theme{'mainmenuhdr'} // $config{'themecolor'}."\nMain Menu".$RST, 1);
+            if ($submenu_mode && $opts->{'title'}) {
+                writeline($config{'themecolor'} . "\n" . $opts->{'title'} . $RST, 1);
+            } else {
+                writeline($theme{'mainmenuhdr'} // $config{'themecolor'}."\nMain Menu".$RST, 1);
+            }
 
             # Print menu items if present
             if (@menuitems) {
@@ -287,7 +300,9 @@ sub show_menu {
             }
 
             # Always print the commands section and internal commands
-            writeline($theme{'commandshdr'} // $config{'themecolor'}."\nCommands".$RST, 1);
+            unless ($submenu_mode) {
+                writeline($theme{'commandshdr'} // $config{'themecolor'}."\nCommands".$RST, 1);
+            }
             foreach my $cmd (@internal_commands) {
                 my ($key, $desc, $handler) = @$cmd;
                 writeline("  ".$config{'datacolor'}.$key.$config{'themecolor'}." ... ".$config{'usercolor'}.$desc.$RST, 1);
@@ -381,7 +396,9 @@ sub show_menu {
                 my ($key, $desc, $handler) = @$cmd;
                 if ($choice eq uc($key) || $choice eq uc($desc)) {
                     my $exit = $handler->();
-                    return if $key eq '!' && $exit;
+                    if ($key eq '!' && $exit) {
+                        return $submenu_mode ? 'exit' : undef;
+                    }
                     $found = 1;
                     last;
                 }
@@ -1326,9 +1343,12 @@ sub teleconf {
     if ($chatline =~/^\/GAMES\b/i || $chatline =~/^\/DOORS\b/i || $chatline =~/^\/MENU\b/i) {
       $inteleconf = 0;
       iamat($info{'handle'}, "Games Menu");
-      # Call the menu system - returns when user exits
+      # Call the menu system as a submenu - returns when user exits
       while (1) {
-          my $result = show_menu($config{'home'}.$config{'data'}."/main.mnu");
+          my $result = show_menu(
+            $config{'home'}.$config{'data'}."/games.mnu", [],
+            { submenu => 1, title => "Games", back_label => "Back to Chat" }
+          );
           last if $result && $result eq 'exit';
       }
       iamat($info{'handle'}, "Chat");

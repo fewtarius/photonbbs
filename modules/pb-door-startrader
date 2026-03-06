@@ -1,0 +1,1097 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: Star Trader
+# A space trading game inspired by Trade Wars 2002
+#
+# Navigate sectors, trade commodities, upgrade your ship,
+# deploy fighters, colonize planets, and dominate the galaxy.
+#
+
+# ============================================================================
+# GAME CONSTANTS
+# ============================================================================
+
+my $NUM_SECTORS   = 5000;
+my $MAX_WARPS     = 6;     # Max warps per sector
+my $NUM_PORTS     = 500;   # Trading ports
+my $NUM_PLANETS   = 80;
+my $NUM_NEBULAE   = 40;    # Navigation hazards
+my $TURNS_PER_DAY = 500;
+my $START_CREDITS = 20000;
+my $START_HOLDS   = 25;
+my $START_FIGHTERS= 20;
+my $START_SHIELDS = 150;
+
+# Commodities
+my @COMMODITIES = (
+  { name => "Ore",       abbr => "Ore", base_price => 10 },
+  { name => "Organics",  abbr => "Org", base_price => 20 },
+  { name => "Equipment", abbr => "Equ", base_price => 35 },
+);
+
+# Port types: B=Buy, S=Sell for each commodity (Ore, Org, Equ)
+my @PORT_TYPES = (
+  { type => "BBB", name => "Special" },
+  { type => "BBS", name => "Ore/Org depot" },
+  { type => "BSB", name => "Ore/Equ depot" },
+  { type => "SBB", name => "Org/Equ depot" },
+  { type => "BSS", name => "Ore refinery" },
+  { type => "SBS", name => "Org refinery" },
+  { type => "SSB", name => "Equ factory" },
+  { type => "SSS", name => "Free port" },
+);
+
+# Ship classes
+my @SHIP_CLASSES = (
+  { name => "Merchant Cruiser",  holds => 25,  fighters => 20,   shields => 150,  turns_per_warp => 2, price => 0 },
+  { name => "Scout Marauder",    holds => 35,  fighters => 75,   shields => 300,  turns_per_warp => 2, price => 75000 },
+  { name => "Cargo Hauler",      holds => 80,  fighters => 30,   shields => 200,  turns_per_warp => 3, price => 120000 },
+  { name => "Havoc Gunstar",     holds => 20,  fighters => 300,  shields => 600,  turns_per_warp => 4, price => 250000 },
+  { name => "Colonial Transport", holds =>100,  fighters => 50,   shields => 400,  turns_per_warp => 3, price => 400000 },
+  { name => "Imperial StarShip", holds => 65,  fighters => 400,  shields => 1000, turns_per_warp => 3, price => 750000 },
+  { name => "Corporate Flagship",holds =>120,  fighters => 600,  shields => 2000, turns_per_warp => 2, price => 2000000 },
+  { name => "Dreadnought",       holds => 50,  fighters =>1000,  shields => 3500, turns_per_warp => 5, price => 5000000 },
+);
+
+my $DOOR_NAME = "startrader";
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+sub startrader_main {
+  iamat($info{'handle'}, "Playing Star Trader");
+
+  # Load or initialize universe
+  my $universe = _st_load_universe();
+  my $player   = _st_load_player($universe);
+
+  _st_title($player);
+
+  # Main game loop
+  my $playing = 1;
+  while ($playing && $player->{turns} > 0) {
+    $playing = _st_command_menu($universe, $player);
+  }
+
+  if ($player->{turns} <= 0) {
+    writeline($config{'errorcolor'} . " You have used all your turns for today." . $RST, 1);
+    writeline($config{'systemcolor'} . " Come back tomorrow for more turns!" . $RST, 1);
+    door_pause();
+  }
+
+  # Save state
+  _st_save_player($player);
+  _st_save_universe($universe);
+
+  iamat($info{'handle'}, "Left Star Trader");
+}
+
+# ============================================================================
+# TITLE
+# ============================================================================
+
+sub _st_title {
+  my ($player) = @_;
+  door_clear();
+  writeline("", 1);
+  writeline($config{'themecolor'} . "          S T A R   T R A D E R" . $RST, 1);
+  writeline($config{'linecolor'}  . "       =============================" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  Welcome, Captain " . $config{'usercolor'} . $player->{name} . $RST, 1);
+  writeline($config{'systemcolor'} . "  Ship: " . $config{'datacolor'} . $SHIP_CLASSES[$player->{ship_class}]{name} . $RST, 1);
+  writeline($config{'systemcolor'} . "  Credits: " . $config{'datacolor'} . door_money($player->{credits}) . $RST, 1);
+  writeline($config{'systemcolor'} . "  Turns: " . $config{'datacolor'} . $player->{turns} . $RST, 1);
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# UNIVERSE GENERATION AND PERSISTENCE
+# ============================================================================
+
+sub _st_load_universe {
+  my $u = door_load_shared($DOOR_NAME, "universe.dat");
+  return $u if $u;
+  return _st_generate_universe();
+}
+
+sub _st_save_universe {
+  my ($u) = @_;
+  door_save_shared($DOOR_NAME, "universe.dat", $u);
+}
+
+sub _st_generate_universe {
+  my %u;
+
+  # Generate sectors with warp connections using cluster approach
+  # Sectors are organized in clusters for more realistic topology
+  $u{sectors} = [];
+  my $num_clusters = int($NUM_SECTORS / 50);
+
+  for my $i (0 .. $NUM_SECTORS - 1) {
+    my $cluster = int($i / 50);
+    my $num_warps = 2 + int(rand($MAX_WARPS - 1));
+    my @warps;
+    while (@warps < $num_warps) {
+      my $target;
+      if (rand(100) < 75) {
+        # 75% chance: warp within same cluster region (+/- 100 sectors)
+        my $base = $cluster * 50;
+        $target = $base + int(rand(100));
+        $target = $target % $NUM_SECTORS;
+      } else {
+        # 25% chance: long-range warp to any sector
+        $target = int(rand($NUM_SECTORS));
+      }
+      next if $target == $i;
+      next if grep { $_ == $target } @warps;
+      push @warps, $target;
+    }
+    $u{sectors}[$i] = {
+      id       => $i + 1,
+      warps    => [sort { $a <=> $b } @warps],
+      port     => undef,
+      planet   => undef,
+      nebula   => 0,
+      fighters => 0,
+      fighter_owner => "",
+      mines    => 0,
+      mine_owner => "",
+    };
+  }
+
+  # Ensure bidirectional warps
+  for my $i (0 .. $NUM_SECTORS - 1) {
+    for my $w (@{$u{sectors}[$i]{warps}}) {
+      unless (grep { $_ == $i } @{$u{sectors}[$w]{warps}}) {
+        push @{$u{sectors}[$w]{warps}}, $i;
+      }
+    }
+  }
+
+  # Place ports with stock scaled to galaxy size
+  my @port_sectors = _st_random_sectors($NUM_PORTS, $NUM_SECTORS);
+  for my $si (@port_sectors) {
+    my $pt = $PORT_TYPES[int(rand(@PORT_TYPES))];
+    $u{sectors}[$si]{port} = {
+      type     => $pt->{type},
+      name     => $pt->{name},
+      stock    => [800 + int(rand(1200)), 800 + int(rand(1200)), 800 + int(rand(1200))],
+    };
+  }
+
+  # Place planets with more resources
+  my @planet_sectors = _st_random_sectors($NUM_PLANETS, $NUM_SECTORS);
+  my @planet_names = _st_planet_names();
+  my $pnum = 0;
+  for my $si (@planet_sectors) {
+    $u{sectors}[$si]{planet} = {
+      name       => $planet_names[$pnum] // "Planet " . ($pnum + 1),
+      owner      => "",
+      ore        => 200 + int(rand(800)),
+      organics   => 200 + int(rand(800)),
+      equipment  => 200 + int(rand(800)),
+      colonists  => 0,
+      fighters   => 0,
+      citadel    => 0,
+    };
+    $pnum++;
+  }
+
+  # Place nebulae (navigation hazards - extra turn cost)
+  my @neb_sectors = _st_random_sectors($NUM_NEBULAE, $NUM_SECTORS);
+  for my $si (@neb_sectors) {
+    $u{sectors}[$si]{nebula} = 1;
+  }
+
+  # Sector 0 is always the starting sector (Federation Space)
+  $u{sectors}[0]{port} = {
+    type  => "SSS",
+    name  => "Federation HQ",
+    stock => [9999, 9999, 9999],
+  };
+  # Sector 1 is a shipyard
+  $u{sectors}[1]{port} = {
+    type  => "SSS",
+    name  => "Stardock Shipyard",
+    stock => [5000, 5000, 5000],
+  };
+
+  $u{created} = time();
+  $u{total_players} = 0;
+  $u{last_reset} = time();
+  return \%u;
+}
+
+# Generate planet names
+sub _st_planet_names {
+  my @prefixes = qw(Alpha Beta Gamma Delta Epsilon Zeta Eta Theta Iota Kappa
+                     Nova Terra Sol Vega Rigel Sirius Altair Proxima Kepler Tau);
+  my @suffixes = qw(Prime Major Minor III IV V VI VII VIII IX X
+                     Station Colony Outpost Haven Port Base);
+  my @names;
+  for my $p (@prefixes) {
+    for my $s (@suffixes) {
+      push @names, "$p $s";
+    }
+  }
+  # Shuffle
+  for my $i (reverse 1 .. $#names) {
+    my $j = int(rand($i + 1));
+    @names[$i, $j] = @names[$j, $i];
+  }
+  return @names;
+}
+
+sub _st_random_sectors {
+  my ($count, $max) = @_;
+  my %used;
+  $used{0} = 1;  # Reserve sector 0
+  my @result;
+  while (@result < $count) {
+    my $s = int(rand($max));
+    next if $used{$s};
+    $used{$s} = 1;
+    push @result, $s;
+  }
+  return @result;
+}
+
+# ============================================================================
+# PLAYER MANAGEMENT
+# ============================================================================
+
+sub _st_load_player {
+  my ($universe) = @_;
+  my $p = door_load($DOOR_NAME);
+  if ($p) {
+    # Check for daily turn reset
+    my $today = get_current_date();
+    if (($p->{last_play} // '') ne $today) {
+      $p->{turns} = $TURNS_PER_DAY;
+      $p->{last_play} = $today;
+    }
+    return $p;
+  }
+  return _st_new_player();
+}
+
+sub _st_new_player {
+  return {
+    name       => $info{'handle'},
+    sector     => 0,
+    credits    => $START_CREDITS,
+    ship_class => 0,
+    holds      => $START_HOLDS,
+    fighters   => $START_FIGHTERS,
+    shields    => $START_SHIELDS,
+    cargo      => [0, 0, 0],  # Ore, Org, Equ
+    turns      => $TURNS_PER_DAY,
+    last_play  => get_current_date(),
+    experience => 0,
+    kills      => 0,
+    deaths     => 0,
+    alignment  => 0,
+    mines_laid => 0,
+    planets_owned => 0,
+    total_trades => 0,
+    total_profit => 0,
+  };
+}
+
+sub _st_save_player {
+  my ($p) = @_;
+  door_save($DOOR_NAME, $p);
+}
+
+# ============================================================================
+# COMMAND MENU
+# ============================================================================
+
+sub _st_command_menu {
+  my ($u, $p) = @_;
+
+  _st_display_sector($u, $p);
+
+  my $sector = $u->{sectors}[$p->{sector}];
+
+  # Build warp choices
+  writeline($config{'systemcolor'} . " Warps: " . $RST, 0);
+  for my $w (@{$sector->{warps}}) {
+    writeline($config{'datacolor'} . ($w + 1) . " " . $RST, 0);
+  }
+  writeline("", 1);
+
+  if ($p->{turns} <= 10 || $p->{turns} <= 5) {
+    writeline($config{'errorcolor'} . " You have $p->{turns} turns left." . $RST, 1);
+  }
+
+  writeline($config{'promptcolor'} . " Command (?=Help): " . $RST);
+  my $cmd = uc(waitkey(""));
+  writeline("", 1);
+
+  # Check if it's a sector number (warp)
+  if ($cmd =~ /^\d$/) {
+    # Quick warp - but need full number
+    writeline($config{'promptcolor'} . " Warp to sector: " . $RST);
+    my $full = $cmd . getline(text, 3, "", 1);
+    chomp $full;
+    $full =~ s/\D//g;
+    if ($full ne '') {
+      _st_warp($u, $p, int($full) - 1);
+    }
+    return 1;
+  }
+
+  if ($cmd eq 'M' || $cmd eq 'W') {
+    # Move/Warp
+    my $dest = door_getnum("Warp to sector:", $NUM_SECTORS);
+    _st_warp($u, $p, $dest - 1) if $dest > 0;
+  }
+  elsif ($cmd eq 'P' && $sector->{port}) {
+    _st_port($u, $p);
+  }
+  elsif ($cmd eq 'L') {
+    _st_land_planet($u, $p);
+  }
+  elsif ($cmd eq 'D') {
+    _st_display_sector($u, $p);
+    door_pause();
+  }
+  elsif ($cmd eq 'C') {
+    _st_computer($u, $p);
+  }
+  elsif ($cmd eq 'I') {
+    _st_ship_info($p);
+    door_pause();
+  }
+  elsif ($cmd eq 'F') {
+    _st_deploy_fighters($u, $p);
+  }
+  elsif ($cmd eq 'T') {
+    _st_attack($u, $p);
+  }
+  elsif ($cmd eq 'N') {
+    _st_lay_mines($u, $p);
+  }
+  elsif ($cmd eq 'S') {
+    _st_scan_players($u, $p);
+  }
+  elsif ($cmd eq 'R') {
+    door_show_scores($DOOR_NAME, "Star Trader Rankings", "Experience");
+    door_pause();
+  }
+  elsif ($cmd eq '?') {
+    _st_help();
+    door_pause();
+  }
+  elsif ($cmd eq 'Q') {
+    if (door_noyes("Leave the game?")) {
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
+# ============================================================================
+# SECTOR DISPLAY
+# ============================================================================
+
+sub _st_display_sector {
+  my ($u, $p) = @_;
+  my $sector = $u->{sectors}[$p->{sector}];
+
+  door_clear();
+  writeline($config{'themecolor'} . " Sector " . ($p->{sector} + 1) . $RST .
+    $config{'systemcolor'} . "  Turns: " . $config{'datacolor'} . $p->{turns} .
+    $config{'systemcolor'} . "  Credits: " . $config{'datacolor'} . door_money($p->{credits}) .
+    $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 55) . $RST, 1);
+
+  # Warps
+  my $warp_str = join(", ", map { $_ + 1 } @{$sector->{warps}});
+  writeline($config{'systemcolor'} . " Warps to sectors: " . $config{'datacolor'} . $warp_str . $RST, 1);
+
+  # Port
+  if ($sector->{port}) {
+    my $pt = $sector->{port};
+    writeline($config{'usercolor'} . " Port: " . $pt->{name} .
+      $config{'systemcolor'} . " [" . $pt->{type} . "]" . $RST, 1);
+  }
+
+  # Planet
+  if ($sector->{planet}) {
+    my $pl = $sector->{planet};
+    my $owner = $pl->{owner} || "Unclaimed";
+    writeline($config{'promptcolor'} . " Planet: " . $pl->{name} .
+      $config{'systemcolor'} . " ($owner)" . $RST, 1);
+  }
+
+  # Fighters
+  if ($sector->{fighters} > 0) {
+    my $fc = $sector->{fighter_owner} eq $p->{name} ? $config{'usercolor'} : $config{'errorcolor'};
+    writeline($fc . " Fighters: " . $sector->{fighters} .
+      " (" . $sector->{fighter_owner} . ")" . $RST, 1);
+  }
+
+  # Mines
+  if (($sector->{mines} // 0) > 0) {
+    my $mc = ($sector->{mine_owner} // '') eq $p->{name} ? $config{'usercolor'} : $config{'errorcolor'};
+    writeline($mc . " Mines: " . $sector->{mines} .
+      " (" . ($sector->{mine_owner} // 'unknown') . ")" . $RST, 1);
+  }
+
+  # Nebula
+  if ($sector->{nebula}) {
+    writeline($config{'errorcolor'} . " ** Nebula - navigation hazard **" . $RST, 1);
+  }
+
+  writeline("", 1);
+}
+
+# ============================================================================
+# WARP
+# ============================================================================
+
+sub _st_warp {
+  my ($u, $p, $dest) = @_;
+  return if $dest < 0 || $dest >= $NUM_SECTORS;
+
+  my $sector = $u->{sectors}[$p->{sector}];
+
+  # Check if destination is a valid warp
+  unless (grep { $_ == $dest } @{$sector->{warps}}) {
+    writeline($config{'errorcolor'} . " No warp to sector " . ($dest + 1) . " from here." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my $cost = $SHIP_CLASSES[$p->{ship_class}]{turns_per_warp};
+  if ($p->{turns} < $cost) {
+    writeline($config{'errorcolor'} . " Not enough turns ($cost needed)." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  # Check for enemy fighters at destination
+  my $dest_sector = $u->{sectors}[$dest];
+  if ($dest_sector->{fighters} > 0 && $dest_sector->{fighter_owner} ne $p->{name}) {
+    writeline($config{'errorcolor'} . " Warning: Enemy fighters detected in sector " . ($dest + 1) . "!" . $RST, 1);
+    return unless door_noyes("Enter anyway?");
+    # Fighter combat
+    _st_fighter_combat($u, $p, $dest_sector);
+    return if $p->{fighters} <= 0 && $p->{shields} <= 0;
+  }
+
+  $p->{turns} -= $cost;
+  $p->{sector} = $dest;
+  $p->{experience} += 1;
+
+  writeline($config{'systemcolor'} . " Warping to sector " . ($dest + 1) . "..." . $RST, 1);
+
+  # Check for nebula (extra turn cost)
+  if ($dest_sector->{nebula}) {
+    writeline($config{'errorcolor'} . " Nebula interference! Navigation impaired." . $RST, 1);
+    my $extra = 1 + int(rand(2));
+    $p->{turns} -= $extra;
+    $p->{turns} = 0 if $p->{turns} < 0;
+    writeline($config{'systemcolor'} . " Lost $extra extra turn(s) navigating the nebula." . $RST, 1);
+  }
+
+  # Check for mines
+  if (($dest_sector->{mines} // 0) > 0 && ($dest_sector->{mine_owner} // '') ne $p->{name}) {
+    my $mines_hit = 1 + int(rand(3));
+    $mines_hit = $dest_sector->{mines} if $mines_hit > $dest_sector->{mines};
+    my $mine_dmg = $mines_hit * (50 + int(rand(50)));
+    writeline($config{'errorcolor'} . " MINES! You hit $mines_hit mine(s)!" . $RST, 1);
+    $p->{shields} -= $mine_dmg;
+    $dest_sector->{mines} -= $mines_hit;
+    if ($p->{shields} <= 0) {
+      writeline($config{'errorcolor'} . " Your shields are destroyed!" . $RST, 1);
+      $p->{shields} = 0;
+      my $hull_dmg = abs($p->{shields}) + int(rand(50));
+      $p->{fighters} -= int($hull_dmg / 10);
+      $p->{fighters} = 0 if $p->{fighters} < 0;
+    } else {
+      writeline($config{'systemcolor'} . " Shield damage: $mine_dmg (shields: $p->{shields})" . $RST, 1);
+    }
+    _st_save_universe($u);
+  }
+}
+
+# ============================================================================
+# PORT TRADING
+# ============================================================================
+
+sub _st_port {
+  my ($u, $p) = @_;
+  my $sector = $u->{sectors}[$p->{sector}];
+  return unless $sector->{port};
+
+  my $port = $sector->{port};
+  my $type = $port->{type};
+
+  my $trading = 1;
+  while ($trading) {
+    door_clear();
+    writeline($config{'themecolor'} . " Port: " . $port->{name} .
+      $config{'systemcolor'} . " [" . $type . "]" . $RST, 1);
+    writeline($config{'linecolor'} . " " . ("-" x 45) . $RST, 1);
+    writeline($config{'systemcolor'} . " Credits: " . $config{'datacolor'} . door_money($p->{credits}) .
+      $config{'systemcolor'} . "  Holds: " . $config{'datacolor'} . _st_free_holds($p) . "/" . $p->{holds} .
+      $RST, 1);
+    writeline("", 1);
+
+    # Show commodities
+    writeline($config{'systemcolor'} . sprintf("  %-4s %-12s %8s %8s %8s", "#", "Commodity", "Port", "Price", "Cargo") . $RST, 1);
+    for my $i (0 .. 2) {
+      my $action = substr($type, $i, 1);
+      my $action_str = $action eq 'B' ? "BUYING" : "SELLING";
+      my $price = _st_get_price($port, $i, $action);
+      my $acolor = $action eq 'B' ? $config{'errorcolor'} : $config{'usercolor'};
+      writeline(sprintf("  %s%d%s %-12s %s%-8s %s%8s %s%8d%s",
+        $config{'promptcolor'}, $i + 1, $config{'themecolor'},
+        $COMMODITIES[$i]{name},
+        $acolor, $action_str,
+        $config{'datacolor'}, door_money($price),
+        $config{'datacolor'}, $p->{cargo}[$i], $RST), 1);
+    }
+    writeline("", 1);
+
+    my @opts = (['T', 'Trade'], ['Q', 'Leave port']);
+    my $choice = door_menu(\@opts, "Port");
+
+    if ($choice eq 'T') {
+      my $ci = door_getnum("Trade which commodity (1-3):", 3);
+      next if $ci == 0;
+      $ci--;
+
+      my $action = substr($type, $ci, 1);
+      my $price = _st_get_price($port, $ci, $action);
+
+      if ($action eq 'S') {
+        # Port sells, player buys
+        my $max_afford = $price > 0 ? int($p->{credits} / $price) : 0;
+        my $max_holds = _st_free_holds($p);
+        my $max_buy = $max_afford < $max_holds ? $max_afford : $max_holds;
+        $max_buy = $port->{stock}[$ci] if $max_buy > $port->{stock}[$ci];
+
+        writeline($config{'systemcolor'} . " Buy $COMMODITIES[$ci]{name}: max $max_buy units at " .
+          door_money($price) . " each" . $RST, 1);
+        my $amount = door_getamount("Buy how many:", $max_buy);
+        if ($amount > 0) {
+          my $cost = $amount * $price;
+          $p->{credits} -= $cost;
+          $p->{cargo}[$ci] += $amount;
+          $port->{stock}[$ci] -= $amount;
+          $p->{experience} += int($amount / 10);
+          writeline($config{'usercolor'} . " Bought $amount $COMMODITIES[$ci]{name} for " .
+            door_money($cost) . $RST, 1);
+        }
+      } else {
+        # Port buys, player sells
+        if ($p->{cargo}[$ci] <= 0) {
+          writeline($config{'errorcolor'} . " You have no $COMMODITIES[$ci]{name} to sell." . $RST, 1);
+          next;
+        }
+        my $max_sell = $p->{cargo}[$ci];
+
+        writeline($config{'systemcolor'} . " Sell $COMMODITIES[$ci]{name}: you have $max_sell at " .
+          door_money($price) . " each" . $RST, 1);
+        my $amount = door_getamount("Sell how many:", $max_sell);
+        if ($amount > 0) {
+          my $revenue = $amount * $price;
+          $p->{credits} += $revenue;
+          $p->{cargo}[$ci] -= $amount;
+          $port->{stock}[$ci] += $amount;
+          $p->{experience} += int($amount / 10);
+          writeline($config{'usercolor'} . " Sold $amount $COMMODITIES[$ci]{name} for " .
+            door_money($revenue) . $RST, 1);
+        }
+      }
+    } else {
+      $trading = 0;
+    }
+  }
+}
+
+sub _st_get_price {
+  my ($port, $commodity_idx, $action) = @_;
+  my $base = $COMMODITIES[$commodity_idx]{base_price};
+  my $stock = $port->{stock}[$commodity_idx];
+  # Price varies with stock - scarce = expensive
+  my $modifier = 1 + (500 - $stock) / 500;
+  $modifier = 0.5 if $modifier < 0.5;
+  $modifier = 3.0 if $modifier > 3.0;
+  my $price = int($base * $modifier);
+  # Ports selling to players charge more, buying pays less
+  $price = int($price * 1.2) if $action eq 'S';
+  $price = int($price * 0.8) if $action eq 'B';
+  return $price;
+}
+
+sub _st_free_holds {
+  my ($p) = @_;
+  my $used = 0;
+  $used += $_ for @{$p->{cargo}};
+  return $p->{holds} - $used;
+}
+
+# ============================================================================
+# PLANETS
+# ============================================================================
+
+sub _st_land_planet {
+  my ($u, $p) = @_;
+  my $sector = $u->{sectors}[$p->{sector}];
+  unless ($sector->{planet}) {
+    writeline($config{'errorcolor'} . " No planet in this sector." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my $pl = $sector->{planet};
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Landing on " . $pl->{name} . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 30) . $RST, 1);
+  writeline($config{'systemcolor'} . " Owner: " . $config{'datacolor'} . ($pl->{owner} || "Unclaimed") . $RST, 1);
+  writeline($config{'systemcolor'} . " Ore: " . $config{'datacolor'} . $pl->{ore} .
+    $config{'systemcolor'} . "  Organics: " . $config{'datacolor'} . $pl->{organics} .
+    $config{'systemcolor'} . "  Equipment: " . $config{'datacolor'} . $pl->{equipment} . $RST, 1);
+  writeline($config{'systemcolor'} . " Colonists: " . $config{'datacolor'} . $pl->{colonists} .
+    $config{'systemcolor'} . "  Fighters: " . $config{'datacolor'} . $pl->{fighters} . $RST, 1);
+
+  if ($pl->{owner} eq "" || $pl->{owner} eq $p->{name}) {
+    if ($pl->{owner} eq "") {
+      if (door_yesno("Claim this planet?")) {
+        $pl->{owner} = $p->{name};
+        writeline($config{'usercolor'} . " Planet claimed!" . $RST, 1);
+        $p->{experience} += 50;
+      }
+    }
+
+    if ($pl->{owner} eq $p->{name}) {
+      # Transfer resources
+      my @opts = (['D', 'Deposit cargo'], ['W', 'Withdraw resources'], ['Q', 'Leave']);
+      my $choice = door_menu(\@opts, "Planet");
+      if ($choice eq 'D') {
+        for my $i (0 .. 2) {
+          if ($p->{cargo}[$i] > 0) {
+            my $amt = door_getamount("Deposit how much $COMMODITIES[$i]{name}:", $p->{cargo}[$i]);
+            if ($amt > 0) {
+              $p->{cargo}[$i] -= $amt;
+              if ($i == 0) { $pl->{ore} += $amt; }
+              elsif ($i == 1) { $pl->{organics} += $amt; }
+              else { $pl->{equipment} += $amt; }
+            }
+          }
+        }
+      } elsif ($choice eq 'W') {
+        my $free = _st_free_holds($p);
+        for my $i (0 .. 2) {
+          my $avail = ($i == 0) ? $pl->{ore} : ($i == 1) ? $pl->{organics} : $pl->{equipment};
+          if ($avail > 0 && $free > 0) {
+            my $max = $avail < $free ? $avail : $free;
+            my $amt = door_getamount("Take how much $COMMODITIES[$i]{name} (avail: $avail):", $max);
+            if ($amt > 0) {
+              $p->{cargo}[$i] += $amt;
+              $free -= $amt;
+              if ($i == 0) { $pl->{ore} -= $amt; }
+              elsif ($i == 1) { $pl->{organics} -= $amt; }
+              else { $pl->{equipment} -= $amt; }
+            }
+          }
+        }
+      }
+    }
+  } else {
+    writeline($config{'errorcolor'} . " This planet belongs to " . $pl->{owner} . "." . $RST, 1);
+  }
+  door_pause();
+}
+
+# ============================================================================
+# FIGHTERS
+# ============================================================================
+
+sub _st_deploy_fighters {
+  my ($u, $p) = @_;
+  my $sector = $u->{sectors}[$p->{sector}];
+
+  writeline($config{'systemcolor'} . " You have $p->{fighters} fighters." . $RST, 1);
+  if ($sector->{fighters} > 0 && $sector->{fighter_owner} eq $p->{name}) {
+    writeline($config{'systemcolor'} . " $sector->{fighters} of yours already deployed here." . $RST, 1);
+  }
+
+  my @opts = (['D', 'Deploy'], ['R', 'Retrieve'], ['Q', 'Cancel']);
+  my $choice = door_menu(\@opts, "Fighters");
+
+  if ($choice eq 'D') {
+    my $amt = door_getamount("Deploy how many:", $p->{fighters});
+    if ($amt > 0) {
+      $p->{fighters} -= $amt;
+      $sector->{fighters} += $amt;
+      $sector->{fighter_owner} = $p->{name};
+      writeline($config{'usercolor'} . " Deployed $amt fighters." . $RST, 1);
+    }
+  } elsif ($choice eq 'R') {
+    if ($sector->{fighter_owner} eq $p->{name} && $sector->{fighters} > 0) {
+      my $amt = door_getamount("Retrieve how many:", $sector->{fighters});
+      if ($amt > 0) {
+        $sector->{fighters} -= $amt;
+        $p->{fighters} += $amt;
+        $sector->{fighter_owner} = "" if $sector->{fighters} <= 0;
+        writeline($config{'usercolor'} . " Retrieved $amt fighters." . $RST, 1);
+      }
+    } else {
+      writeline($config{'errorcolor'} . " No fighters of yours here." . $RST, 1);
+    }
+  }
+  door_pause();
+}
+
+sub _st_fighter_combat {
+  my ($u, $p, $sector) = @_;
+  writeline($config{'errorcolor'} . " $sector->{fighters} fighters from $sector->{fighter_owner} attack!" . $RST, 1);
+
+  my $enemy_f = $sector->{fighters};
+  while ($enemy_f > 0 && ($p->{fighters} > 0 || $p->{shields} > 0)) {
+    # Each round both sides lose some
+    my $our_dmg = 1 + int(rand(int($p->{fighters} / 3) + 1));
+    my $their_dmg = 1 + int(rand(int($enemy_f / 3) + 1));
+
+    $enemy_f -= $our_dmg;
+    $p->{fighters} -= $their_dmg;
+    if ($p->{fighters} < 0) {
+      $p->{shields} += $p->{fighters} * 10;
+      $p->{fighters} = 0;
+    }
+
+    $enemy_f = 0 if $enemy_f < 0;
+    $p->{shields} = 0 if $p->{shields} < 0;
+  }
+
+  $sector->{fighters} = $enemy_f;
+  if ($enemy_f <= 0) {
+    $sector->{fighter_owner} = "";
+    writeline($config{'usercolor'} . " Enemy fighters destroyed!" . $RST, 1);
+    $p->{experience} += 25;
+    $p->{kills}++;
+  } else {
+    writeline($config{'errorcolor'} . " You took heavy damage. $enemy_f enemy fighters remain." . $RST, 1);
+  }
+  door_pause();
+}
+
+# ============================================================================
+# ATTACK (PvP placeholder - attacks NPC pirates)
+# ============================================================================
+
+sub _st_attack {
+  my ($u, $p) = @_;
+  # Simple NPC pirate encounter
+  if (rand(100) < 30) {
+    writeline($config{'systemcolor'} . " No targets in this sector." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  # Scale pirates to player level
+  my $pirate_base = 10 + int($p->{experience} / 5);
+  my $pirate_fighters = $pirate_base + int(rand($pirate_base));
+  writeline($config{'errorcolor'} . " Space pirate detected! $pirate_fighters fighters!" . $RST, 1);
+
+  if (!door_noyes("Engage?")) {
+    return;
+  }
+
+  while ($pirate_fighters > 0 && ($p->{fighters} > 0 || $p->{shields} > 0)) {
+    my $our_dmg = 1 + int(rand(int($p->{fighters} / 2) + 1));
+    my $their_dmg = 1 + int(rand(int($pirate_fighters / 3) + 1));
+    $pirate_fighters -= $our_dmg;
+    $p->{fighters} -= $their_dmg;
+    if ($p->{fighters} < 0) {
+      $p->{shields} += $p->{fighters} * 10;
+      $p->{fighters} = 0;
+    }
+    $pirate_fighters = 0 if $pirate_fighters < 0;
+    $p->{shields} = 0 if $p->{shields} < 0;
+  }
+
+  if ($pirate_fighters <= 0) {
+    my $bounty = 1000 + int(rand(5000 + $p->{experience} * 10));
+    $p->{credits} += $bounty;
+    $p->{experience} += 15;
+    $p->{kills}++;
+    $p->{alignment}++ if $p->{alignment} < 1000;
+    writeline($config{'usercolor'} . " Pirate destroyed! Bounty: " . door_money($bounty) . $RST, 1);
+
+    # Broadcast notable kills
+    if ($p->{kills} % 10 == 0) {
+      door_broadcast($DOOR_NAME, "$info{'handle'} has destroyed $p->{kills} pirates in Star Trader!");
+    }
+    door_submit_score($DOOR_NAME, $p->{experience}, { kills => $p->{kills} });
+  } else {
+    writeline($config{'errorcolor'} . " You've been overwhelmed!" . $RST, 1);
+    $p->{deaths}++;
+    # Respawn at Federation HQ
+    $p->{sector} = 0;
+    $p->{shields} = int($SHIP_CLASSES[$p->{ship_class}]{shields} / 2);
+    $p->{fighters} = int($SHIP_CLASSES[$p->{ship_class}]{fighters} / 4);
+    writeline($config{'systemcolor'} . " Emergency warp to Federation HQ!" . $RST, 1);
+  }
+  door_pause();
+}
+
+# ============================================================================
+# COMPUTER
+# ============================================================================
+
+sub _st_computer {
+  my ($u, $p) = @_;
+  my @opts = (
+    ['S', 'Sector display'],
+    ['P', 'Port report (nearby)'],
+    ['N', 'Nearest port finder'],
+    ['Q', 'Exit computer'],
+  );
+
+  my $choice = door_menu(\@opts, "Computer");
+
+  if ($choice eq 'S') {
+    _st_sector_map($u, $p);
+  } elsif ($choice eq 'P') {
+    _st_port_report($u, $p);
+  } elsif ($choice eq 'N') {
+    _st_nearest_port($u, $p);
+  }
+  door_pause();
+}
+
+sub _st_sector_map {
+  my ($u, $p) = @_;
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Sector Map (nearby)" . $RST, 1);
+  my $sector = $u->{sectors}[$p->{sector}];
+  writeline($config{'usercolor'} . " [" . ($p->{sector}+1) . "] <-- You are here" . $RST, 1);
+  for my $w (@{$sector->{warps}}) {
+    my $ws = $u->{sectors}[$w];
+    my $info_str = "";
+    $info_str .= " (Port)" if $ws->{port};
+    $info_str .= " (Planet)" if $ws->{planet};
+    $info_str .= " (Fighters: $ws->{fighters})" if $ws->{fighters} > 0;
+    writeline($config{'datacolor'} . "   -> [" . ($w+1) . "]$info_str" . $RST, 1);
+    for my $w2 (@{$ws->{warps}}) {
+      next if $w2 == $p->{sector};
+      writeline($config{'systemcolor'} . "       -> [" . ($w2+1) . "]" . $RST, 1);
+    }
+  }
+}
+
+sub _st_port_report {
+  my ($u, $p) = @_;
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Port Report (1 hop)" . $RST, 1);
+  writeline($config{'systemcolor'} . sprintf(" %-8s %-20s %s", "Sector", "Name", "Type") . $RST, 1);
+  my $sector = $u->{sectors}[$p->{sector}];
+
+  # Current sector
+  if ($sector->{port}) {
+    writeline($config{'usercolor'} . sprintf(" %-8d %-20s %s",
+      $p->{sector}+1, $sector->{port}{name}, $sector->{port}{type}) . $RST, 1);
+  }
+  # Adjacent sectors
+  for my $w (@{$sector->{warps}}) {
+    my $ws = $u->{sectors}[$w];
+    if ($ws->{port}) {
+      writeline($config{'datacolor'} . sprintf(" %-8d %-20s %s",
+        $w+1, $ws->{port}{name}, $ws->{port}{type}) . $RST, 1);
+    }
+  }
+}
+
+sub _st_nearest_port {
+  my ($u, $p) = @_;
+  # BFS to find nearest port
+  my @queue = ($p->{sector});
+  my %visited;
+  $visited{$p->{sector}} = 1;
+  my $found = 0;
+
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Nearest Ports:" . $RST, 1);
+  my $depth = 0;
+  my @next_queue;
+
+  while (@queue && $found < 5 && $depth < 5) {
+    @next_queue = ();
+    for my $s (@queue) {
+      my $sector = $u->{sectors}[$s];
+      if ($sector->{port} && $s != $p->{sector}) {
+        writeline($config{'datacolor'} . "  Sector " . ($s+1) . ": " .
+          $sector->{port}{name} . " [" . $sector->{port}{type} . "] (${depth} hop" .
+          ($depth != 1 ? "s" : "") . ")" . $RST, 1);
+        $found++;
+      }
+      for my $w (@{$sector->{warps}}) {
+        unless ($visited{$w}) {
+          $visited{$w} = 1;
+          push @next_queue, $w;
+        }
+      }
+    }
+    @queue = @next_queue;
+    $depth++;
+  }
+  writeline($config{'systemcolor'} . " No ports found nearby." . $RST, 1) unless $found;
+}
+
+# ============================================================================
+# SHIP INFO
+# ============================================================================
+
+sub _st_ship_info {
+  my ($p) = @_;
+  my $sc = $SHIP_CLASSES[$p->{ship_class}];
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Ship Status" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 35) . $RST, 1);
+  writeline($config{'systemcolor'} . " Ship: " . $config{'usercolor'} . $sc->{name} . $RST, 1);
+  writeline($config{'systemcolor'} . " Sector: " . $config{'datacolor'} . ($p->{sector}+1) . $RST, 1);
+  writeline($config{'systemcolor'} . " Credits: " . $config{'datacolor'} . door_money($p->{credits}) . $RST, 1);
+  writeline($config{'systemcolor'} . " Fighters: " . $config{'datacolor'} . $p->{fighters} . $RST, 1);
+  writeline($config{'systemcolor'} . " Shields: " . $config{'datacolor'} . $p->{shields} . $RST, 1);
+  writeline($config{'systemcolor'} . " Turns: " . $config{'datacolor'} . $p->{turns} . $RST, 1);
+  writeline($config{'systemcolor'} . " Experience: " . $config{'datacolor'} . $p->{experience} . $RST, 1);
+  writeline($config{'systemcolor'} . " Kills: " . $config{'datacolor'} . $p->{kills} . $RST, 1);
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Cargo:" . $RST, 1);
+  for my $i (0 .. 2) {
+    writeline("  " . $config{'datacolor'} . sprintf("%-12s %d", $COMMODITIES[$i]{name}, $p->{cargo}[$i]) . $RST, 1);
+  }
+  writeline($config{'systemcolor'} . " Free holds: " . $config{'datacolor'} . _st_free_holds($p) . $RST, 1);
+}
+
+# ============================================================================
+# HELP
+# ============================================================================
+
+sub _st_help {
+  door_clear();
+  writeline($config{'themecolor'} . " Star Trader Commands" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 40) . $RST, 1);
+  my @help = (
+    ['M/W', 'Move/Warp to sector'],
+    ['P',   'Enter port (trade)'],
+    ['L',   'Land on planet'],
+    ['D',   'Display sector'],
+    ['C',   'Computer (map/ports)'],
+    ['I',   'Ship information'],
+    ['F',   'Deploy/retrieve fighters'],
+    ['T',   'Attack (fighters in sector)'],
+    ['N',   'Lay mines in sector'],
+    ['S',   'Scan for other players'],
+    ['R',   'Rankings'],
+    ['Q',   'Quit game'],
+    ['#',   'Quick warp (type sector number)'],
+  );
+  for my $h (@help) {
+    writeline("  " . $config{'promptcolor'} . sprintf("%-4s", $h->[0]) .
+      $config{'systemcolor'} . " " . $h->[1] . $RST, 1);
+  }
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Port Types: B=Buying from you, S=Selling to you" . $RST, 1);
+  writeline($config{'systemcolor'} . " Commodities: Ore, Organics, Equipment" . $RST, 1);
+  writeline($config{'systemcolor'} . " Galaxy: " . $config{'datacolor'} . "$NUM_SECTORS sectors, $NUM_PORTS ports, $NUM_PLANETS planets" . $RST, 1);
+}
+
+# ============================================================================
+# MULTIPLAYER - Mine laying
+# ============================================================================
+
+sub _st_lay_mines {
+  my ($u, $p) = @_;
+  my $sector = $u->{sectors}[$p->{sector}];
+
+  if ($p->{sector} == 0 || $p->{sector} == 1) {
+    writeline($config{'errorcolor'} . " You cannot lay mines in Federation space!" . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my $mine_cost = 100;  # Credits per mine
+  my $max_mines = int($p->{fighters} / 2);
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Lay mines (cost: $mine_cost credits each)" . $RST, 1);
+  writeline($config{'systemcolor'} . " Current mines in sector: " . $config{'datacolor'} .
+    ($sector->{mines} // 0) . $RST, 1);
+  writeline($config{'systemcolor'} . " Your fighters available: " . $config{'datacolor'} . $p->{fighters} . $RST, 1);
+
+  my $count = door_getnum("How many mines?", $max_mines);
+  return if $count <= 0;
+
+  my $cost = $count * $mine_cost;
+  if ($p->{credits} < $cost) {
+    writeline($config{'errorcolor'} . " Not enough credits!" . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  $p->{credits} -= $cost;
+  $p->{fighters} -= $count;
+  $sector->{mines} = ($sector->{mines} // 0) + $count;
+  $sector->{mine_owner} = $info{'handle'};
+  $p->{mines_laid} += $count;
+  _st_save_universe($u);
+  _st_save_player($p);
+
+  writeline($config{'usercolor'} . " Deployed $count mines in sector " . ($p->{sector} + 1) . $RST, 1);
+  door_pause();
+}
+
+# ============================================================================
+# MULTIPLAYER - Player scanning and PvP
+# ============================================================================
+
+sub _st_scan_players {
+  my ($u, $p) = @_;
+
+  door_header("Long Range Scanner");
+  my @all_players = door_get_all_players($DOOR_NAME);
+
+  if (@all_players <= 1) {
+    writeline($config{'systemcolor'} . " No other traders detected in the galaxy." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline(sprintf("  %s%-20s %-6s %-8s %-18s %-6s%s",
+    $config{'systemcolor'}, "Trader", "Kills", "Credits", "Ship", "Align", $RST), 1);
+  writeline($config{'linecolor'} . " " . ("-" x 62) . $RST, 1);
+
+  for my $name (@all_players) {
+    next if lc($name) eq lc($info{'handle'});
+    my $pd = door_load_player($DOOR_NAME, $name);
+    next unless $pd;
+    my $ship = $SHIP_CLASSES[$pd->{ship_class} // 0]{name};
+    my $align = $pd->{alignment} // 0;
+    my $align_str = $align >= 0 ? "+$align" : "$align";
+    writeline(sprintf("  %s%-20s %s%-6d %s%-8s %s%-18s %s%-6s%s",
+      $config{'usercolor'}, substr($name, 0, 20),
+      $config{'datacolor'}, $pd->{kills} // 0,
+      $config{'datacolor'}, door_money($pd->{credits} // 0),
+      $config{'systemcolor'}, substr($ship, 0, 18),
+      ($align >= 0 ? $config{'usercolor'} : $config{'errorcolor'}), $align_str,
+      $RST), 1);
+  }
+  writeline("", 1);
+
+  # Show messages
+  door_show_messages($DOOR_NAME);
+  door_pause();
+}
+
+1;

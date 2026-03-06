@@ -1,0 +1,1044 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: Atlantis
+# Inspired by Atlantis (Russell Wallace, 1993; SBBS port by Stephen Hurd)
+# A fantasy underwater exploration and adventure game
+#
+# Explore sunken ruins, battle sea creatures, collect artifacts,
+# build your underwater kingdom, and discover the lost city.
+#
+
+# ============================================================================
+# GAME CONSTANTS
+# ============================================================================
+
+my $DOOR_NAME     = "atlantis";
+my $MAP_SIZE      = 24;
+my $TURNS_PER_DAY = 80;
+my $START_GOLD    = 500;
+my $START_OXYGEN  = 120;
+my $MAX_DEPTH     = 7;  # Depth levels
+
+# Terrain types
+my %TERRAIN = (
+  '~' => { name => "Open Water",    move => 1, color => 'systemcolor' },
+  '#' => { name => "Coral Reef",    move => 2, color => 'errorcolor' },
+  'R' => { name => "Sunken Ruins",  move => 1, color => 'datacolor' },
+  'C' => { name => "Underwater Cave",move=> 1, color => 'linecolor' },
+  'T' => { name => "Treasure Site", move => 1, color => 'usercolor' },
+  'K' => { name => "Kelp Forest",   move => 2, color => 'themecolor' },
+  'V' => { name => "Thermal Vent",  move => 1, color => 'errorcolor' },
+  'A' => { name => "Atlantis Gate", move => 1, color => 'promptcolor' },
+);
+
+# Equipment upgrades
+my @DIVING_GEAR = (
+  { name => "Basic Suit",      oxygen =>  100, depth => 1, price =>      0 },
+  { name => "Reinforced Suit", oxygen =>  150, depth => 2, price =>    500 },
+  { name => "Deep Dive Suit",  oxygen =>  200, depth => 3, price =>   2000 },
+  { name => "Pressure Suit",   oxygen =>  300, depth => 4, price =>   8000 },
+  { name => "Atlantean Suit",  oxygen =>  500, depth => 5, price =>  30000 },
+  { name => "Abyssal Suit",   oxygen =>  700, depth => 6, price =>  80000 },
+  { name => "Poseidon's Armor",oxygen=> 1000, depth => 7, price => 200000 },
+);
+
+my @WEAPONS = (
+  { name => "Diving Knife",    atk =>   3, price =>      0 },
+  { name => "Harpoon",         atk =>   8, price =>    300 },
+  { name => "Trident",         atk =>  15, price =>   1200 },
+  { name => "Coral Blade",     atk =>  25, price =>   5000 },
+  { name => "Neptune's Fork",  atk =>  40, price =>  15000 },
+  { name => "Leviathan Fang",  atk =>  60, price =>  50000 },
+  { name => "Kraken's Claw",  atk =>  85, price => 120000 },
+  { name => "Poseidon's Trident",atk=>120, price => 300000 },
+);
+
+my @TOOLS = (
+  { name => "Bare Hands",     salvage =>  1, price =>      0 },
+  { name => "Pry Bar",        salvage =>  3, price =>    200 },
+  { name => "Salvage Kit",    salvage =>  6, price =>   1000 },
+  { name => "Power Drill",    salvage => 10, price =>   4000 },
+  { name => "Sonic Cutter",   salvage => 18, price =>  15000 },
+  { name => "Plasma Torch",  salvage => 30, price =>  50000 },
+);
+
+# Sea creatures by depth
+my @CREATURES = (
+  { name => "Jellyfish",       hp =>   8, atk =>  2, exp =>   5, gold =>   10, depth => 1 },
+  { name => "Moray Eel",       hp =>  15, atk =>  5, exp =>  12, gold =>   20, depth => 1 },
+  { name => "Barracuda",       hp =>  20, atk =>  8, exp =>  20, gold =>   30, depth => 1 },
+  { name => "Reef Shark",      hp =>  30, atk => 12, exp =>  35, gold =>   50, depth => 2 },
+  { name => "Giant Octopus",   hp =>  45, atk => 16, exp =>  55, gold =>   80, depth => 2 },
+  { name => "Sea Serpent",     hp =>  65, atk => 22, exp =>  85, gold =>  120, depth => 3 },
+  { name => "Hammerhead Shark",hp =>  85, atk => 28, exp => 120, gold =>  160, depth => 3 },
+  { name => "Giant Squid",     hp => 120, atk => 35, exp => 180, gold =>  250, depth => 4 },
+  { name => "Deep Angler",     hp => 160, atk => 45, exp => 280, gold =>  400, depth => 4 },
+  { name => "Kraken",          hp => 250, atk => 60, exp => 500, gold =>  700, depth => 5 },
+  { name => "Leviathan",       hp => 400, atk => 80, exp => 900, gold => 1200, depth => 5 },
+  { name => "Abyssal Worm",    hp => 350, atk => 70, exp => 700, gold =>  900, depth => 6 },
+  { name => "Drowned Titan",   hp => 500, atk => 90, exp =>1200, gold => 1600, depth => 6 },
+  { name => "Spectral Whale",  hp => 300, atk => 55, exp => 600, gold =>  800, depth => 6 },
+  { name => "Elder Kraken",    hp => 600, atk =>100, exp =>1500, gold => 2000, depth => 7 },
+  { name => "Poseidon's Wrath",hp => 700, atk =>120, exp =>2000, gold => 3000, depth => 7 },
+);
+
+# Atlantis boss
+my %GUARDIAN = (
+  name => "Guardian of Atlantis",
+  hp   => 800,
+  atk  => 100,
+  exp  => 5000,
+  gold => 10000,
+);
+
+# Artifacts (found in ruins/treasure sites)
+my @ARTIFACTS = (
+  { name => "Ancient Coin",        value =>    50, rarity => 40 },
+  { name => "Coral Jewelry",       value =>   120, rarity => 30 },
+  { name => "Pearl Necklace",      value =>   250, rarity => 20 },
+  { name => "Golden Chalice",      value =>   500, rarity => 15 },
+  { name => "Crystal Orb",         value =>  1000, rarity => 10 },
+  { name => "Trident Fragment",    value =>  2500, rarity =>  5 },
+  { name => "Atlantean Tablet",    value =>  5000, rarity =>  3 },
+  { name => "Poseidon's Crown",    value => 15000, rarity =>  1 },
+  { name => "Mermaid's Tear",      value =>  3000, rarity =>  4 },
+  { name => "Sunken Compass",      value =>   800, rarity => 12 },
+  { name => "Barnacle Ring",       value =>   150, rarity => 25 },
+  { name => "Deep Star",           value =>  7500, rarity =>  2 },
+  { name => "Atlantean Key",       value => 10000, rarity =>  1 },
+);
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+sub atlantis_main {
+  my $p = _atl_load_player();
+  _atl_daily_reset($p);
+  _atl_title_screen();
+  door_pause();
+
+  my $quit = 0;
+  while (!$quit) {
+    _atl_main_menu($p);
+    my $ch = uc(getline('text', 1, "", 1));
+
+    if    ($ch eq 'D') { _atl_dive($p); }
+    elsif ($ch eq 'M') { _atl_map($p); }
+    elsif ($ch eq 'E') { _atl_equipment_shop($p); }
+    elsif ($ch eq 'S') { _atl_sell_artifacts($p); }
+    elsif ($ch eq 'V') { _atl_view_stats($p); }
+    elsif ($ch eq 'H') { door_show_scores($DOOR_NAME, "Atlantis Explorers", "Depth", 10); door_pause(); }
+    elsif ($ch eq 'R') { _atl_depth_records(); }
+    elsif ($ch eq 'Q') { $quit = 1; }
+  }
+
+  door_save($DOOR_NAME, $p);
+  writeline("", 1);
+  writeline($config{'themecolor'} . " You surface and return to port..." . $RST, 1);
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# TITLE SCREEN
+# ============================================================================
+
+sub _atl_title_screen {
+  door_clear();
+  writeline("", 1);
+  writeline($config{'promptcolor'} . "            Atlantis" . $RST, 1);
+  writeline($config{'themecolor'} . "      An Underwater Adventure" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  Ancient maps speak of a lost civilization" . $RST, 1);
+  writeline($config{'systemcolor'} . "  buried beneath the waves. Brave divers" . $RST, 1);
+  writeline($config{'systemcolor'} . "  seek its treasures, but the deep holds" . $RST, 1);
+  writeline($config{'systemcolor'} . "  terrors few have survived..." . $RST, 1);
+  writeline("", 1);
+  writeline($config{'datacolor'} . "  How deep will you dare to go?" . $RST, 1);
+  writeline("", 1);
+}
+
+# ============================================================================
+# PLAYER DATA
+# ============================================================================
+
+sub _atl_load_player {
+  my $p = door_load($DOOR_NAME);
+  return $p if $p;
+  return _atl_new_player();
+}
+
+sub _atl_new_player {
+  my $map = _atl_generate_map();
+  return {
+    gold         => $START_GOLD,
+    oxygen       => $START_OXYGEN,
+    max_oxygen   => $START_OXYGEN,
+    hp           => 30,
+    max_hp       => 30,
+    exp          => 0,
+    depth        => 1,
+    max_depth    => 1,
+    x            => int($MAP_SIZE / 2),
+    y            => int($MAP_SIZE / 2),
+    gear         => 0,
+    weapon       => 0,
+    tool         => 0,
+    turns        => $TURNS_PER_DAY,
+    artifacts    => [],
+    explored     => {},
+    map          => $map,
+    dives        => 0,
+    creatures_killed => 0,
+    artifacts_found  => 0,
+    atlantis_found   => 0,
+    last_reset   => time(),
+    created      => time(),
+  };
+}
+
+sub _atl_daily_reset {
+  my ($p) = @_;
+  my $now = time();
+  if (($now - ($p->{last_reset} // 0)) >= 86400) {
+    $p->{turns}      = $TURNS_PER_DAY;
+    $p->{hp}         = $p->{max_hp};
+    $p->{oxygen}     = $p->{max_oxygen};
+    $p->{last_reset} = $now;
+    door_save($DOOR_NAME, $p);
+  }
+}
+
+# ============================================================================
+# MAP GENERATION
+# ============================================================================
+
+sub _atl_generate_map {
+  my @map;
+  for my $d (1 .. $MAX_DEPTH) {
+    my @level;
+    for my $y (0 .. $MAP_SIZE - 1) {
+      my @row;
+      for my $x (0 .. $MAP_SIZE - 1) {
+        my $r = rand(100);
+        my $tile;
+        if ($d == 1) {
+          # Shallow: mostly open water, some coral and kelp
+          if    ($r < 50) { $tile = '~'; }
+          elsif ($r < 70) { $tile = 'K'; }
+          elsif ($r < 85) { $tile = '#'; }
+          elsif ($r < 95) { $tile = 'R'; }
+          else            { $tile = 'T'; }
+        }
+        elsif ($d <= 3) {
+          # Mid depth: ruins, caves, treasure
+          if    ($r < 35) { $tile = '~'; }
+          elsif ($r < 50) { $tile = '#'; }
+          elsif ($r < 65) { $tile = 'R'; }
+          elsif ($r < 75) { $tile = 'C'; }
+          elsif ($r < 88) { $tile = 'T'; }
+          else            { $tile = 'V'; }
+        }
+        else {
+          # Deep: more caves and vents, Atlantis gate at depth 5
+          if    ($r < 25) { $tile = '~'; }
+          elsif ($r < 40) { $tile = 'C'; }
+          elsif ($r < 55) { $tile = 'V'; }
+          elsif ($r < 70) { $tile = 'R'; }
+          elsif ($r < 85) { $tile = 'T'; }
+          else            { $tile = '#'; }
+        }
+        push @row, $tile;
+      }
+      push @level, \@row;
+    }
+    # Place Atlantis gate at max depth
+    if ($d == $MAX_DEPTH) {
+      my $ax = int(rand($MAP_SIZE));
+      my $ay = int(rand($MAP_SIZE));
+      $level[$ay][$ax] = 'A';
+    }
+    push @map, \@level;
+  }
+  return \@map;
+}
+
+# ============================================================================
+# MAIN MENU
+# ============================================================================
+
+sub _atl_main_menu {
+  my ($p) = @_;
+  my $gear = $DIVING_GEAR[$p->{gear}]{name};
+
+  door_clear();
+  writeline($config{'themecolor'} . " Port Meridian - Diving Base" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  writeline("", 1);
+  writeline($config{'usercolor'} . " $info{'handle'}" . $config{'systemcolor'} . " - Depth Diver" . $RST, 1);
+  writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . _afmt($p->{gold}) .
+    $config{'systemcolor'} . "  HP: " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" .
+    $config{'systemcolor'} . "  Turns: " . $config{'datacolor'} . $p->{turns} . $RST, 1);
+  writeline($config{'systemcolor'} . " Gear: " . $config{'datacolor'} . $gear .
+    $config{'systemcolor'} . "  Max Depth: " . $config{'datacolor'} . "$p->{max_depth}" .
+    $config{'systemcolor'} . "  Exp: " . $config{'datacolor'} . _afmt($p->{exp}) . $RST, 1);
+  writeline("", 1);
+
+  writeline("  " . $config{'promptcolor'} . "D" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Dive" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "M" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "View Depth Map" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "E" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Equipment Shop" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "S" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Sell Artifacts" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "V" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "View Stats" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "H" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Hall of Fame" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "R" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Depth Records" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Quit" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Your choice? " . $RST);
+}
+
+# ============================================================================
+# DIVING - Core gameplay
+# ============================================================================
+
+sub _atl_dive {
+  my ($p) = @_;
+
+  if ($p->{turns} <= 0) {
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " No turns remaining. Return tomorrow!" . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  if ($p->{hp} <= 0) {
+    writeline("", 1);
+    writeline($config{'errorcolor'} . " You are too injured to dive! Rest until tomorrow." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  # Choose depth
+  my $max_d = $DIVING_GEAR[$p->{gear}]{depth};
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Choose depth (1-$max_d): " . $RST);
+  my $depth = int(getline('text', 1, "", 1) || 1);
+  $depth = 1 if $depth < 1;
+  $depth = $max_d if $depth > $max_d;
+  $p->{depth} = $depth;
+
+  # Set oxygen for this dive
+  $p->{oxygen} = $DIVING_GEAR[$p->{gear}]{oxygen};
+
+  $p->{dives}++;
+
+  # Track max depth reached
+  $p->{max_depth} = $depth if $depth > $p->{max_depth};
+
+  my $surfaced = 0;
+  while (!$surfaced && $p->{turns} > 0 && $p->{hp} > 0 && $p->{oxygen} > 0) {
+    _atl_dive_screen($p);
+    writeline("  " . $config{'promptcolor'} . "N" . $config{'themecolor'} . "orth  " .
+              $config{'promptcolor'} . "S" . $config{'themecolor'} . "outh  " .
+              $config{'promptcolor'} . "E" . $config{'themecolor'} . "ast  " .
+              $config{'promptcolor'} . "W" . $config{'themecolor'} . "est  " .
+              $config{'promptcolor'} . "X" . $config{'themecolor'} . "plore  " .
+              $config{'promptcolor'} . "U" . $config{'themecolor'} . "p (Surface)" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " > " . $RST);
+    my $ch = uc(getline('text', 1, "", 1));
+
+    if    ($ch eq 'N') { _atl_move($p, 0, -1); }
+    elsif ($ch eq 'S') { _atl_move($p, 0, 1); }
+    elsif ($ch eq 'E') { _atl_move($p, 1, 0); }
+    elsif ($ch eq 'W') { _atl_move($p, -1, 0); }
+    elsif ($ch eq 'X') { _atl_explore_tile($p); }
+    elsif ($ch eq 'U') { $surfaced = 1; }
+
+    # Consume oxygen each action
+    my $o2_cost = 3 + ($depth - 1) * 2;
+    $p->{oxygen} -= $o2_cost;
+
+    # Random encounter (30%)
+    if (!$surfaced && rand(100) < 30) {
+      _atl_encounter($p);
+    }
+
+    if ($p->{oxygen} <= 0) {
+      writeline("", 1);
+      writeline($config{'errorcolor'} . " WARNING: Oxygen depleted! Emergency surface!" . $RST, 1);
+      my $dmg = int($p->{max_hp} * 0.2);
+      $p->{hp} -= $dmg;
+      writeline($config{'errorcolor'} . " You take $dmg damage from the bends!" . $RST, 1);
+      $surfaced = 1;
+    }
+  }
+
+  if ($p->{hp} <= 0) {
+    $p->{hp} = 0;
+    writeline("", 1);
+    writeline($config{'errorcolor'} . " You have drowned in the depths!" . $RST, 1);
+    writeline($config{'systemcolor'} . " A rescue team recovers your body." . $RST, 1);
+    # Lose some gold and artifacts
+    my $lost = int($p->{gold} * 0.15);
+    $p->{gold} -= $lost;
+    $p->{gold} = 0 if $p->{gold} < 0;
+    writeline($config{'errorcolor'} . " You lost " . _afmt($lost) . " gold." . $RST, 1);
+    $p->{hp} = int($p->{max_hp} * 0.3);
+  }
+
+  if ($surfaced) {
+    writeline("", 1);
+    writeline($config{'usercolor'} . " You surface safely." . $RST, 1);
+  }
+
+  door_save($DOOR_NAME, $p);
+  door_pause();
+}
+
+sub _atl_dive_screen {
+  my ($p) = @_;
+  my $d = $p->{depth} - 1;
+  my $tile = $p->{map}[$d][$p->{y}][$p->{x}];
+  my $tinfo = $TERRAIN{$tile};
+
+  door_clear();
+  writeline($config{'themecolor'} . " Depth Level $p->{depth}" . $RST, 1);
+  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  writeline($config{'systemcolor'} . " O2: " . $config{'datacolor'} . "$p->{oxygen}" .
+    $config{'systemcolor'} . "  HP: " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" .
+    $config{'systemcolor'} . "  Turns: " . $config{'datacolor'} . "$p->{turns}" .
+    $config{'systemcolor'} . "  Pos: " . $config{'datacolor'} . "$p->{x},$p->{y}" . $RST, 1);
+  writeline("", 1);
+
+  # Mini-map (5x5 viewport)
+  my $view = 2;
+  for my $vy (-$view .. $view) {
+    my $line = "  ";
+    for my $vx (-$view .. $view) {
+      my $mx = $p->{x} + $vx;
+      my $my = $p->{y} + $vy;
+      if ($vx == 0 && $vy == 0) {
+        $line .= $config{'usercolor'} . "@" . $RST;
+      }
+      elsif ($mx >= 0 && $mx < $MAP_SIZE && $my >= 0 && $my < $MAP_SIZE) {
+        my $t = $p->{map}[$d][$my][$mx];
+        my $key = "$d:$mx:$my";
+        if ($p->{explored}{$key}) {
+          $line .= $config{$TERRAIN{$t}{color}} . $t . $RST;
+        } else {
+          $line .= $config{'linecolor'} . "." . $RST;
+        }
+      }
+      else {
+        $line .= " ";
+      }
+    }
+    writeline($line, 1);
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Location: " . $config{$tinfo->{color}} . $tinfo->{name} . $RST, 1);
+  writeline("", 1);
+
+  # Mark current tile explored
+  my $key = "$d:$p->{x}:$p->{y}";
+  $p->{explored}{$key} = 1;
+}
+
+sub _atl_move {
+  my ($p, $dx, $dy) = @_;
+  my $nx = $p->{x} + $dx;
+  my $ny = $p->{y} + $dy;
+
+  if ($nx < 0 || $nx >= $MAP_SIZE || $ny < 0 || $ny >= $MAP_SIZE) {
+    writeline($config{'systemcolor'} . " You can't go that way." . $RST, 1);
+    return;
+  }
+
+  my $d = $p->{depth} - 1;
+  my $tile = $p->{map}[$d][$ny][$nx];
+  my $cost = $TERRAIN{$tile}{move};
+
+  $p->{x} = $nx;
+  $p->{y} = $ny;
+  $p->{turns} -= $cost;
+}
+
+# ============================================================================
+# TILE EXPLORATION
+# ============================================================================
+
+sub _atl_explore_tile {
+  my ($p) = @_;
+  my $d = $p->{depth} - 1;
+  my $tile = $p->{map}[$d][$p->{y}][$p->{x}];
+
+  $p->{turns}--;
+
+  if ($tile eq 'R' || $tile eq 'T') {
+    _atl_salvage($p, $tile);
+  }
+  elsif ($tile eq 'C') {
+    _atl_cave($p);
+  }
+  elsif ($tile eq 'V') {
+    _atl_vent($p);
+  }
+  elsif ($tile eq 'A') {
+    _atl_atlantis_gate($p);
+  }
+  else {
+    writeline($config{'systemcolor'} . " Nothing of interest here." . $RST, 1);
+    door_pause();
+  }
+}
+
+sub _atl_salvage {
+  my ($p, $tile) = @_;
+  my $tool_bonus = $TOOLS[$p->{tool}]{salvage};
+  my $find_chance = 40 + ($tool_bonus * 5);
+  $find_chance = 95 if $find_chance > 95;
+
+  writeline("", 1);
+  if ($tile eq 'R') {
+    writeline($config{'datacolor'} . " You search the sunken ruins..." . $RST, 1);
+  } else {
+    writeline($config{'usercolor'} . " You examine the treasure site..." . $RST, 1);
+  }
+
+  if (rand(100) < $find_chance) {
+    # Found something - pick artifact based on rarity
+    my $roll = rand(100);
+    my $cumulative = 0;
+    my $found;
+    for my $art (@ARTIFACTS) {
+      $cumulative += $art->{rarity};
+      if ($roll < $cumulative) {
+        $found = $art;
+        last;
+      }
+    }
+    $found //= $ARTIFACTS[0];
+
+    # Depth bonus on value
+    my $value = int($found->{value} * (1 + ($p->{depth} - 1) * 0.3));
+
+    writeline($config{'usercolor'} . " You found: $found->{name}!" . $RST, 1);
+    writeline($config{'systemcolor'} . " Estimated value: " . $config{'datacolor'} . _afmt($value) . " gold" . $RST, 1);
+
+    push @{$p->{artifacts}}, { name => $found->{name}, value => $value };
+    $p->{artifacts_found}++;
+    $p->{exp} += int($value / 10);
+  }
+  else {
+    my $gold = int(rand(20 * $p->{depth})) + 5;
+    writeline($config{'systemcolor'} . " You find some loose coins: " . $config{'datacolor'} . "$gold gold" . $RST, 1);
+    $p->{gold} += $gold;
+  }
+  door_pause();
+}
+
+sub _atl_cave {
+  my ($p) = @_;
+  writeline("", 1);
+  writeline($config{'linecolor'} . " You enter the dark underwater cave..." . $RST, 1);
+
+  my $roll = rand(100);
+  if ($roll < 30) {
+    # Treasure cache
+    my $gold = int(rand(100 * $p->{depth})) + 50;
+    writeline($config{'usercolor'} . " A hidden treasure cache!" . $RST, 1);
+    writeline($config{'datacolor'} . " You find " . _afmt($gold) . " gold!" . $RST, 1);
+    $p->{gold} += $gold;
+  }
+  elsif ($roll < 50) {
+    # Oxygen pocket
+    my $o2 = int(rand(30)) + 20;
+    writeline($config{'themecolor'} . " An air pocket! You refill some oxygen." . $RST, 1);
+    $p->{oxygen} += $o2;
+    $p->{oxygen} = $p->{max_oxygen} if $p->{oxygen} > $p->{max_oxygen};
+    writeline($config{'datacolor'} . " +$o2 oxygen" . $RST, 1);
+  }
+  elsif ($roll < 70) {
+    # Ambush!
+    writeline($config{'errorcolor'} . " Something lurks in the darkness!" . $RST, 1);
+    _atl_encounter($p);
+    return;
+  }
+  else {
+    writeline($config{'systemcolor'} . " The cave is empty." . $RST, 1);
+  }
+  door_pause();
+}
+
+sub _atl_vent {
+  my ($p) = @_;
+  writeline("", 1);
+  writeline($config{'errorcolor'} . " Hot water bubbles from a thermal vent!" . $RST, 1);
+
+  if (rand(100) < 40) {
+    my $dmg = int(rand($p->{depth} * 5)) + 3;
+    writeline($config{'errorcolor'} . " The heat scorches you! -$dmg HP" . $RST, 1);
+    $p->{hp} -= $dmg;
+  } else {
+    # Mineral deposits
+    my $gold = int(rand(50 * $p->{depth})) + 30;
+    writeline($config{'datacolor'} . " You collect mineral deposits worth " . _afmt($gold) . " gold!" . $RST, 1);
+    $p->{gold} += $gold;
+    $p->{exp} += int($gold / 5);
+  }
+  door_pause();
+}
+
+sub _atl_atlantis_gate {
+  my ($p) = @_;
+  writeline("", 1);
+  writeline($config{'promptcolor'} . " An ancient gate rises before you!" . $RST, 1);
+  writeline($config{'promptcolor'} . " Runes glow with an otherworldly light." . $RST, 1);
+  writeline($config{'themecolor'} . " This is the entrance to Atlantis!" . $RST, 1);
+  writeline("", 1);
+
+  if ($p->{atlantis_found}) {
+    writeline($config{'systemcolor'} . " You have already conquered Atlantis." . $RST, 1);
+    writeline($config{'systemcolor'} . " The gate stands open in tribute." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline($config{'systemcolor'} . " Enter the gate? (Y/N) " . $RST);
+  my $ch = uc(waitkey("")); writeline("", 1);
+  return unless $ch eq 'Y';
+
+  writeline("", 1);
+  writeline($config{'errorcolor'} . " The $GUARDIAN{name} blocks your path!" . $RST, 1);
+  writeline("", 1);
+
+  my $ghp = $GUARDIAN{hp};
+  my $gatk = $GUARDIAN{atk};
+
+  while ($ghp > 0 && $p->{hp} > 0) {
+    my $ghp_pct = int(($ghp / $GUARDIAN{hp}) * 100);
+    writeline($config{'systemcolor'} . " Your HP: " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" .
+      $config{'systemcolor'} . "   Guardian: " . $config{'errorcolor'} . "$ghp_pct%" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} . "ttack  " .
+              $config{'promptcolor'} . "R" . $config{'themecolor'} . "un  ? " . $RST);
+    my $move = uc(getline('text', 1, "", 1));
+
+    if ($move eq 'A') {
+      my $patk = $WEAPONS[$p->{weapon}]{atk} + int(rand(10));
+      my $pdmg = $patk + int(rand($patk));
+      $pdmg = 1 if $pdmg < 1;
+      $ghp -= $pdmg;
+      writeline($config{'usercolor'} . " You strike for $pdmg damage!" . $RST, 1);
+    }
+    elsif ($move eq 'R') {
+      if (rand(100) < 40) {
+        writeline($config{'systemcolor'} . " You flee the gate!" . $RST, 1);
+        door_pause();
+        return;
+      }
+      writeline($config{'errorcolor'} . " The Guardian blocks your escape!" . $RST, 1);
+    }
+
+    if ($ghp > 0) {
+      my $mdmg = int(rand($gatk) * 0.5) + int($gatk * 0.3);
+      # Gear reduces damage
+      $mdmg -= int($DIVING_GEAR[$p->{gear}]{depth} * 5);
+      $mdmg = 1 if $mdmg < 1;
+
+      if (rand(100) < 20) {
+        $mdmg = int($mdmg * 1.5);
+        writeline($config{'errorcolor'} . " The Guardian summons a tidal wave! $mdmg damage!" . $RST, 1);
+      } else {
+        writeline($config{'errorcolor'} . " The Guardian strikes for $mdmg damage!" . $RST, 1);
+      }
+      $p->{hp} -= $mdmg;
+    }
+    writeline("", 1);
+  }
+
+  if ($p->{hp} <= 0) {
+    $p->{hp} = 0;
+    writeline($config{'errorcolor'} . " The Guardian has defeated you!" . $RST, 1);
+    writeline($config{'systemcolor'} . " You are swept back to the surface." . $RST, 1);
+    $p->{hp} = int($p->{max_hp} * 0.2);
+  } else {
+    writeline("", 1);
+    writeline($config{'usercolor'} . " *** YOU HAVE DISCOVERED ATLANTIS! ***" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'themecolor'} . " The ancient city opens before you in all" . $RST, 1);
+    writeline($config{'themecolor'} . " its glory. Crystal spires and golden streets" . $RST, 1);
+    writeline($config{'themecolor'} . " shimmer in the deep water light." . $RST, 1);
+    writeline("", 1);
+
+    $p->{atlantis_found} = 1;
+    $p->{exp}  += $GUARDIAN{exp};
+    $p->{gold} += $GUARDIAN{gold};
+    writeline($config{'systemcolor'} . " Experience: " . $config{'datacolor'} . "+" . _afmt($GUARDIAN{exp}) . $RST, 1);
+    writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . "+" . _afmt($GUARDIAN{gold}) . $RST, 1);
+
+    door_submit_score($DOOR_NAME, $p->{max_depth}, { artifacts => $p->{artifacts_found} });
+    door_broadcast($DOOR_NAME, "$info{'handle'} has discovered the lost city of Atlantis!");
+  }
+
+  door_save($DOOR_NAME, $p);
+  door_pause();
+}
+
+# ============================================================================
+# COMBAT
+# ============================================================================
+
+sub _atl_encounter {
+  my ($p) = @_;
+  my @eligible = grep { $_->{depth} <= $p->{depth} } @CREATURES;
+  return unless @eligible;
+
+  # Prefer creatures at current depth
+  my @preferred = grep { $_->{depth} == $p->{depth} } @eligible;
+  @preferred = @eligible unless @preferred;
+  my $c = $preferred[int(rand(@preferred))];
+
+  my $chp = $c->{hp} + int(rand($c->{hp} * 0.3));
+  my $catk = $c->{atk};
+
+  writeline("", 1);
+  writeline($config{'errorcolor'} . " A $c->{name} attacks!" . $RST, 1);
+  writeline("", 1);
+
+  while ($chp > 0 && $p->{hp} > 0) {
+    writeline($config{'systemcolor'} . " HP: " . $config{'datacolor'} . "$p->{hp}" .
+      $config{'systemcolor'} . "  $c->{name}: " . $config{'errorcolor'} . "$chp" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} . "ttack  " .
+              $config{'promptcolor'} . "R" . $config{'themecolor'} . "un  ? " . $RST);
+    my $ch = uc(getline('text', 1, "", 1));
+
+    if ($ch eq 'A') {
+      my $patk = $WEAPONS[$p->{weapon}]{atk} + int(rand(8));
+      my $pdmg = $patk + int(rand($patk * 0.5));
+      $pdmg = 1 if $pdmg < 1;
+      $chp -= $pdmg;
+      writeline($config{'usercolor'} . " You hit for $pdmg damage!" . $RST, 1);
+    }
+    elsif ($ch eq 'R') {
+      if (rand(100) < 55) {
+        writeline($config{'systemcolor'} . " You swim away!" . $RST, 1);
+        door_pause();
+        return;
+      }
+      writeline($config{'errorcolor'} . " Can't escape!" . $RST, 1);
+    }
+
+    # Creature attacks
+    if ($chp > 0) {
+      my $mdmg = int(rand($catk) * 0.6) + int($catk * 0.3);
+      $mdmg -= int($DIVING_GEAR[$p->{gear}]{depth} * 2);
+      $mdmg = 1 if $mdmg < 1;
+      $p->{hp} -= $mdmg;
+      writeline($config{'errorcolor'} . " The $c->{name} hits you for $mdmg!" . $RST, 1);
+    }
+    writeline("", 1);
+  }
+
+  if ($chp <= 0) {
+    my $exp = $c->{exp} + int(rand($c->{exp} * 0.3));
+    my $gold = $c->{gold} + int(rand($c->{gold} * 0.5));
+    $p->{exp} += $exp;
+    $p->{gold} += $gold;
+    $p->{creatures_killed}++;
+    writeline($config{'usercolor'} . " You defeated the $c->{name}!" . $RST, 1);
+    writeline($config{'systemcolor'} . " Exp: +" . $exp . "  Gold: +" . $gold . $RST, 1);
+
+    # Level up HP based on experience thresholds
+    _atl_check_levelup($p);
+  }
+  elsif ($p->{hp} <= 0) {
+    writeline($config{'errorcolor'} . " The $c->{name} has overpowered you!" . $RST, 1);
+  }
+  door_pause();
+}
+
+sub _atl_check_levelup {
+  my ($p) = @_;
+  # Every 500 exp, gain 10 max HP
+  my $expected_hp = 30 + int($p->{exp} / 500) * 10;
+  if ($expected_hp > $p->{max_hp}) {
+    my $gain = $expected_hp - $p->{max_hp};
+    $p->{max_hp} = $expected_hp;
+    $p->{hp} += $gain;
+    writeline($config{'usercolor'} . " Your endurance improves! +$gain max HP" . $RST, 1);
+  }
+}
+
+# ============================================================================
+# EQUIPMENT SHOP
+# ============================================================================
+
+sub _atl_equipment_shop {
+  my ($p) = @_;
+
+  my $done = 0;
+  while (!$done) {
+    door_header("Port Meridian - Equipment Shop");
+    writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . _afmt($p->{gold}) . $RST, 1);
+    writeline("", 1);
+
+    writeline("  " . $config{'promptcolor'} . "G" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Diving Gear" .
+      $config{'systemcolor'} . " (current: $DIVING_GEAR[$p->{gear}]{name})" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "W" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Weapons" .
+      $config{'systemcolor'} . " (current: $WEAPONS[$p->{weapon}]{name})" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "T" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Tools" .
+      $config{'systemcolor'} . " (current: $TOOLS[$p->{tool}]{name})" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Leave" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " Choice? " . $RST);
+    my $ch = uc(getline('text', 1, "", 1));
+
+    if    ($ch eq 'G') { _atl_buy_list($p, 'gear', \@DIVING_GEAR, "Diving Gear", "O2"); }
+    elsif ($ch eq 'W') { _atl_buy_list($p, 'weapon', \@WEAPONS, "Weapons", "ATK"); }
+    elsif ($ch eq 'T') { _atl_buy_list($p, 'tool', \@TOOLS, "Salvage Tools", "Salvage"); }
+    elsif ($ch eq 'Q') { $done = 1; }
+  }
+}
+
+sub _atl_buy_list {
+  my ($p, $slot, $items, $title, $stat_label) = @_;
+
+  door_header($title);
+  writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . _afmt($p->{gold}) . $RST, 1);
+  writeline("", 1);
+
+  my $idx = 0;
+  for my $item (@$items) {
+    next if $idx == 0 && $item->{price} == 0; # Skip free starting items in display
+    my $afford = ($p->{gold} >= $item->{price} || $idx == 0) ? $config{'datacolor'} : $config{'linecolor'};
+    my $own = ($idx == $p->{$slot}) ? $config{'usercolor'} . " (owned)" : "";
+    my $stat;
+    if ($slot eq 'gear')   { $stat = "O2:$item->{oxygen} Depth:$item->{depth}"; }
+    elsif ($slot eq 'weapon') { $stat = "ATK:$item->{atk}"; }
+    else                   { $stat = "Salvage:$item->{salvage}"; }
+
+    writeline(sprintf("  %s%-2d%s %s%-22s%s %-16s %s%s%s",
+      $config{'promptcolor'}, $idx, $config{'themecolor'},
+      $afford, $item->{name}, $config{'themecolor'},
+      $stat,
+      $config{'systemcolor'}, ($item->{price} > 0 ? _afmt($item->{price}) . " gold" : "Free"),
+      $own . $RST), 1);
+    $idx++;
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Buy which? (0 to leave) " . $RST);
+  my $choice = int(getline('text', 2, "", 1));
+
+  if ($choice > 0 && $choice <= $#$items) {
+    my $item = $items->[$choice];
+    if ($choice == $p->{$slot}) {
+      writeline($config{'systemcolor'} . " You already own that!" . $RST, 1);
+    }
+    elsif ($p->{gold} < $item->{price}) {
+      writeline($config{'errorcolor'} . " Not enough gold!" . $RST, 1);
+    }
+    else {
+      # Trade in old for 40%
+      if ($p->{$slot} > 0) {
+        my $sell = int($items->[$p->{$slot}]{price} * 0.4);
+        $p->{gold} += $sell;
+        writeline($config{'systemcolor'} . " Traded in " . $items->[$p->{$slot}]{name} . " for " .
+          $config{'datacolor'} . _afmt($sell) . " gold" . $RST, 1);
+      }
+      $p->{gold} -= $item->{price};
+      $p->{$slot} = $choice;
+      # Update max oxygen if gear changed
+      if ($slot eq 'gear') {
+        $p->{max_oxygen} = $item->{oxygen};
+      }
+      writeline($config{'usercolor'} . " Purchased $item->{name}!" . $RST, 1);
+      door_save($DOOR_NAME, $p);
+    }
+  }
+  door_pause();
+}
+
+# ============================================================================
+# SELL ARTIFACTS
+# ============================================================================
+
+sub _atl_sell_artifacts {
+  my ($p) = @_;
+
+  door_header("Artifact Dealer");
+
+  if (@{$p->{artifacts}} == 0) {
+    writeline($config{'systemcolor'} . " You have no artifacts to sell." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline($config{'systemcolor'} . " Your artifacts:" . $RST, 1);
+  writeline("", 1);
+  my $total = 0;
+  my $idx = 1;
+  for my $art (@{$p->{artifacts}}) {
+    writeline(sprintf("  %s%-2d%s %s%-24s %s%s gold%s",
+      $config{'promptcolor'}, $idx, $config{'themecolor'},
+      $config{'datacolor'}, $art->{name},
+      $config{'usercolor'}, _afmt($art->{value}),
+      $RST), 1);
+    $total += $art->{value};
+    $idx++;
+  }
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Total value: " . $config{'datacolor'} . _afmt($total) . " gold" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Sell all? (Y/N) " . $RST);
+  my $ch = uc(waitkey("")); writeline("", 1);
+
+  if ($ch eq 'Y') {
+    $p->{gold} += $total;
+    $p->{artifacts} = [];
+    writeline($config{'usercolor'} . " Sold! You received " . _afmt($total) . " gold." . $RST, 1);
+    door_save($DOOR_NAME, $p);
+  }
+  door_pause();
+}
+
+# ============================================================================
+# VIEW MAP
+# ============================================================================
+
+sub _atl_map {
+  my ($p) = @_;
+
+  door_header("Depth Chart");
+  my $d = $p->{depth} - 1;
+
+  writeline($config{'systemcolor'} . " Depth Level $p->{depth} (explored areas shown)" . $RST, 1);
+  writeline("", 1);
+
+  # Column header
+  my $hdr = "    ";
+  for my $x (0 .. $MAP_SIZE - 1) { $hdr .= sprintf("%X", $x); }
+  writeline($config{'linecolor'} . $hdr . $RST, 1);
+
+  for my $y (0 .. $MAP_SIZE - 1) {
+    my $line = sprintf(" %s%X%s  ", $config{'linecolor'}, $y, $RST);
+    for my $x (0 .. $MAP_SIZE - 1) {
+      my $key = "$d:$x:$y";
+      if ($x == $p->{x} && $y == $p->{y} && $d == $p->{depth} - 1) {
+        $line .= $config{'usercolor'} . "@" . $RST;
+      }
+      elsif ($p->{explored}{$key}) {
+        my $t = $p->{map}[$d][$y][$x];
+        $line .= $config{$TERRAIN{$t}{color}} . $t . $RST;
+      }
+      else {
+        $line .= $config{'linecolor'} . "." . $RST;
+      }
+    }
+    writeline($line, 1);
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Legend: " .
+    $config{'systemcolor'} . "~ Water  " .
+    $config{'errorcolor'} . "# Reef  " .
+    $config{'datacolor'} . "R Ruins  " .
+    $config{'linecolor'} . "C Cave  " .
+    $config{'usercolor'} . "T Treasure  " .
+    $config{'themecolor'} . "K Kelp  " .
+    $config{'errorcolor'} . "V Vent  " .
+    $config{'promptcolor'} . "A Gate" . $RST, 1);
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# VIEW STATS
+# ============================================================================
+
+sub _atl_view_stats {
+  my ($p) = @_;
+
+  door_header("Diver Profile");
+
+  writeline($config{'usercolor'} . " $info{'handle'}" . $config{'systemcolor'} . " - Deep Sea Diver" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Hit Points:      " . $config{'datacolor'} . "$p->{hp} / $p->{max_hp}" . $RST, 1);
+  writeline($config{'systemcolor'} . " Experience:      " . $config{'datacolor'} . _afmt($p->{exp}) . $RST, 1);
+  writeline($config{'systemcolor'} . " Gold:            " . $config{'datacolor'} . _afmt($p->{gold}) . $RST, 1);
+  writeline($config{'systemcolor'} . " Turns Today:     " . $config{'datacolor'} . $p->{turns} . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Diving Gear:     " . $config{'datacolor'} . $DIVING_GEAR[$p->{gear}]{name} . $RST, 1);
+  writeline($config{'systemcolor'} . " Weapon:          " . $config{'datacolor'} . $WEAPONS[$p->{weapon}]{name} . $RST, 1);
+  writeline($config{'systemcolor'} . " Tool:            " . $config{'datacolor'} . $TOOLS[$p->{tool}]{name} . $RST, 1);
+  writeline($config{'systemcolor'} . " Max Depth:       " . $config{'datacolor'} . $p->{max_depth} . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Total Dives:     " . $config{'datacolor'} . $p->{dives} . $RST, 1);
+  writeline($config{'systemcolor'} . " Creatures Killed:" . $config{'datacolor'} . " $p->{creatures_killed}" . $RST, 1);
+  writeline($config{'systemcolor'} . " Artifacts Found: " . $config{'datacolor'} . $p->{artifacts_found} . $RST, 1);
+  writeline($config{'systemcolor'} . " Atlantis Found:  " . ($p->{atlantis_found} ? $config{'usercolor'} . "Yes!" : $config{'errorcolor'} . "Not yet") . $RST, 1);
+  writeline($config{'systemcolor'} . " Artifacts Held:  " . $config{'datacolor'} . scalar(@{$p->{artifacts}}) . $RST, 1);
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# DEPTH RECORDS - Competitive multiplayer tracking
+# ============================================================================
+
+sub _atl_depth_records {
+  door_header("Depth Records - All Divers");
+
+  my @all = door_get_all_players($DOOR_NAME);
+  my @records;
+
+  for my $name (@all) {
+    my $pd = door_load_player($DOOR_NAME, $name);
+    next unless $pd;
+    push @records, {
+      name      => $name,
+      depth     => $pd->{max_depth} // 1,
+      artifacts => $pd->{artifacts_found} // 0,
+      kills     => $pd->{creatures_killed} // 0,
+      atlantis  => $pd->{atlantis_found} // 0,
+    };
+  }
+
+  @records = sort { $b->{depth} <=> $a->{depth} || $b->{artifacts} <=> $a->{artifacts} } @records;
+
+  writeline(sprintf("  %s%-3s %-18s %-6s %-10s %-6s %-8s%s",
+    $config{'systemcolor'}, "#", "Diver", "Depth", "Artifacts", "Kills", "Atlantis", $RST), 1);
+  writeline($config{'linecolor'} . " " . ("-" x 56) . $RST, 1);
+
+  my $rank = 1;
+  for my $r (@records) {
+    my $color = ($r->{name} eq $info{'handle'}) ? $config{'usercolor'} : $config{'datacolor'};
+    writeline(sprintf("  %s%-3d %s%-18s %s%-6d %-10d %-6d %s%s",
+      $config{'systemcolor'}, $rank,
+      $color, substr($r->{name}, 0, 18),
+      $config{'datacolor'}, $r->{depth}, $r->{artifacts}, $r->{kills},
+      ($r->{atlantis} ? $config{'usercolor'} . "Found!" : $config{'linecolor'} . "No"),
+      $RST), 1);
+    $rank++;
+    last if $rank > 15;
+  }
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+sub _afmt {
+  my ($n) = @_;
+  my $s = int($n);
+  1 while $s =~ s/^(-?\d+)(\d{3})/$1,$2/;
+  return $s;
+}
+
+1;

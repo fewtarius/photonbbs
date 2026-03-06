@@ -11,17 +11,19 @@
 ########################################################################
 # KEY|DESCRIPTION|SCRIPT_OR_SUB|SECLEVEL|HIDDEN|TYPE
 ########################################################################
-A|Enter PhotonMUD (Multi-User Dungeon)|photonmud|10|0|external|0
-B|Legend of the Red Dragon|lord.sh|10|0|external|0
-C|Lunatix|luna.sh|10|0|external|0
-D|Barren Realms Elite|bre.sh|10|0|external|0
-E|Operation Overkill II (Combat)|ooii.sh|10|0|external|0
-F|Simpsons Door|simp.sh|10|0|external|0
-G|Darkness|darkness.sh|10|0|external|0
-#H|Tradewars 2002 (Space Trading Game)|tw2002.sh|10|0|external|0
+A|PhotonMUD (Multi-User Dungeon)|photonmud|10|0|external|0
+B|Red Dragon (Fantasy RPG)|reddragon_main|10|0|internal|0
+C|Star Trader (Space Trading)|startrader_main|10|0|internal|0
+D|Casino (Card and Dice Games)|casino_main|10|0|internal|0
+E|Drug Lord (Street Empire)|druglord_main|10|0|internal|0
+F|Sea Battle (Naval Combat)|seabattle_main|10|0|internal|0
+G|Star Trek (Space Exploration)|startrek_main|10|0|internal|0
+H|Big Catch (Fishing)|bigcatch_main|10|0|internal|0
+I|Atlantis (Underwater Adventure)|atlantis_main|10|0|internal|0
+J|1000 Miles (Racing Card Game)|onek_miles_main|10|0|internal|0
+U|Door Game Editor (Game Data)|photonbbs-dooredit|500|1|external|0
 V|PhotonMUD Editor (World Builder)|photonmud-editor|500|1|external|0
 W|User Editor (Account Management)|useredit|500|1|external|0
 X|Bulletin Editor (News Management)|bulledit|500|1|external|0
 Y|DOS Emulator (Legacy Games)|dosemu.sh|900|1|external|0
 Z|System Shell (Admin Access)|shell.sh|900|1|external|0
-

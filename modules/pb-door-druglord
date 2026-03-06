@@ -1,0 +1,974 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: DrugLord
+# A native Perl port of the classic dopewars/Drug Wars BBS game
+#
+# Based on dopewars 1.5.12 (GPL v2, Ben Webb)
+# Reference: SBBS DrugLord (Art, Fatcats BBS)
+# and the original Drug Wars by John Dell / Happy Hacker Foundation
+#
+# Game: Buy and sell drugs across NYC locations over 31 days.
+# Manage cash, debt, bank, inventory, guns, and survive cop encounters.
+#
+
+# ============================================================================
+# GAME DATA TABLES
+# ============================================================================
+
+# Drug definitions: name, min_price, max_price, can_be_cheap, can_be_expensive, cheap_message
+my @DRUGS = (
+  { name => "Acid",     min => 1000,  max => 4400,  cheap => 1, expensive => 0,
+    cheap_msg => "The market is flooded with cheap home-made acid!" },
+  { name => "Cocaine",  min => 15000, max => 29000, cheap => 0, expensive => 1, cheap_msg => "" },
+  { name => "Hashish",  min => 480,   max => 1280,  cheap => 1, expensive => 0,
+    cheap_msg => "The Marrakesh Express has arrived!" },
+  { name => "Heroin",   min => 5500,  max => 13000, cheap => 0, expensive => 1, cheap_msg => "" },
+  { name => "Ludes",    min => 11,    max => 60,    cheap => 1, expensive => 0,
+    cheap_msg => "Rival dealers raided a pharmacy and are selling cheap ludes!" },
+  { name => "MDA",      min => 1500,  max => 4400,  cheap => 0, expensive => 0, cheap_msg => "" },
+  { name => "Opium",    min => 540,   max => 1250,  cheap => 0, expensive => 1, cheap_msg => "" },
+  { name => "PCP",      min => 1000,  max => 2500,  cheap => 0, expensive => 0, cheap_msg => "" },
+  { name => "Peyote",   min => 220,   max => 700,   cheap => 0, expensive => 0, cheap_msg => "" },
+  { name => "Shrooms",  min => 630,   max => 1300,  cheap => 0, expensive => 0, cheap_msg => "" },
+  { name => "Speed",    min => 90,    max => 250,   cheap => 0, expensive => 1, cheap_msg => "" },
+  { name => "Weed",     min => 315,   max => 890,   cheap => 1, expensive => 0,
+    cheap_msg => "Columbian freighter dusted the Coast Guard! Weed prices have bottomed out!" },
+);
+
+# Location definitions: name, police_presence (0-100), min_drugs_available, max_drugs_available
+# Higher police = more cops, but also tends to have fewer drugs available
+my @LOCATIONS = (
+  { name => "The Bronx",       police => 10,  min_drug => 7, max_drug => 12 },
+  { name => "The Ghetto",      police => 5,   min_drug => 8, max_drug => 12 },
+  { name => "Central Park",    police => 15,  min_drug => 6, max_drug => 12 },
+  { name => "Manhattan",       police => 90,  min_drug => 4, max_drug => 10 },
+  { name => "Coney Island",    police => 20,  min_drug => 6, max_drug => 12 },
+  { name => "Brooklyn",        police => 70,  min_drug => 4, max_drug => 11 },
+  { name => "Queens",          police => 50,  min_drug => 6, max_drug => 12 },
+  { name => "Staten Island",   police => 20,  min_drug => 6, max_drug => 12 },
+  { name => "Harlem",          police => 8,   min_drug => 8, max_drug => 12 },
+  { name => "Chinatown",       police => 25,  min_drug => 5, max_drug => 10 },
+  { name => "The Docks",       police => 15,  min_drug => 7, max_drug => 12 },
+  { name => "Wall Street",     police => 95,  min_drug => 3, max_drug =>  8 },
+);
+
+# Special location indices
+my $LOC_LOANSHARK = 0;  # Loan shark in The Bronx
+my $LOC_BANK      = 0;  # Bank also in The Bronx (same as original)
+my $LOC_GUNSHOP   = 1;  # Gun shop in The Ghetto
+my $LOC_PUB       = 1;  # Pub also in The Ghetto
+
+# Gun definitions: name, price, space, damage
+my @GUNS = (
+  { name => "Baretta",              price => 3000, space => 4, damage => 5 },
+  { name => ".38 Special",          price => 3500, space => 4, damage => 9 },
+  { name => "Ruger",                price => 2900, space => 4, damage => 4 },
+  { name => "Saturday Night Special", price => 3100, space => 4, damage => 7 },
+);
+
+# Cop definitions: name, armor, min_deputies, max_deputies
+my @COPS = (
+  { name => "Officer Hardass", armor => 4,  min_dep => 2, max_dep => 8 },
+  { name => "Officer Bob",     armor => 15, min_dep => 4, max_dep => 10 },
+  { name => "Agent Smith",     armor => 50, min_dep => 6, max_dep => 18 },
+);
+
+# Random subway sayings
+my @SAYINGS = (
+  "Wouldn't it be funny if everyone suddenly quacked at once?",
+  "The Pope was once Jewish, you know",
+  "I bet you have some really interesting dreams",
+  "So I think I'm going to Amsterdam this year",
+  "Son, you need a yellow haircut",
+  "Does your mother know you're a dope dealer?",
+  "Are you high on something?",
+  "Oh, you must be from California",
+  "I used to be a hippie, myself",
+  "There's nothing like having lots of money",
+  "You look like an aardvark!",
+  "Haven't I seen you on TV?",
+  "A day without dope is like night",
+  "We're winning the war for drugs!",
+  "I'd like to sell you an edible poodle",
+);
+
+# Expensive drug messages
+my @EXPENSIVE_MSG = (
+  "Cops made a big %s bust! Prices are outrageous!",
+  "Addicts are buying %s at ridiculous prices!",
+);
+
+# Game constants
+my $START_CASH     = 2000;
+my $START_DEBT     = 5500;
+my $MAX_TURNS      = 31;
+my $DEBT_INTEREST  = 10;  # percent per turn
+my $BANK_INTEREST  = 5;   # percent per turn
+my $COAT_SIZE      = 100; # starting inventory space
+my $CHEAP_DIVISOR  = 4;   # prices divided by this when cheap
+my $EXPENSIVE_MULT = 4;   # prices multiplied by this when expensive
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+sub druglord_main {
+  # Load door library
+  # Set iamat for who's online
+  iamat($info{'handle'}, "Playing DrugLord");
+
+  # Show title screen
+  _dl_title_screen();
+
+  # Initialize game state
+  my %game = _dl_init_game();
+
+  # Main game loop
+  while ($game{turn} <= $MAX_TURNS && $game{health} > 0) {
+    _dl_generate_prices(\%game);
+    _dl_show_status(\%game);
+    _dl_location_events(\%game);
+    last if $game{quit};
+    _dl_trade_menu(\%game);
+    last if $game{quit};
+    _dl_jet(\%game);
+    last if $game{quit};
+  }
+
+  # Game over
+  _dl_game_over(\%game);
+
+  iamat($info{'handle'}, "Finished DrugLord");
+}
+
+# ============================================================================
+# TITLE SCREEN
+# ============================================================================
+
+sub _dl_title_screen {
+  door_clear();
+  writeline("", 1);
+  writeline($config{'themecolor'} . "                  D R U G L O R D" . $RST, 1);
+  writeline($config{'linecolor'}  . "          --------------------------------" . $RST, 1);
+  writeline($config{'systemcolor'} . "     Based on the classic Drug Wars BBS game" . $RST, 1);
+  writeline($config{'systemcolor'} . "    Buy low, sell high, and don't get busted" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'datacolor'} . "  You have 31 days to make as much money" . $RST, 1);
+  writeline($config{'datacolor'} . "  as you can on the streets of New York." . $RST, 1);
+  writeline($config{'datacolor'} . "  You start with \$2,000 cash and \$5,500 debt." . $RST, 1);
+  writeline("", 1);
+  door_pause("Press any key to start...");
+}
+
+# ============================================================================
+# GAME INITIALIZATION
+# ============================================================================
+
+sub _dl_init_game {
+  my %game = (
+    turn       => 1,
+    cash       => $START_CASH,
+    debt       => $START_DEBT,
+    bank       => 0,
+    health     => 100,
+    location   => 0,       # Start in The Bronx
+    coat_size  => $COAT_SIZE,
+    guns       => [],      # Array of gun indices owned
+    drugs      => [],      # Array of {carried, price} per drug
+    prices     => [],      # Current prices at this location
+    events     => [],      # Event messages to display
+    quit       => 0,
+    max_score  => 0,
+    turf       => {},      # Locations controlled by this player
+    reputation => 0,       # Street rep
+    total_profit => 0,     # Running total
+    kills      => 0,       # Cops killed
+  );
+
+  # Initialize drug inventory (nothing carried)
+  for my $i (0 .. $#DRUGS) {
+    $game{drugs}[$i] = { carried => 0, total_value => 0 };
+  }
+
+  # Load shared economy state (prices affected by all players)
+  _dl_load_economy(\%game);
+
+  return %game;
+}
+
+# Load/save shared economy state
+sub _dl_load_economy {
+  my ($g) = @_;
+  my $econ = door_load_shared("druglord", "economy.dat");
+  $g->{economy} = $econ // { trades => {}, kingpin => "", kingpin_score => 0, turf => {} };
+}
+
+sub _dl_save_economy {
+  my ($g) = @_;
+  door_save_shared("druglord", "economy.dat", $g->{economy});
+}
+
+# ============================================================================
+# PRICE GENERATION
+# ============================================================================
+
+sub _dl_generate_prices {
+  my ($g) = @_;
+  my $loc = $LOCATIONS[$g->{location}];
+  $g->{events} = [];
+  $g->{prices} = [];
+
+  # Start with all prices zeroed
+  for my $i (0 .. $#DRUGS) {
+    $g->{prices}[$i] = 0;
+  }
+
+  # Generate special events (cheap/expensive)
+  my $num_events = 0;
+  $num_events = 1 if rand(100) < 70;
+  $num_events = 2 if $num_events == 1 && rand(100) < 40;
+  $num_events = 3 if $num_events == 2 && rand(100) < 5;
+
+  while ($num_events > 0) {
+    my $i = int(rand(scalar @DRUGS));
+    next if $g->{prices}[$i] != 0;  # Already has event
+
+    my $drug = $DRUGS[$i];
+    if ($drug->{expensive} && (!$drug->{cheap} || rand(100) < 50)) {
+      # Expensive event
+      $g->{prices}[$i] = _dl_randprice($drug->{min}, $drug->{max}) * $EXPENSIVE_MULT;
+      my $msg = sprintf($EXPENSIVE_MSG[int(rand(@EXPENSIVE_MSG))], $drug->{name});
+      push @{$g->{events}}, $config{'errorcolor'} . "  $msg" . $RST;
+      $num_events--;
+    } elsif ($drug->{cheap}) {
+      # Cheap event
+      $g->{prices}[$i] = int(_dl_randprice($drug->{min}, $drug->{max}) / $CHEAP_DIVISOR);
+      push @{$g->{events}}, $config{'usercolor'} . "  $drug->{cheap_msg}" . $RST;
+      $num_events--;
+    }
+  }
+
+  # Fill remaining drug slots with random availability
+  my $num_drugs = $loc->{min_drug} + int(rand($loc->{max_drug} - $loc->{min_drug} + 1));
+  $num_drugs = scalar @DRUGS if $num_drugs > scalar @DRUGS;
+
+  # Count how many already have prices from events
+  my $already = grep { $g->{prices}[$_] != 0 } 0 .. $#DRUGS;
+  my $need = $num_drugs - $already;
+
+  while ($need > 0) {
+    my $i = int(rand(scalar @DRUGS));
+    next if $g->{prices}[$i] != 0;
+    $g->{prices}[$i] = _dl_randprice($DRUGS[$i]{min}, $DRUGS[$i]{max});
+    $need--;
+  }
+}
+
+sub _dl_randprice {
+  my ($min, $max) = @_;
+  return $min + int(rand($max - $min + 1));
+}
+
+# ============================================================================
+# STATUS DISPLAY
+# ============================================================================
+
+sub _dl_show_status {
+  my ($g) = @_;
+  my $loc = $LOCATIONS[$g->{location}];
+
+  door_clear();
+
+  # Header
+  writeline($config{'themecolor'} . " DrugLord" .
+    $config{'systemcolor'} . "  Day " . $config{'datacolor'} . "$g->{turn}" .
+    $config{'systemcolor'} . " of " . $config{'datacolor'} . "$MAX_TURNS" .
+    $config{'systemcolor'} . "  |  " . $config{'usercolor'} . $loc->{name} . $RST, 1);
+
+  # Financial summary
+  my $net = $g->{cash} + $g->{bank} - $g->{debt};
+  writeline($config{'systemcolor'} . " Cash: " . $config{'datacolor'} . door_money($g->{cash}) .
+    $config{'systemcolor'} . "  Bank: " . $config{'datacolor'} . door_money($g->{bank}) .
+    $config{'systemcolor'} . "  Debt: " . $config{'errorcolor'} . door_money($g->{debt}) .
+    $config{'systemcolor'} . "  Net: " . ($net >= 0 ? $config{'usercolor'} : $config{'errorcolor'}) . door_money($net) . $RST, 1);
+
+  # Space and health
+  my $space = _dl_free_space($g);
+  my $gun_count = scalar @{$g->{guns}};
+  writeline($config{'systemcolor'} . " Health: " . _dl_health_color($g->{health}) . "$g->{health}%" .
+    $config{'systemcolor'} . "  Space: " . $config{'datacolor'} . "$space" .
+    $config{'systemcolor'} . "  Guns: " . $config{'datacolor'} . "$gun_count" .
+    $RST, 1);
+
+  writeline($config{'linecolor'} . " " . ("-" x 60) . $RST, 1);
+
+  # Show events
+  for my $ev (@{$g->{events}}) {
+    writeline($ev, 1);
+  }
+  writeline("", 1) if @{$g->{events}};
+
+  # Drug price list
+  writeline($config{'systemcolor'} . sprintf("  %-4s %-12s %10s %8s", "#", "Drug", "Price", "Owned") . $RST, 1);
+  for my $i (0 .. $#DRUGS) {
+    next if $g->{prices}[$i] == 0;  # Not available here
+    my $carried = $g->{drugs}[$i]{carried};
+    my $pcolor = $config{'datacolor'};
+    my $ccolor = $carried > 0 ? $config{'usercolor'} : $config{'systemcolor'};
+    writeline(sprintf("  %s%-4s%s %-12s %s%10s %s%8s%s",
+      $config{'promptcolor'}, $i + 1, $config{'themecolor'},
+      $DRUGS[$i]{name},
+      $pcolor, door_money($g->{prices}[$i]),
+      $ccolor, ($carried > 0 ? $carried : "-"),
+      $RST), 1);
+  }
+  writeline("", 1);
+}
+
+sub _dl_health_color {
+  my ($hp) = @_;
+  return $config{'errorcolor'} if $hp <= 25;
+  return $config{'promptcolor'} if $hp <= 50;
+  return $config{'usercolor'};
+}
+
+sub _dl_free_space {
+  my ($g) = @_;
+  my $used = 0;
+  for my $i (0 .. $#DRUGS) {
+    $used += $g->{drugs}[$i]{carried};
+  }
+  for my $gi (@{$g->{guns}}) {
+    $used += $GUNS[$gi]{space};
+  }
+  return $g->{coat_size} - $used;
+}
+
+# ============================================================================
+# LOCATION EVENTS (loan shark, bank, gun shop, pub, cops)
+# ============================================================================
+
+sub _dl_location_events {
+  my ($g) = @_;
+  my $loc_idx = $g->{location};
+
+  # Loan shark
+  if ($loc_idx == $LOC_LOANSHARK && $g->{debt} > 0) {
+    if (door_yesno("Visit the Loan Shark?")) {
+      _dl_loanshark($g);
+    }
+  }
+
+  # Bank
+  if ($loc_idx == $LOC_BANK) {
+    if (door_yesno("Visit the Bank?")) {
+      _dl_bank($g);
+    }
+  }
+
+  # Gun shop
+  if ($loc_idx == $LOC_GUNSHOP) {
+    if (door_yesno("Visit Dan's House of Guns?")) {
+      _dl_gunshop($g);
+    }
+  }
+
+  # Pub (hire a carrier)
+  if ($loc_idx == $LOC_PUB && rand(100) < 40) {
+    my $price = 50000 + int(rand(100000));
+    writeline($config{'systemcolor'} . "  A shady character offers to expand your coat for " .
+      $config{'datacolor'} . door_money($price) . $RST, 1);
+    if (door_yesno("Accept the offer?")) {
+      if ($g->{cash} >= $price) {
+        $g->{cash} -= $price;
+        $g->{coat_size} += 10;
+        writeline($config{'usercolor'} . "  Your trenchcoat now holds " . $g->{coat_size} . " items." . $RST, 1);
+      } else {
+        writeline($config{'errorcolor'} . "  You don't have enough cash." . $RST, 1);
+      }
+      door_pause();
+    }
+  }
+
+  # Random subway saying
+  if (rand(100) < 15) {
+    my $saying = $SAYINGS[int(rand(@SAYINGS))];
+    writeline($config{'systemcolor'} . "  The lady next to you on the subway said," . $RST, 1);
+    writeline($config{'datacolor'} . "  \"$saying\"" . $RST, 1);
+    if (rand(100) < 30) {
+      writeline($config{'systemcolor'} . "     (at least, you think that's what she said)" . $RST, 1);
+    }
+    writeline("", 1);
+  }
+
+  # Random: find drugs on the ground
+  if (rand(100) < 8) {
+    my $found_idx = int(rand(scalar @DRUGS));
+    my $found_amt = 1 + int(rand(5));
+    my $space = _dl_free_space($g);
+    if ($space > 0) {
+      $found_amt = $space if $found_amt > $space;
+      $g->{drugs}[$found_idx]{carried} += $found_amt;
+      writeline($config{'usercolor'} . "  You found $found_amt " . $DRUGS[$found_idx]{name} .
+        " on a dead dude in the subway!" . $RST, 1);
+      writeline("", 1);
+    }
+  }
+
+  # Cop encounter
+  my $cop_chance = 80 + $LOCATIONS[$loc_idx]{police};
+  if (int(rand($cop_chance)) > 75) {
+    _dl_cop_encounter($g);
+  }
+}
+
+# ============================================================================
+# LOAN SHARK
+# ============================================================================
+
+sub _dl_loanshark {
+  my ($g) = @_;
+  writeline("", 1);
+  writeline($config{'themecolor'} . "  The Loan Shark" . $RST, 1);
+  writeline($config{'systemcolor'} . "  You owe: " . $config{'errorcolor'} . door_money($g->{debt}) . $RST, 1);
+  writeline("", 1);
+
+  my $amount = door_getamount("How much do you want to repay? (\$0 to skip)", $g->{cash});
+  if ($amount > 0) {
+    if ($amount > $g->{cash}) {
+      writeline($config{'errorcolor'} . "  You don't have that much cash." . $RST, 1);
+    } elsif ($amount > $g->{debt}) {
+      writeline($config{'errorcolor'} . "  You only owe " . door_money($g->{debt}) . "." . $RST, 1);
+    } else {
+      $g->{cash} -= $amount;
+      $g->{debt} -= $amount;
+      writeline($config{'usercolor'} . "  Paid " . door_money($amount) .
+        ". Remaining debt: " . door_money($g->{debt}) . $RST, 1);
+    }
+  }
+  door_pause();
+}
+
+# ============================================================================
+# BANK
+# ============================================================================
+
+sub _dl_bank {
+  my ($g) = @_;
+  my $done = 0;
+  while (!$done) {
+    writeline("", 1);
+    writeline($config{'themecolor'} . "  The Bank" . $RST, 1);
+    writeline($config{'systemcolor'} . "  Cash: " . $config{'datacolor'} . door_money($g->{cash}) .
+      $config{'systemcolor'} . "  Savings: " . $config{'datacolor'} . door_money($g->{bank}) . $RST, 1);
+    writeline("", 1);
+
+    my $choice = door_menu([
+      ['D', 'Deposit'],
+      ['W', 'Withdraw'],
+      ['Q', 'Leave bank'],
+    ], "Banking");
+
+    if ($choice eq 'D') {
+      my $amount = door_getamount("Deposit how much?", $g->{cash});
+      if ($amount > 0 && $amount <= $g->{cash}) {
+        $g->{cash} -= $amount;
+        $g->{bank} += $amount;
+        writeline($config{'usercolor'} . "  Deposited " . door_money($amount) . "." . $RST, 1);
+      }
+    } elsif ($choice eq 'W') {
+      my $amount = door_getamount("Withdraw how much?", $g->{bank});
+      if ($amount > 0 && $amount <= $g->{bank}) {
+        $g->{bank} -= $amount;
+        $g->{cash} += $amount;
+        writeline($config{'usercolor'} . "  Withdrew " . door_money($amount) . "." . $RST, 1);
+      }
+    } else {
+      $done = 1;
+    }
+  }
+}
+
+# ============================================================================
+# GUN SHOP
+# ============================================================================
+
+sub _dl_gunshop {
+  my ($g) = @_;
+  writeline("", 1);
+  writeline($config{'themecolor'} . "  Dan's House of Guns" . $RST, 1);
+  writeline("", 1);
+
+  for my $i (0 .. $#GUNS) {
+    writeline(sprintf("  %s%d%s %-24s %s%10s%s  (takes %d space)",
+      $config{'promptcolor'}, $i + 1, $config{'themecolor'},
+      $GUNS[$i]{name},
+      $config{'datacolor'}, door_money($GUNS[$i]{price}), $RST,
+      $GUNS[$i]{space}), 1);
+  }
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  You carry " . scalar(@{$g->{guns}}) .
+    " gun(s). Max: " . int($g->{coat_size} / 10) . $RST, 1);
+
+  my $choice = door_getnum("Buy which gun? (0 to leave)", scalar @GUNS);
+  if ($choice > 0) {
+    my $gi = $choice - 1;
+    if ($g->{cash} < $GUNS[$gi]{price}) {
+      writeline($config{'errorcolor'} . "  You can't afford that." . $RST, 1);
+    } elsif (_dl_free_space($g) < $GUNS[$gi]{space}) {
+      writeline($config{'errorcolor'} . "  Not enough room in your coat." . $RST, 1);
+    } else {
+      $g->{cash} -= $GUNS[$gi]{price};
+      push @{$g->{guns}}, $gi;
+      writeline($config{'usercolor'} . "  You bought a $GUNS[$gi]{name}." . $RST, 1);
+    }
+  }
+  door_pause();
+}
+
+# ============================================================================
+# COP ENCOUNTERS
+# ============================================================================
+
+sub _dl_cop_encounter {
+  my ($g) = @_;
+  return if @{$g->{guns}} == 0 && _dl_total_drugs($g) == 0;  # No contraband, no trouble
+
+  # Determine cop tier based on cash + bank
+  my $wealth = $g->{cash} + $g->{bank};
+  my $cop_tier = 0;
+  $cop_tier = 1 if $wealth > 100000;
+  $cop_tier = 2 if $wealth > 1000000;
+
+  my $cop = $COPS[$cop_tier];
+  my $num_deputies = $cop->{min_dep} + int(rand($cop->{max_dep} - $cop->{min_dep} + 1));
+
+  writeline("", 1);
+  writeline($config{'errorcolor'} . "  $cop->{name} and $num_deputies deputies are on your tail!" . $RST, 1);
+  writeline("", 1);
+
+  my $fighting = 1;
+  my $cops_health = $cop->{armor} + ($num_deputies * 3);
+
+  while ($fighting && $g->{health} > 0) {
+    my @options;
+    push @options, ['R', 'Run'] if $g->{health} > 0;
+    push @options, ['F', 'Fight'] if @{$g->{guns}} > 0;
+
+    my $choice = door_menu(\@options, "Cops! What do you do");
+
+    if ($choice eq 'R') {
+      # Try to run
+      if (rand(100) < 60) {
+        writeline($config{'usercolor'} . "  You escape into a back alley!" . $RST, 1);
+        $fighting = 0;
+      } else {
+        writeline($config{'errorcolor'} . "  You can't lose them!" . $RST, 1);
+        # Cops shoot at you
+        _dl_cops_shoot($g, $cop, $num_deputies);
+      }
+    } elsif ($choice eq 'F') {
+      # Fight cops
+      my $gun = $GUNS[$g->{guns}[0]];  # Use first gun
+      my $dmg = $gun->{damage} + int(rand($gun->{damage}));
+      if (rand(100) < 70) {
+        $cops_health -= $dmg;
+        $num_deputies-- if $num_deputies > 0;
+        writeline($config{'usercolor'} . "  You shoot and injure a cop! ($dmg damage)" . $RST, 1);
+      } else {
+        writeline($config{'systemcolor'} . "  You shoot and miss." . $RST, 1);
+      }
+
+      if ($cops_health <= 0 || $num_deputies <= 0) {
+        writeline($config{'usercolor'} . "  The cops retreat!" . $RST, 1);
+        $fighting = 0;
+      } else {
+        # Cops return fire
+        _dl_cops_shoot($g, $cop, $num_deputies);
+      }
+    } else {
+      # No guns, must run
+      if (rand(100) < 50) {
+        writeline($config{'usercolor'} . "  You escape into a back alley!" . $RST, 1);
+        $fighting = 0;
+      } else {
+        writeline($config{'errorcolor'} . "  You can't lose them!" . $RST, 1);
+        _dl_cops_shoot($g, $cop, $num_deputies);
+      }
+    }
+  }
+
+  # If dead or caught
+  if ($g->{health} <= 0) {
+    writeline($config{'errorcolor'} . "  $cop->{name} guns you down." . $RST, 1);
+  }
+
+  door_pause();
+}
+
+sub _dl_cops_shoot {
+  my ($g, $cop, $num_deputies) = @_;
+  my $shots = 1 + int(rand($num_deputies > 0 ? $num_deputies : 1));
+  my $total_damage = 0;
+
+  for (1 .. $shots) {
+    if (rand(100) < 40) {
+      my $dmg = 5 + int(rand(15));
+      $total_damage += $dmg;
+    }
+  }
+
+  if ($total_damage > 0) {
+    $g->{health} -= $total_damage;
+    $g->{health} = 0 if $g->{health} < 0;
+    writeline($config{'errorcolor'} . "  The cops wound you! (-${total_damage}% health, now $g->{health}%)" . $RST, 1);
+
+    # Cops confiscate stuff if health low
+    if ($g->{health} <= 0) {
+      return;
+    }
+    if ($g->{health} < 20 && rand(100) < 60) {
+      # Confiscate all drugs
+      for my $i (0 .. $#DRUGS) {
+        $g->{drugs}[$i]{carried} = 0;
+        $g->{drugs}[$i]{total_value} = 0;
+      }
+      # Take some cash
+      my $taken = int($g->{cash} * (50 + rand(50)) / 100);
+      $g->{cash} -= $taken;
+      writeline($config{'errorcolor'} . "  $cop->{name} relieves you of all your drugs and " .
+        door_money($taken) . "!" . $RST, 1);
+
+      # Take a gun too
+      if (@{$g->{guns}} > 0) {
+        pop @{$g->{guns}};
+        writeline($config{'errorcolor'} . "  They confiscate one of your guns!" . $RST, 1);
+      }
+    }
+  } else {
+    writeline($config{'systemcolor'} . "  Bullets zing past your ear!" . $RST, 1);
+  }
+}
+
+sub _dl_total_drugs {
+  my ($g) = @_;
+  my $total = 0;
+  for my $i (0 .. $#DRUGS) {
+    $total += $g->{drugs}[$i]{carried};
+  }
+  return $total;
+}
+
+# ============================================================================
+# TRADING MENU
+# ============================================================================
+
+sub _dl_trade_menu {
+  my ($g) = @_;
+
+  my $trading = 1;
+  while ($trading) {
+    my @options = (
+      ['B', 'Buy drugs'],
+      ['S', 'Sell drugs'],
+      ['J', 'Jet to new location'],
+      ['I', 'Inventory'],
+      ['H', 'High scores'],
+      ['Q', 'Quit game'],
+    );
+
+    my $choice = door_menu(\@options, "What now");
+
+    if ($choice eq 'B') {
+      _dl_buy($g);
+    } elsif ($choice eq 'S') {
+      _dl_sell($g);
+    } elsif ($choice eq 'J') {
+      $trading = 0;
+    } elsif ($choice eq 'I') {
+      _dl_show_inventory($g);
+    } elsif ($choice eq 'H') {
+      door_show_scores("druglord", "DrugLord High Scores", "Net Worth");
+      door_pause();
+      _dl_show_status($g);
+    } elsif ($choice eq 'Q') {
+      if (door_noyes("Really quit?")) {
+        $g->{quit} = 1;
+        $trading = 0;
+      }
+    }
+  }
+}
+
+# ============================================================================
+# BUY / SELL
+# ============================================================================
+
+sub _dl_buy {
+  my ($g) = @_;
+  my $space = _dl_free_space($g);
+  if ($space <= 0) {
+    writeline($config{'errorcolor'} . "  Your coat is full!" . $RST, 1);
+    return;
+  }
+
+  writeline($config{'themecolor'} . "  Buy which drug?" . $RST, 1);
+  my $drug_num = door_getnum("Drug #? (0 to cancel)", scalar @DRUGS);
+  return if $drug_num == 0;
+
+  my $di = $drug_num - 1;
+  if ($g->{prices}[$di] == 0) {
+    writeline($config{'errorcolor'} . "  Not available here." . $RST, 1);
+    return;
+  }
+
+  my $price = $g->{prices}[$di];
+  my $max_afford = $price > 0 ? int($g->{cash} / $price) : 0;
+  my $max_buy = $max_afford < $space ? $max_afford : $space;
+
+  writeline($config{'systemcolor'} . "  $DRUGS[$di]{name} at " . door_money($price) .
+    " each. You can afford $max_afford, space for $space." . $RST, 1);
+
+  my $amount = door_getamount("Buy how many?", $max_buy);
+  return if $amount <= 0;
+
+  if ($amount > $max_afford) {
+    writeline($config{'errorcolor'} . "  You can't afford that many." . $RST, 1);
+    return;
+  }
+  if ($amount > $space) {
+    writeline($config{'errorcolor'} . "  Not enough room." . $RST, 1);
+    return;
+  }
+
+  my $cost = $amount * $price;
+  $g->{cash} -= $cost;
+  $g->{drugs}[$di]{carried} += $amount;
+  $g->{drugs}[$di]{total_value} += $cost;
+  writeline($config{'usercolor'} . "  Bought $amount $DRUGS[$di]{name} for " . door_money($cost) . "." . $RST, 1);
+}
+
+sub _dl_sell {
+  my ($g) = @_;
+  if (_dl_total_drugs($g) == 0) {
+    writeline($config{'errorcolor'} . "  You have nothing to sell!" . $RST, 1);
+    return;
+  }
+
+  writeline($config{'themecolor'} . "  Sell which drug?" . $RST, 1);
+  my $drug_num = door_getnum("Drug #? (0 to cancel)", scalar @DRUGS);
+  return if $drug_num == 0;
+
+  my $di = $drug_num - 1;
+  if ($g->{drugs}[$di]{carried} == 0) {
+    writeline($config{'errorcolor'} . "  You don't have any $DRUGS[$di]{name}." . $RST, 1);
+    return;
+  }
+
+  if ($g->{prices}[$di] == 0) {
+    writeline($config{'errorcolor'} . "  No buyers for $DRUGS[$di]{name} here." . $RST, 1);
+    return;
+  }
+
+  my $price = $g->{prices}[$di];
+  my $max_sell = $g->{drugs}[$di]{carried};
+
+  writeline($config{'systemcolor'} . "  $DRUGS[$di]{name} at " . door_money($price) .
+    " each. You have $max_sell." . $RST, 1);
+
+  my $amount = door_getamount("Sell how many?", $max_sell);
+  return if $amount <= 0;
+
+  if ($amount > $max_sell) {
+    writeline($config{'errorcolor'} . "  You don't have that many." . $RST, 1);
+    return;
+  }
+
+  my $revenue = $amount * $price;
+  $g->{cash} += $revenue;
+  $g->{drugs}[$di]{carried} -= $amount;
+  # Adjust tracked value proportionally
+  if ($g->{drugs}[$di]{carried} == 0) {
+    $g->{drugs}[$di]{total_value} = 0;
+  } else {
+    my $ratio = $g->{drugs}[$di]{carried} / ($g->{drugs}[$di]{carried} + $amount);
+    $g->{drugs}[$di]{total_value} = int($g->{drugs}[$di]{total_value} * $ratio);
+  }
+  writeline($config{'usercolor'} . "  Sold $amount $DRUGS[$di]{name} for " . door_money($revenue) . "." . $RST, 1);
+}
+
+# ============================================================================
+# INVENTORY
+# ============================================================================
+
+sub _dl_show_inventory {
+  my ($g) = @_;
+  writeline("", 1);
+  writeline($config{'themecolor'} . "  Your Inventory" . $RST, 1);
+  writeline($config{'linecolor'} . "  " . ("-" x 40) . $RST, 1);
+
+  my $any = 0;
+  for my $i (0 .. $#DRUGS) {
+    next if $g->{drugs}[$i]{carried} == 0;
+    $any = 1;
+    writeline(sprintf("  %s%-12s %s%5d%s",
+      $config{'usercolor'}, $DRUGS[$i]{name},
+      $config{'datacolor'}, $g->{drugs}[$i]{carried},
+      $RST), 1);
+  }
+  writeline($config{'systemcolor'} . "  (empty)" . $RST, 1) unless $any;
+
+  if (@{$g->{guns}} > 0) {
+    writeline("", 1);
+    writeline($config{'themecolor'} . "  Weapons" . $RST, 1);
+    for my $gi (@{$g->{guns}}) {
+      writeline("  " . $config{'datacolor'} . $GUNS[$gi]{name} . $RST, 1);
+    }
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  Coat space: " . _dl_free_space($g) . " of $g->{coat_size}" . $RST, 1);
+  door_pause();
+  _dl_show_status($g);
+}
+
+# ============================================================================
+# JET TO NEW LOCATION
+# ============================================================================
+
+sub _dl_jet {
+  my ($g) = @_;
+
+  writeline($config{'themecolor'} . "  Where to, man?" . $RST, 1);
+  for my $i (0 .. $#LOCATIONS) {
+    my $marker = ($i == $g->{location}) ? "*" : " ";
+    my $extras = "";
+    $extras .= " [Loan Shark]" if $i == $LOC_LOANSHARK;
+    $extras .= " [Bank]"       if $i == $LOC_BANK && $i != $LOC_LOANSHARK;
+    $extras .= " [Gun Shop]"   if $i == $LOC_GUNSHOP;
+    $extras .= " [Pub]"        if $i == $LOC_PUB && $i != $LOC_GUNSHOP;
+    # Combine if same location
+    if ($i == $LOC_LOANSHARK && $i == $LOC_BANK) {
+      $extras = " [Loan Shark] [Bank]";
+    }
+    if ($i == $LOC_GUNSHOP && $i == $LOC_PUB) {
+      $extras = " [Gun Shop] [Pub]";
+    }
+    writeline(sprintf("  %s%d%s%s %-18s%s%s%s",
+      $config{'promptcolor'}, $i + 1, $config{'themecolor'},
+      $marker, $LOCATIONS[$i]{name},
+      $config{'systemcolor'}, $extras,
+      $RST), 1);
+  }
+
+  my $dest = door_getnum("Destination? (0 to stay)", scalar @LOCATIONS);
+  if ($dest > 0) {
+    $g->{location} = $dest - 1;
+  }
+
+  # Advance turn
+  $g->{turn}++;
+
+  # Interest on debt
+  if ($g->{debt} > 0) {
+    $g->{debt} = int($g->{debt} * (100 + $DEBT_INTEREST) / 100);
+  }
+
+  # Interest on bank
+  if ($g->{bank} > 0) {
+    $g->{bank} = int($g->{bank} * (100 + $BANK_INTEREST) / 100);
+  }
+
+  # Random: health recovery
+  if ($g->{health} < 100 && rand(100) < 30) {
+    my $heal = 5 + int(rand(15));
+    $g->{health} += $heal;
+    $g->{health} = 100 if $g->{health} > 100;
+  }
+}
+
+# ============================================================================
+# GAME OVER
+# ============================================================================
+
+sub _dl_game_over {
+  my ($g) = @_;
+
+  # Sell all remaining drugs at average price
+  my $drug_value = 0;
+  for my $i (0 .. $#DRUGS) {
+    if ($g->{drugs}[$i]{carried} > 0) {
+      my $avg = int(($DRUGS[$i]{min} + $DRUGS[$i]{max}) / 2);
+      $drug_value += $g->{drugs}[$i]{carried} * $avg;
+    }
+  }
+
+  # Calculate net worth
+  my $net = $g->{cash} + $g->{bank} + $drug_value - $g->{debt};
+
+  door_clear();
+  writeline("", 1);
+  writeline($config{'themecolor'} . "                  G A M E   O V E R" . $RST, 1);
+  writeline($config{'linecolor'}  . "          --------------------------------" . $RST, 1);
+  writeline("", 1);
+
+  if ($g->{health} <= 0) {
+    writeline($config{'errorcolor'} . "  You were killed on the streets of New York." . $RST, 1);
+  } else {
+    writeline($config{'systemcolor'} . "  Your 31 days are up." . $RST, 1);
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  Cash on hand:  " . $config{'datacolor'} . door_money($g->{cash}) . $RST, 1);
+  writeline($config{'systemcolor'} . "  Bank savings:  " . $config{'datacolor'} . door_money($g->{bank}) . $RST, 1);
+  writeline($config{'systemcolor'} . "  Drug value:    " . $config{'datacolor'} . door_money($drug_value) . $RST, 1);
+  writeline($config{'systemcolor'} . "  Debt:         " . $config{'errorcolor'} . "-" . door_money($g->{debt}) . $RST, 1);
+  writeline($config{'linecolor'} . "  " . ("-" x 30) . $RST, 1);
+  writeline($config{'systemcolor'} . "  Net Worth:     " .
+    ($net >= 0 ? $config{'usercolor'} : $config{'errorcolor'}) . door_money($net) . $RST, 1);
+  writeline("", 1);
+
+  # Submit high score
+  my $scores = door_submit_score("druglord", $net, { days => $g->{turn} - 1 });
+
+  # Find player's rank
+  my $rank = 0;
+  for my $i (0 .. $#$scores) {
+    if ($scores->[$i]{handle} eq $info{'handle'} && $scores->[$i]{score} == $net) {
+      $rank = $i + 1;
+      last;
+    }
+  }
+  if ($rank > 0) {
+    writeline($config{'usercolor'} . "  You ranked #$rank on the high score board!" . $RST, 1);
+  }
+
+  # Update shared economy - check for new kingpin
+  my $econ = $g->{economy} // {};
+  if ($net > ($econ->{kingpin_score} // 0)) {
+    my $old_kingpin = $econ->{kingpin} // "";
+    $econ->{kingpin} = $info{'handle'};
+    $econ->{kingpin_score} = $net;
+    _dl_save_economy($g);
+    writeline("", 1);
+    writeline($config{'usercolor'} . "  * You are the new KINGPIN! *" . $RST, 1);
+    if ($old_kingpin && $old_kingpin ne $info{'handle'}) {
+      door_broadcast("druglord", "$info{'handle'} has dethroned $old_kingpin as the Kingpin of Drug Lord!");
+      door_send_message("druglord", $old_kingpin, "$info{'handle'} has taken your Kingpin title with " . door_money($net) . " net worth!");
+    } else {
+      door_broadcast("druglord", "$info{'handle'} is the Kingpin of Drug Lord with " . door_money($net) . " net worth!");
+    }
+  }
+
+  # Log to activity feed
+  door_log_activity("druglord", $info{'handle'} . " finished DrugLord with " . door_money($net) . " net worth");
+
+  writeline("", 1);
+  if (door_yesno("View high scores?")) {
+    door_show_scores("druglord", "DrugLord High Scores", "Net Worth");
+  }
+
+  door_pause("Press any key to return to the BBS...");
+}
+
+1;
