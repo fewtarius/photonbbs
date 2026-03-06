@@ -8,11 +8,9 @@ sub oneliners {
 
       if (-e "$config{'home'}$config{'text'}/oneliner") {
         $readit = 0;
-        if (-e "$config{'home'}$config{'text'}/oneltop.$info{'ext'}") {
-          readfile("oneltop.$info{'ext'}");
-          $readit = 1;
-        } elsif (-e "$config{'home'}$config{'text'}/oneltop.txt" && $readit ne "1") {
-          readfile("oneltop.txt");
+        my $top_file = find_textfile('oneltop');
+        if ($top_file) {
+          readfile($top_file);
           $readit = 1;
         } else {
           writeline("\n" . $theme{'oneltop'} . "\n\n");
@@ -35,11 +33,9 @@ sub oneliners {
         unlockfile("$config{'home'}$config{'text'}/oneliner");
 
         $readit = 0;
-        if (-e "$config{'home'}$config{'text'}/onelbot.$info{'ext'}") {
-          readfile("onelbot.$info{'ext'}");
-          $readit = 1;
-        } elsif (-e "$config{'home'}$config{'text'}/onelbot.txt" && $readit ne "1") {
-          readfile("onelbot.txt");
+        my $bot_file = find_textfile('onelbot');
+        if ($bot_file) {
+          readfile($bot_file);
           $readit = 1;
         } else {
           writeline($theme{'onelbot'});

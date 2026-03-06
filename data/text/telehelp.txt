@@ -15,6 +15,7 @@
 @THEMECLR/BULLETINS                @BGNRead System Bulletins               @USERCLR...  @THEMECLR @
 @THEMECLR/POLLS                    @BGNVote in community polls             @USERCLR...  @THEMECLR/VOTE
 @THEMECLR/ACTIVITY                 @BGNView recent BBS activity            @USERCLR...  @THEMECLR/FEED
+@THEMECLR/SCORES                   @BGNDoor game hall of fame              @USERCLR...  @THEMECLR/TOP
 @THEMECLR/QUIT                     @BGNExit Teleconference                 @USERCLR...  @THEMECLR !
 
 @USERCLRRoom Commands ..

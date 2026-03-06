@@ -70,14 +70,14 @@ my @GAMES = (
       kills => 'int', deaths => 'int', alignment => 'int', mines_laid => 'int',
       planets_owned => 'int', total_trades => 'int', total_profit => 'int',
     },
-    shared => ["scores.dat", "universe.dat"],
+    shared => ["scores.dat", "universe.dat", "exchange.dat", "news.dat"],
   },
   {
     id     => "casino",
     name   => "Casino",
     fields => [],
     field_types => {},
-    shared => ["scores.dat", "jackpot.dat"],
+    shared => ["scores.dat", "jackpot.dat", "news.dat"],
     note   => "Casino uses BBS credits, not per-user saves",
   },
   {
@@ -85,7 +85,7 @@ my @GAMES = (
     name   => "Drug Lord",
     fields => [],
     field_types => {},
-    shared => ["scores.dat", "economy.dat"],
+    shared => ["scores.dat", "economy.dat", "news.dat"],
     note   => "Drug Lord is session-only, no persistent player saves",
   },
   {
@@ -114,7 +114,7 @@ my @GAMES = (
       money => 'float', rod_power => 'int', fish_finder => 'bool',
       total_caught => 'int', biggest => 'float', lifetime_money => 'float',
     },
-    shared => ["scores.dat", "derby.dat"],
+    shared => ["scores.dat", "derby.dat", "tournament.dat"],
     complex_fields => [qw(species_caught lures_owned)],
   },
   {
@@ -131,7 +131,7 @@ my @GAMES = (
       artifacts_found => 'int', atlantis_found => 'bool',
       last_reset => 'epoch', created => 'epoch',
     },
-    shared => ["scores.dat"],
+    shared => ["scores.dat", "excavations.dat", "news.dat"],
     complex_fields => [qw(artifacts explored map)],
   },
   {
@@ -168,7 +168,7 @@ sub list_players {
     next unless $f =~ /^(.+)\.dat$/;
     my $name = $1;
     # Skip shared files
-    next if $name =~ /^(scores|derby|jackpot|economy|universe|federation|messages|world|galaxy|shared)/;
+    next if $name =~ /^(scores|derby|jackpot|economy|universe|federation|exchange|excavations|tournament|news|messages|world|galaxy|shared)/;
     push @players, $name;
   }
   closedir($dh);

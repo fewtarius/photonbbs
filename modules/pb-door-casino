@@ -46,6 +46,13 @@ sub _casino_card_str {
   return $color . $rank . $suit . $RST;
 }
 
+# Return card as "RankSuit" string for door_draw_cards (e.g. "AH", "10D")
+sub _casino_card_code {
+  my ($card) = @_;
+  return '?' unless defined $card;
+  return $RANKS[$card->[0]] . $SUIT_SYM[$card->[1]];
+}
+
 # Format a hand for display
 sub _casino_hand_str {
   my (@cards) = @_;
@@ -114,8 +121,12 @@ my %ROULETTE_RED_MAP = map { $_ => 1 } @ROULETTE_RED;
 # MAIN ENTRY POINT
 # ============================================================================
 
+my $CASINO_DOOR = "casino";
+
 sub casino_main {
   iamat($info{'handle'}, "At the Casino");
+
+  door_broker_connect($CASINO_DOOR, "door-$CASINO_DOOR-floor");
 
   # Load/init player casino balance
   my $balance = door_get_credits();
@@ -136,12 +147,32 @@ sub casino_main {
     writeline($config{'systemcolor'} . "  Your balance: " . $config{'usercolor'} . door_money($balance) . $RST, 1);
     writeline("", 1);
 
+    # Show who else is at the casino and jackpot size
+    my @online = door_get_online_players("casino");
+    my $pool = door_load_shared("casino", "jackpot.dat") // { amount => 500 };
+    if (@online) {
+      my $others = join(", ", map { $config{'usercolor'} . $_ . $RST } @online);
+      writeline($config{'datacolor'} . "  Also playing: " . $others, 1);
+    }
+    writeline($config{'datacolor'} . "  Jackpot pool: " . $config{'themecolor'} . door_money($pool->{amount}) . $RST, 1);
+    writeline("", 1);
+
+    # Show any incoming floor chat
+    my @chat = door_chat_poll($CASINO_DOOR);
+    for my $m (@chat) {
+      writeline($config{'linecolor'} . $m . $RST, 1);
+    }
+
+    # Show recent casino activity
+    _casino_show_news();
+
     my $choice = door_menu([
       ['B', 'Blackjack'],
       ['R', 'Roulette'],
       ['S', 'Slot Machine'],
       ['P', 'Video Poker'],
       ['J', 'Jackpot Pool'],
+      ['C', 'Casino Floor Chat'],
       ['H', 'High Scores'],
       ['Q', 'Leave Casino'],
     ], "What'll it be");
@@ -156,6 +187,8 @@ sub casino_main {
       _casino_video_poker();
     } elsif ($choice eq 'J') {
       _casino_jackpot();
+    } elsif ($choice eq 'C') {
+      door_chat_input($CASINO_DOOR);
     } elsif ($choice eq 'H') {
       door_show_scores("casino", "Casino High Rollers", "Winnings");
       door_pause();
@@ -164,7 +197,33 @@ sub casino_main {
     }
   }
 
+  door_broker_disconnect();
   iamat($info{'handle'}, "Left the Casino");
+}
+
+# Show recent casino activity (last 5 broadcasts)
+sub _casino_show_news {
+  my $news = door_load_shared("casino", "news.dat") // { items => [] };
+  my @items = @{$news->{items}};
+  return unless @items;
+  writeline($config{'linecolor'} . "  -- Casino Floor News --" . $RST, 1);
+  for my $item (reverse @items[-5..-1]) {
+    next unless defined $item;
+    writeline($config{'datacolor'} . "  " . $item . $RST, 1);
+  }
+  writeline("", 1);
+}
+
+# Post a news item to the casino floor
+sub _casino_post_news {
+  my ($msg) = @_;
+  my $news = door_load_shared("casino", "news.dat") // { items => [] };
+  push @{$news->{items}}, $msg;
+  # Keep last 20
+  if (scalar @{$news->{items}} > 20) {
+    splice @{$news->{items}}, 0, scalar(@{$news->{items}}) - 20;
+  }
+  door_save_shared("casino", "news.dat", $news);
 }
 
 # ============================================================================
@@ -176,7 +235,7 @@ sub _casino_blackjack {
 
   door_clear();
   writeline($config{'themecolor'} . " Blackjack" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   writeline($config{'systemcolor'} . " Balance: " . $config{'usercolor'} . door_money($balance) . $RST, 1);
   writeline("", 1);
 
@@ -191,6 +250,13 @@ sub _casino_blackjack {
   return if $bet <= 0;
 
   door_sub_credits($bet);
+  # Refresh screen - remove bet prompt, show clean game state
+  door_clear();
+  writeline($config{'themecolor'} . " Blackjack" . $RST, 1);
+  door_hrule(50);
+  writeline($config{'systemcolor'} . " Balance: " . $config{'usercolor'} . door_money(door_get_credits()) .
+    $config{'systemcolor'} . "   Bet: " . $config{'usercolor'} . door_money($bet) . $RST, 1);
+  writeline("", 1);
 
   my $deck = _casino_new_deck();
   my @player = (_casino_deal($deck), _casino_deal($deck));
@@ -203,10 +269,15 @@ sub _casino_blackjack {
     my $pval = _bj_hand_value(@player);
     my $dval = _bj_hand_value($dealer[0]);
 
+    door_clear();
+    writeline($config{'themecolor'} . " Blackjack" . $RST, 1);
+    door_hrule(50);
+    writeline($config{'systemcolor'} . " Balance: " . $config{'usercolor'} . door_money(door_get_credits()) .
+      $config{'systemcolor'} . "   Bet: " . $config{'usercolor'} . door_money($bet) . $RST, 1);
     writeline("", 1);
-    writeline($config{'systemcolor'} . " Dealer: " . _casino_card_str($dealer[0]) . "  " . $config{'systemcolor'} . "[?]" . $RST, 1);
-    writeline($config{'systemcolor'} . " You:    " . _casino_hand_str(@player) .
-      $config{'systemcolor'} . "  (" . $config{'datacolor'} . "$pval" . $config{'systemcolor'} . ")" . $RST, 1);
+    door_draw_cards([_casino_card_code($dealer[0]), '?'], $config{'linecolor'}, "Dealer:");
+    writeline("", 1);
+    door_draw_cards([map { _casino_card_code($_) } @player], $config{'linecolor'}, "You: (" . $pval . ")");
     writeline("", 1);
 
     # Natural blackjack
@@ -246,22 +317,23 @@ sub _casino_blackjack {
 
   # Dealer plays
   writeline("", 1);
-  writeline($config{'systemcolor'} . " Dealer reveals: " . _casino_hand_str(@dealer) . $RST, 1);
+  door_draw_cards([map { _casino_card_code($_) } @dealer], $config{'linecolor'}, "Dealer reveals:");
+  writeline("", 1);
 
   if ($pval <= 21) {
     my $dval = _bj_hand_value(@dealer);
     while ($dval < 17) {
       push @dealer, _casino_deal($deck);
       $dval = _bj_hand_value(@dealer);
-      writeline($config{'systemcolor'} . " Dealer draws: " . _casino_hand_str(@dealer) .
-        " (" . $config{'datacolor'} . "$dval" . $config{'systemcolor'} . ")" . $RST, 1);
+      door_draw_cards([map { _casino_card_code($_) } @dealer], $config{'linecolor'}, "Dealer draws ($dval):");
+      writeline("", 1);
     }
   }
 
   my $dval = _bj_hand_value(@dealer);
   writeline("", 1);
-  writeline($config{'systemcolor'} . " Your hand: " . $config{'datacolor'} . "$pval" .
-    $config{'systemcolor'} . "  Dealer: " . $config{'datacolor'} . "$dval" . $RST, 1);
+  writeline($config{'systemcolor'} . " Your hand: " . $config{'datacolor'} . $pval .
+    $config{'systemcolor'} . "   Dealer: " . $config{'datacolor'} . $dval . $RST, 1);
 
   # Determine winner
   my $winnings = 0;
@@ -286,8 +358,14 @@ sub _casino_blackjack {
 
   if ($winnings > 0) {
     door_add_credits($winnings);
-    if ($winnings > $bet) {
-      door_submit_score("casino", $winnings - $bet, { game => "Blackjack" });
+    my $profit = $winnings - $bet;
+    if ($profit > 0) {
+      door_submit_score("casino", $profit, { game => "Blackjack" });
+      if ($profit >= 500) {
+        my $msg = "$info{'handle'} won " . door_money($profit) . " at Blackjack!";
+        _casino_post_news($msg);
+        door_broadcast("casino", $msg) if $profit >= 2000;
+      }
     }
   }
 
@@ -303,7 +381,7 @@ sub _casino_roulette {
 
   door_clear();
   writeline($config{'themecolor'} . " Roulette" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   writeline($config{'systemcolor'} . " Balance: " . $config{'usercolor'} . door_money($balance) . $RST, 1);
   writeline("", 1);
 
@@ -387,7 +465,13 @@ sub _casino_roulette {
   if ($won) {
     door_add_credits($winnings);
     writeline($config{'usercolor'} . " You win " . door_money($winnings) . "!" . $RST, 1);
-    door_submit_score("casino", $winnings - $bet, { game => "Roulette" });
+    my $profit = $winnings - $bet;
+    door_submit_score("casino", $profit, { game => "Roulette" });
+    if ($profit >= 500) {
+      my $msg = "$info{'handle'} won " . door_money($profit) . " at Roulette!";
+      _casino_post_news($msg);
+      door_broadcast("casino", $msg) if $profit >= 2000;
+    }
   } else {
     writeline($config{'errorcolor'} . " You lose." . $RST, 1);
   }
@@ -404,25 +488,27 @@ sub _casino_slots {
 
   door_clear();
   writeline($config{'themecolor'} . " Slot Machine" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
-  writeline("", 1);
-
-  # Payout table
-  writeline($config{'systemcolor'} . " Payouts:" . $RST, 1);
-  for my $sym (@SLOT_SYMBOLS) {
-    my $p = $SLOT_PAYOUTS{$sym->{sym}};
-    writeline(sprintf("  %s%-10s%s  2x: %s%-4s%s  3x: %s%-4s%s",
-      $config{'usercolor'}, $sym->{sym}, $RST,
-      $config{'datacolor'}, $p->{two} . "x", $RST,
-      $config{'datacolor'}, $p->{three} . "x", $RST), 1);
-  }
+  door_hrule(50);
   writeline("", 1);
 
   my $spinning = 1;
   while ($spinning) {
+
+    door_clear();
+    writeline($config{'themecolor'} . " Slot Machine" . $RST, 1);
+    door_hrule(50);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " Payouts:" . $RST, 1);
+    for my $sym (@SLOT_SYMBOLS) {
+      my $p = $SLOT_PAYOUTS{$sym->{sym}};
+      writeline(sprintf("  %s%-10s%s  2x: %s%-4s%s  3x: %s%-4s%s",
+        $config{'usercolor'}, $sym->{sym}, $RST,
+        $config{'datacolor'}, $p->{two} . "x", $RST,
+        $config{'datacolor'}, $p->{three} . "x", $RST), 1);
+    }
+    writeline("", 1);
     $balance = door_get_credits();
     writeline($config{'systemcolor'} . " Balance: " . $config{'usercolor'} . door_money($balance) . $RST, 1);
-
     if ($balance <= 0) {
       writeline($config{'errorcolor'} . " You're broke!" . $RST, 1);
       door_pause();
@@ -445,40 +531,33 @@ sub _casino_slots {
     }
 
     writeline("", 1);
-    writeline($config{'themecolor'} . "  [ " .
-      $config{'usercolor'} . sprintf("%-8s", $reels[0]) .
-      $config{'themecolor'} . " | " .
-      $config{'usercolor'} . sprintf("%-8s", $reels[1]) .
-      $config{'themecolor'} . " | " .
-      $config{'usercolor'} . sprintf("%-8s", $reels[2]) .
-      $config{'themecolor'} . " ]" . $RST, 1);
-
-    # Check for matches
+    # Check for matches first
     my $winnings = 0;
+    my $win_msg = "";
     if ($reels[0] eq $reels[1] && $reels[1] eq $reels[2]) {
-      # Three of a kind
       $winnings = $bet * $SLOT_PAYOUTS{$reels[0]}{three};
-      writeline($config{'usercolor'} . " JACKPOT! Three $reels[0]s! Win " . door_money($winnings) . "!" . $RST, 1);
+      $win_msg = $config{'usercolor'} . " JACKPOT! Three $reels[0]s! Win " . door_money($winnings) . "!" . $RST;
     } elsif ($reels[0] eq $reels[1] || $reels[1] eq $reels[2] || $reels[0] eq $reels[2]) {
-      # Two of a kind (use the matched symbol)
-      my $matched;
-      if ($reels[0] eq $reels[1]) { $matched = $reels[0]; }
-      elsif ($reels[1] eq $reels[2]) { $matched = $reels[1]; }
-      else { $matched = $reels[0]; }
+      my $matched = ($reels[0] eq $reels[1]) ? $reels[0] : ($reels[1] eq $reels[2]) ? $reels[1] : $reels[0];
       $winnings = $bet * $SLOT_PAYOUTS{$matched}{two};
-      writeline($config{'usercolor'} . " Two $matched" . "s! Win " . door_money($winnings) . "!" . $RST, 1);
+      $win_msg = $config{'usercolor'} . " Two ${matched}s! Win " . door_money($winnings) . "!" . $RST;
     } else {
-      writeline($config{'errorcolor'} . " No match." . $RST, 1);
+      $win_msg = $config{'errorcolor'} . " No match." . $RST;
     }
+    door_draw_slots(\@reels, $winnings);
+    writeline($win_msg, 1);
 
     if ($winnings > 0) {
       door_add_credits($winnings);
       if ($winnings > $bet * 10) {
         door_submit_score("casino", $winnings, { game => "Slots" });
         door_log_activity("casino", $info{'handle'} . " hit " . door_money($winnings) . " on the slots!");
+        my $msg = "$info{'handle'} hit " . door_money($winnings) . " on the Slot Machine!";
+        _casino_post_news($msg);
+        door_broadcast("casino", $msg) if $winnings >= $bet * 50;
       }
     }
-    writeline("", 1);
+    door_pause();
   }
 }
 
@@ -515,7 +594,7 @@ sub _casino_video_poker {
 
   door_clear();
   writeline($config{'themecolor'} . " Video Poker - Jacks or Better" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   writeline("", 1);
 
   # Show payout table
@@ -549,12 +628,8 @@ sub _casino_video_poker {
 
   # Show initial hand
   writeline("", 1);
-  writeline($config{'systemcolor'} . " Your hand:" . $RST, 1);
-  for my $i (0 .. 4) {
-    writeline(sprintf("  %s%d%s: %s",
-      $config{'promptcolor'}, $i + 1, $config{'themecolor'},
-      _casino_card_str($hand[$i])), 1);
-  }
+  door_draw_cards([map { _casino_card_code($_) } @hand], $config{'linecolor'}, "Your hand:");
+  writeline(" " . join(" ", map { $config{'promptcolor'} . "    " . ($_ + 1) . "    " . $RST } 0 .. 4), 1);
   writeline("", 1);
 
   # Ask which cards to hold
@@ -577,13 +652,11 @@ sub _casino_video_poker {
 
   # Show final hand
   writeline("", 1);
-  writeline($config{'systemcolor'} . " Final hand:" . $RST, 1);
-  for my $i (0 .. 4) {
-    my $held = $hold{$i} ? $config{'usercolor'} . " HELD" : "";
-    writeline(sprintf("  %s%d%s: %s%s",
-      $config{'promptcolor'}, $i + 1, $config{'themecolor'},
-      _casino_card_str($hand[$i]), $held . $RST), 1);
-  }
+  door_draw_cards([map { _casino_card_code($_) } @hand], $config{'linecolor'}, "Final hand:");
+  writeline(" " . join(" ", map {
+    $hold{$_} ? $config{'usercolor'} . "   HELD  " . $RST
+              : $config{'linecolor'} . "         " . $RST
+  } 0 .. 4), 1);
   writeline("", 1);
 
   # Evaluate hand
@@ -740,7 +813,9 @@ sub _casino_jackpot {
     writeline($config{'usercolor'} . "  You win " . door_money($winnings) . " credits!" . $RST, 1);
     $pool->{amount} = 500; # Reset pool
     $pool->{last_winner} = $info{'handle'};
-    door_broadcast("casino", "$info{'handle'} hit the JACKPOT at the Casino for " . door_money($winnings) . "!");
+    my $jackpot_msg = "$info{'handle'} hit the JACKPOT at the Casino for " . door_money($winnings) . "!";
+    door_broadcast("casino", $jackpot_msg);
+    _casino_post_news($jackpot_msg);
     door_submit_score("casino", $winnings, { type => "jackpot" });
   }
   elsif ($spin[0] eq $spin[1] && $spin[1] eq $spin[2]) {

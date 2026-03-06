@@ -130,5 +130,36 @@ chown -R nobody:nobody /appdata /opt/photonbbs/data
 
 # Start PhotonBBS daemon (handles telnet connections and TTY management)
 
+# Optional: Start SSH server for SSH access to the BBS
+# SSH is disabled by default. To enable, set PHOTONBBS_SSH_ENABLE=1
+# and mount your host keys or let sshd generate them.
+if [ "${PHOTONBBS_SSH_ENABLE:-0}" = "1" ]; then
+  # Generate SSH host keys if missing
+  if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
+    ssh-keygen -A 2>/dev/null || true
+  fi
+  # Write BBS SSH configuration
+  cat > /etc/ssh/sshd_config.d/photonbbs.conf <<'EOF'
+# PhotonBBS SSH Access
+# Users with "bbs" as their login shell connect directly to the BBS
+Port 22
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+UsePAM no
+# Force BBS client for all connections
+Match User bbs
+    ForceCommand /opt/photonbbs/sbin/photonbbs-client SSH %I %p
+    AllowTcpForwarding no
+    X11Forwarding no
+EOF
+  # Create bbs user if not present
+  id bbs >/dev/null 2>&1 || useradd -r -s /bin/false -d /opt/photonbbs bbs
+  mkdir -p /home/bbs/.ssh && chmod 700 /home/bbs/.ssh
+  chown -R bbs:bbs /home/bbs/.ssh
+  /usr/sbin/sshd -e &
+  echo "[startscript] SSH server started on port 22"
+fi
+
 /opt/photonbbs/photonbbs
 exit 0

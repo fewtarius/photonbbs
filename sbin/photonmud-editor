@@ -44,7 +44,7 @@ our $LOCKED_FILE;
 # --- Datafile Definitions ---
 our %datafiles = (
     rooms     => { file => "rooms.dat",     recsize => 1084,  loader => \&read_room_record },
-    objects   => { file => "objects.dat",   recsize => 256,   loader => \&read_object_record },
+    objects   => { file => "objects.dat",   recsize => -1,    loader => \&read_object_record },
     treasure  => { file => "treasure.dat",  recsize => 140,   loader => \&editor_read_treasure_record },
     monsters  => { file => "monsters.dat",  recsize => 160,   loader => \&editor_read_monster_record },
     npcs      => { file => "nonplyrs.dat",  recsize => 144,   loader => \&editor_read_npc_record },
@@ -1468,6 +1468,17 @@ sub load_records {
     my $file = $datadir.$datafiles{$key}{file};
     my $recsize = $datafiles{$key}{recsize};
     my $loader = $datafiles{$key}{loader};
+
+    # Auto-detect record size when set to -1 (objects.dat)
+    if ($recsize == -1 && -e $file) {
+        my $fsize = -s $file;
+        for my $rl (270, 260, 256, 264, 280) {
+            if ($fsize % $rl == 0) { $recsize = $rl; last; }
+        }
+        $recsize //= 256;
+        $datafiles{$key}{recsize} = $recsize;
+    }
+
     my @records;
 
     if ($key eq 'rooms' && defined &read_room_record) {

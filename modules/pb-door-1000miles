@@ -192,7 +192,29 @@ sub _mb_new_hand {
   $g->{extended} = 0;
   $g->{finished} = 0;
   $g->{turn} = 0;
-  $g->{last_action} = "";
+  $g->{action_log} = [];
+
+  # Roll to see who goes first (on first hand only)
+  if (!$g->{hands_played}) {
+    my $np = scalar @{$g->{players}};
+    if ($np > 1) {
+      my @rolls;
+      my $high = 0;
+      my $first = 0;
+      for my $pi (0 .. $np - 1) {
+        my $roll = 1 + int(rand(6)) + 1 + int(rand(6));
+        push @rolls, $roll;
+        if ($roll > $high) { $high = $roll; $first = $pi; }
+      }
+      $g->{turn} = $first;
+      # Build roll message
+      my @roll_msgs;
+      for my $pi (0 .. $np - 1) {
+        push @roll_msgs, $g->{players}[$pi]{name} . " rolled " . $rolls[$pi];
+      }
+      push @{$g->{action_log}}, join(", ", @roll_msgs) . " - " . $g->{players}[$first]{name} . " goes first!";
+    }
+  }
 
   for my $pi (0 .. $#{$g->{players}}) {
     _mb_reset_hand($g->{players}[$pi]);
@@ -487,38 +509,137 @@ sub _mb_show_board {
   my $np = scalar @{$g->{players}};
   writeline($config{'themecolor'} . " 1 0 0 0   M I L E S" .
     $config{'systemcolor'} . "  (Goal: $g->{goal} km, $np players)" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 55) . $RST, 1);
 
-  # Show all players' status
-  for my $pi (0 .. $np - 1) {
+  # Build player status blocks and display in 1 or 2 columns
+  # Each block has 3-4 lines of fixed visible width
+  my $COL_W   = 38;  # visible width per column
+  my $FULL_W  = 75;  # full-width separator
+  my $h       = boxchar('horizontal');
+  my $vl      = " " . $config{'linecolor'} . boxchar('vertical') . $RST . " ";
+  my $sep_full = $config{'linecolor'} . " " . ($h x $FULL_W) . $RST;
+  my $use_cols = ($np > 2);  # use 2-column layout for 3+ players
+
+  # Build a player's status lines as array of visible-padded strings
+  my $_player_block = sub {
+    my ($pi, $is_left) = @_;
     my $p = $g->{players}[$pi];
     my $is_current = ($pi == $g->{turn});
     my $is_viewer  = ($pi == $viewer);
-    my $marker = $is_current ? "> " : "  ";
+    my $marker     = $is_current ? ">" : " ";
     my $name_color = $is_viewer ? $config{'usercolor'} : $config{'systemcolor'};
-    my $tag = $p->{type} eq 'ai' ? " [AI]" : "";
+    my $tag        = $p->{type} eq 'ai' ? " [AI]" : "";
 
-    writeline($marker . $name_color . $p->{name} . $tag . $RST, 1);
-    _mb_show_status_line($g, $pi);
+    # Collect played safeties for display in brackets on name line
+    my @safe_abbr = ("ET", "PP", "DA", "RoW");
+    my @safe_played;
+    for my $s (0 .. 3) {
+      push @safe_played, $safe_abbr[$s] if $p->{safety}[$s] == S_PLAYED;
+    }
+    my $safe_tag = @safe_played ? " [" . join(" ", @safe_played) . "]" : "";
 
-    if ($pi < $np - 1) {
-      writeline($config{'linecolor'} . "  " . ("-" x 50) . $RST, 1);
+    # Build lines as [colored_string, visible_length] pairs
+    my @lines;
+
+    # Line 1: marker + name + [AI] + [safeties]
+    my $name_vis = $marker . " " . $p->{name} . $tag . $safe_tag;
+    push @lines, [
+      $marker . " " . $name_color . $p->{name} . $tag . $RST .
+      ($safe_tag ? $config{'promptcolor'} . $safe_tag . $RST : ""),
+      length($name_vis)
+    ];
+
+    # Line 2: mileage bar - visible: "  NNNN km [--------------------]" = 2+4+4+1+20+1 = 32
+    my $bar_len = 20;
+    my $filled  = int(($p->{mileage} / $g->{goal}) * $bar_len);
+    $filled = $bar_len if $filled > $bar_len;
+    my $bar = ("#" x $filled) . ("-" x ($bar_len - $filled));
+    my $bar_vis_len = 2 + 4 + 4 + 1 + $bar_len + 1;  # "  NNkm [bar]" = 32
+    push @lines, [
+      "  " . $config{'datacolor'} . sprintf("%4d", $p->{mileage}) . " km" .
+      $config{'systemcolor'} . " [" . $config{'usercolor'} . $bar . $config{'systemcolor'} . "]" . $RST,
+      $bar_vis_len
+    ];
+
+    # Line 3: battle/speed - visible: "  battle_str LIMIT?"
+    my $battle_str = "Rolling";
+    if (!$p->{can_go}) {
+      if    ($p->{battle} == -1)          { $battle_str = "Need Go"; }
+      elsif (_mb_is_hazard($p->{battle})) { $battle_str = $CARD_NAMES[$p->{battle}]; }
+      elsif (_mb_is_repair($p->{battle})) { $battle_str = "Repaired (need Go)"; }
+    }
+    my $speed_str  = ($p->{speed} == C_LIMIT) ? " LIMIT" : "";
+    my $status_clr = $p->{can_go} ? $config{'usercolor'} : $config{'errorcolor'};
+    my $stat_vis = "  " . $battle_str . $speed_str;
+    push @lines, [
+      "  " . $status_clr . $battle_str . $RST .
+      ($speed_str ? $config{'errorcolor'} . $speed_str . $RST : ""),
+      length($stat_vis)
+    ];
+
+    # Pad each line to $COL_W visible chars using tracked lengths
+    my @padded;
+    for my $line (@lines) {
+      my ($str, $vlen) = @$line;
+      my $pad = $COL_W - $vlen;
+      $pad = 0 if $pad < 0;
+      push @padded, $str . (" " x $pad);
+    }
+    while (@padded < 3) { push @padded, " " x $COL_W; }
+
+    return @padded;
+  };
+
+  if ($use_cols) {
+    # Two-column layout: pair players
+    for (my $pi = 0; $pi < $np; $pi += 2) {
+      writeline($sep_full, 1);
+      my @left  = $_player_block->($pi, 1);
+      my @right = ($pi + 1 < $np) ? $_player_block->($pi + 1, 0) : ();
+      my $nlines = @left > @right ? scalar @left : scalar @right;
+      for my $li (0 .. $nlines - 1) {
+        my $lpart = $left[$li]  // (" " x $COL_W);
+        my $rpart = $right[$li] // "";
+        writeline($lpart . $vl . $rpart . $RST, 1);
+      }
+    }
+  } else {
+    # Single-column layout (1-2 players)
+    for my $pi (0 .. $np - 1) {
+      writeline($sep_full, 1);
+      my @block = $_player_block->($pi, 1);
+      for my $line (@block) { writeline($line, 1); }
     }
   }
 
-  writeline($config{'linecolor'} . " " . ("-" x 55) . $RST, 1);
+  writeline($sep_full, 1);
 
-  # Show viewer's hand
+  # Show viewer's hand in two columns (slots 1-4 left, 5-7 right)
   my $vp = $g->{players}[$viewer];
   writeline($config{'themecolor'} . " Your Hand:" . $RST, 1);
-  for my $i (0 .. $HAND_SZ - 1) {
-    my $card = $vp->{hand}[$i];
-    if ($card >= 0) {
+  # Left col: "  N* Name            " = 2+1+1+1+16 = 21 visible chars total
+  # We build visible name padded to 14 chars, then apply color
+  my $NAME_W  = 14;  # visible width for card name field
+  my $COL_PAD = 21;  # total visible width of one column slot
+  for my $i (0 .. 3) {
+    my $left_card = $vp->{hand}[$i];
+    my $right_card = $vp->{hand}[$i + 4] // -1;
+    my $left_str = "";
+    my $right_str = "";
+    if ($left_card >= 0) {
       my $playable = _mb_can_play($g, $viewer, $i) ? "*" : " ";
-      writeline(sprintf("  %s%d%s%s %s%-18s%s",
-        $config{'promptcolor'}, $i + 1, $config{'themecolor'}, $playable,
-        _mb_card_color($card), $CARD_NAMES[$card], $RST), 1);
+      my $name_vis = sprintf("%-${NAME_W}s", $CARD_NAMES[$left_card]);
+      $left_str = "  " . $config{'promptcolor'} . ($i + 1) . $config{'themecolor'} .
+        $playable . " " . _mb_card_color($left_card) . $name_vis . $RST;
+    } else {
+      $left_str = " " x $COL_PAD;
     }
+    if ($i + 4 < $HAND_SZ && $right_card >= 0) {
+      my $playable = _mb_can_play($g, $viewer, $i + 4) ? "*" : " ";
+      my $name_vis = sprintf("%-${NAME_W}s", $CARD_NAMES[$right_card]);
+      $right_str = "  " . $config{'promptcolor'} . ($i + 5) . $config{'themecolor'} .
+        $playable . " " . _mb_card_color($right_card) . $name_vis . $RST;
+    }
+    writeline($left_str . $right_str, 1) if $left_str || $right_str;
   }
 
   my $deck_left = scalar @{$g->{deck}};
@@ -559,7 +680,7 @@ sub _mb_show_status_line {
     "") . $RST, 1);
 
   # Safeties
-  my @safe_names = ("ETk", "PPr", "DAc", "RoW");
+  my @safe_names = ("ET", "PP", "DA", "RoW");
   my @played;
   for my $s (0 .. 3) { push @played, $safe_names[$s] if $p->{safety}[$s] == S_PLAYED; }
   if (@played) {
@@ -571,7 +692,6 @@ sub _mb_show_scores {
   my ($g) = @_;
   writeline("", 1);
   writeline($config{'themecolor'} . " Scores:" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 40) . $RST, 1);
   for my $p (@{$g->{players}}) {
     writeline(sprintf("  %s%-12s%s %s%5d%s  Wins: %s%d%s",
       $config{'usercolor'}, $p->{name}, $config{'systemcolor'},
@@ -714,27 +834,25 @@ sub _mb_do_ai_turn {
 
   if ($move->{action} eq 'discard') {
     _mb_discard($g, $pi, $move->{idx});
-    $g->{last_action} = "$name discarded " . $CARD_NAMES[$card];
+    push @{$g->{action_log}}, "$name discarded: " . $CARD_NAMES[$card];
   } elsif ($move->{action} eq 'safety') {
     _mb_play_safety($g, $pi, $move->{idx});
-    $g->{last_action} = "$name played " . $CARD_NAMES[$card] . "!";
+    push @{$g->{action_log}}, "$name played " . $CARD_NAMES[$card] . "!";
   } elsif ($move->{action} eq 'hazard') {
     my $ti = $move->{target};
     my $tname = $g->{players}[$ti]{name};
     my $result = _mb_play_hazard($g, $pi, $move->{idx}, $ti);
     if ($result == 2) {
-      $g->{last_action} = "$name played " . $CARD_NAMES[$card] .
-        " on $tname - COUP FOURRE!";
+      push @{$g->{action_log}}, "$name played " . $CARD_NAMES[$card] . " on $tname - COUP FOURRE!";
     } else {
-      $g->{last_action} = "$name played " . $CARD_NAMES[$card] . " on $tname!";
+      push @{$g->{action_log}}, "$name played " . $CARD_NAMES[$card] . " on $tname!";
     }
   } else {
     _mb_play_card($g, $pi, $move->{idx});
     if (_mb_is_distance($card)) {
-      $g->{last_action} = "$name played " . $CARD_NAMES[$card] .
-        " (" . $p->{mileage} . " km)";
+      push @{$g->{action_log}}, "$name played " . $CARD_NAMES[$card] . " (" . $p->{mileage} . " km)";
     } else {
-      $g->{last_action} = "$name played " . $CARD_NAMES[$card];
+      push @{$g->{action_log}}, "$name played " . $CARD_NAMES[$card];
     }
   }
 }
@@ -750,21 +868,27 @@ sub _mb_do_human_turn {
 
   if ($drawn < 0 && !_mb_has_cards($p)) { return 0; }
 
+  # Capture then clear the accumulated action log (shows what others did since last turn)
+  my @pending_log = @{$g->{action_log} // []};
+  $g->{action_log} = [];
+
   while (1) {
     _mb_show_board($g, $pi);
     writeline("", 1);
 
-    if ($g->{last_action}) {
-      writeline($config{'systemcolor'} . " " . $g->{last_action} . $RST, 1);
+    # Show only the most recent entries (keep display within terminal height)
+    my $max_log = scalar(@{$g->{players}}) - 1;  # one entry per AI player
+    my @show_log = @pending_log > $max_log ? @pending_log[-$max_log..-1] : @pending_log;
+    for my $act (@show_log) {
+      writeline($config{'systemcolor'} . " " . $act . $RST, 1);
     }
     if ($drawn >= 0) {
-      writeline($config{'datacolor'} . " Drew: " .
+      writeline($config{'systemcolor'} . " " . $p->{name} . " drew: " .
         _mb_card_color($drawn) . $CARD_NAMES[$drawn] . $RST, 1);
     }
 
     writeline("", 1);
-    writeline($config{'systemcolor'} . " [1-7] Play  [D+#] Discard  [S] Scores  [Q] Quit" . $RST, 1);
-    writeline($config{'promptcolor'} . " > " . $RST);
+    writeline($config{'systemcolor'} . " [1-7] Play  [D+#] Discard  [S] Scores  [Q] Quit " . $config{'promptcolor'} . "> " . $RST);
     my $input = uc(waitkey(""));
     writeline("", 1);
 
@@ -787,7 +911,6 @@ sub _mb_do_human_turn {
           door_pause(); next;
         }
         _mb_discard($g, $pi, $idx);
-        $g->{last_action} = $p->{name} . " discarded " . $CARD_NAMES[$card];
         return 1;
       }
       next;
@@ -805,8 +928,7 @@ sub _mb_do_human_turn {
       # Safety
       if (_mb_is_safety($card)) {
         _mb_play_safety($g, $pi, $idx);
-        $g->{last_action} = $p->{name} . " played " . $CARD_NAMES[$card] . "!";
-        door_pause(); return 1;
+        return 1;
       }
 
       # Hazard - choose target
@@ -836,14 +958,11 @@ sub _mb_do_human_turn {
         my $tname = $g->{players}[$ti]{name};
         my $result = _mb_play_hazard($g, $pi, $idx, $ti);
         if ($result == 2) {
-          $g->{last_action} = $p->{name} . " played " . $CARD_NAMES[$card] .
-            " on $tname - COUP FOURRE!";
           writeline($config{'promptcolor'} . " $tname played COUP FOURRE!" . $RST, 1);
+          door_pause();
         } else {
-          $g->{last_action} = $p->{name} . " played " . $CARD_NAMES[$card] .
-            " on $tname!";
         }
-        door_pause(); return 1;
+        return 1;
       }
 
       # Distance/Remedy
@@ -856,10 +975,7 @@ sub _mb_do_human_turn {
 
       _mb_play_card($g, $pi, $idx);
       if (_mb_is_distance($card)) {
-        $g->{last_action} = $p->{name} . " played " . $CARD_NAMES[$card] .
-          " (" . $p->{mileage} . " km)";
       } else {
-        $g->{last_action} = $p->{name} . " played " . $CARD_NAMES[$card];
       }
       return 1;
     }
@@ -902,7 +1018,7 @@ sub _mb_check_extension {
     my $ch = uc(waitkey("")); writeline("", 1);
     if ($ch eq 'Y') {
       $g->{goal} = $GOAL; $g->{extended} = 1; $g->{finished} = 0;
-      $g->{last_action} = $p->{name} . " extended to $GOAL km!";
+      push @{$g->{action_log}}, $p->{name} . " extended to $GOAL km!";
       door_pause();
     }
   } else {
@@ -914,7 +1030,7 @@ sub _mb_check_extension {
     }
     if ($extend) {
       $g->{goal} = $GOAL; $g->{extended} = 1; $g->{finished} = 0;
-      $g->{last_action} = $p->{name} . " extended to $GOAL km!";
+      push @{$g->{action_log}}, $p->{name} . " extended to $GOAL km!";
     }
   }
 }
@@ -948,7 +1064,7 @@ sub _mb_show_hand_result {
 
   writeline("", 1);
   writeline($config{'themecolor'} . " Hand Scoring:" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 45) . $RST, 1);
+  door_hrule(45);
 
   for my $pi (0 .. $#{$g->{players}}) {
     my $p = $g->{players}[$pi];
@@ -1052,7 +1168,6 @@ sub onek_miles_main {
 
   while ($playing && !$game{quit}) {
     $game{finished} = 0;
-    $game{last_action} = "";
 
     while (!$game{finished} && !$game{quit}) {
       my $pi = $game{turn};
@@ -1065,16 +1180,6 @@ sub onek_miles_main {
       if ($p->{type} eq 'human') {
         _mb_do_human_turn(\%game, $pi);
       } else {
-        # Show board before AI move so player sees state
-        if ($pi == ($game{human_idx} + 1) % scalar @{$game{players}}) {
-          # Only pause on first AI after human
-          _mb_show_board(\%game, $game{human_idx});
-          if ($game{last_action}) {
-            writeline("", 1);
-            writeline($config{'systemcolor'} . " " . $game{last_action} . $RST, 1);
-          }
-          door_pause();
-        }
         _mb_do_ai_turn(\%game, $pi);
       }
 

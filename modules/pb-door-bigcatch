@@ -215,6 +215,8 @@ sub bigcatch_main {
 
   eval { require "$config{'home'}/modules/pb-doorlib"; } unless defined &door_load;
 
+  door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-lake");
+
   my $save = door_load($DOOR_NAME) // {};
   my %game = (
     money          => $save->{money} // 200,
@@ -269,6 +271,7 @@ sub bigcatch_main {
   });
 
   _bc_update_derby(\%game);
+  door_broker_disconnect();
   iamat($info{'handle'}, "Finished Big Catch");
 }
 
@@ -303,7 +306,7 @@ sub _bc_choose_lake {
   my ($g) = @_;
   door_clear();
   writeline($config{'themecolor'} . " Choose a Lake" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 60) . $RST, 1);
+  door_hrule(60);
   writeline("", 1);
 
   for my $i (0 .. $#LAKES) {
@@ -478,7 +481,14 @@ sub _bc_display {
     $config{'systemcolor'} . " Surface:" . $config{'datacolor'} . " $sn" .
     $config{'systemcolor'} . " Bottom:" . $config{'datacolor'} . " $bn" .
     $config{'systemcolor'} . " Lure:" . $config{'datacolor'} . " $lure" . $RST, 1);
-  writeline($config{'linecolor'} . " WASD=move C=cast T=tackle L=livewell F=finder S=shop H=scores Q=quit" . $RST, 1);
+  writeline($config{'linecolor'} . " WASD=move C=cast T=tackle L=livewell F=finder S=shop" . $RST, 1);
+  writeline($config{'linecolor'} . " H=scores R=tournament N=chat Q=quit" . $RST, 1);
+
+  # Show any incoming lake chat
+  my @chat = door_chat_poll($DOOR_NAME);
+  for my $m (@chat) {
+    writeline($config{'linecolor'} . $m . $RST, 1);
+  }
 }
 
 # ============================================================================
@@ -489,7 +499,7 @@ sub _bc_depth_finder {
   my ($g) = @_;
   door_clear();
   writeline($config{'themecolor'} . " Depth Finder" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 45) . $RST, 1);
+  door_hrule(45);
 
   my $range = 5;
   my ($by, $bx) = ($g->{boat_y}, $g->{boat_x});
@@ -562,6 +572,8 @@ sub _bc_command {
   elsif ($cmd eq 'f') { _bc_depth_finder($g); }
   elsif ($cmd eq 's') { _bc_shop($g); }
   elsif ($cmd eq 'h') { _bc_scores($g); }
+  elsif ($cmd eq 'r') { _bc_join_tournament($g); }
+  elsif ($cmd eq 'n') { door_chat_input($DOOR_NAME); }
   elsif ($cmd eq 'q') {
     writeline($config{'systemcolor'} . " Quit fishing? (Y/N) " . $RST);
     my $yn = uc(waitkey("")); writeline("", 1);
@@ -605,7 +617,7 @@ sub _bc_tackle_box {
   my ($g) = @_;
   door_clear();
   writeline($config{'themecolor'} . " Tackle Box" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 55) . $RST, 1);
+  door_hrule(55);
   writeline("", 1);
 
   my @owned;
@@ -849,7 +861,7 @@ sub _bc_show_livewell {
   my ($g) = @_;
   door_clear();
   writeline($config{'themecolor'} . " Livewell (" . scalar(@{$g->{livewell}}) . "/$LIVEWELL)" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
 
   if (!@{$g->{livewell}}) {
     writeline($config{'systemcolor'} . " Empty!" . $RST, 1);
@@ -864,7 +876,7 @@ sub _bc_show_livewell {
         $config{'promptcolor'}, $i+1, $config{'usercolor'}, $f->{species},
         $config{'datacolor'}, $f->{weight}, $config{'datacolor'}, _bc_money($v), $RST), 1);
     }
-    writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+    door_hrule(50);
     writeline(sprintf("  %s%-24s %7.2f %s%s",
       $config{'systemcolor'}, "Total:", $tw, _bc_money($tv), $RST), 1);
   }
@@ -909,7 +921,7 @@ sub _bc_shop {
   while ($shopping) {
     door_clear();
     writeline($config{'themecolor'} . " Fonzo's Tackle & Bait" . $RST, 1);
-    writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+    door_hrule(50);
     writeline($config{'systemcolor'} . " Balance: " . $config{'datacolor'} . _bc_money($g->{money}) . $RST, 1);
     writeline("", 1);
 
@@ -989,6 +1001,7 @@ sub _bc_scores {
   my ($g) = @_;
   door_show_scores($DOOR_NAME, "Big Catch - Trophy Fish", "Weight");
   _bc_show_derby($g);
+  _bc_show_tournament();
   door_pause();
 }
 
@@ -998,17 +1011,42 @@ sub _bc_show_derby {
   return unless $derby && $derby->{entries} && keys %{$derby->{entries}};
   writeline("", 1);
   writeline($config{'themecolor'} . " Fishing Derby Standings" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 58) . $RST, 1);
-  writeline(sprintf("  %s%-18s %8s %8s %8s %8s%s",
-    $config{'systemcolor'}, "Angler", "Biggest", "Caught", "Species", "Earned", $RST), 1);
   my @s = sort { $derby->{entries}{$b}{biggest} <=> $derby->{entries}{$a}{biggest} }
           keys %{$derby->{entries}};
+  door_hrule(58);
+  writeline(sprintf("  %s%-18s %8s %8s %8s %8s%s",
+    $config{'systemcolor'}, "Angler", "Biggest", "Caught", "Species", "Earned", $RST), 1);
   for my $n (@s[0 .. ($#s > 14 ? 14 : $#s)]) {
     my $e = $derby->{entries}{$n};
     my $c = (lc($n) eq lc($info{'handle'})) ? $config{'usercolor'} : $config{'datacolor'};
     writeline(sprintf("  %s%-18s %s%7.1flb %8d %8d %8s%s",
       $c, substr($n, 0, 18), $config{'datacolor'}, $e->{biggest},
       $e->{total}, $e->{species}, _bc_money($e->{earned} // 0), $RST), 1);
+  }
+  writeline("", 1);
+}
+
+sub _bc_show_tournament {
+  my $t = door_load_shared($DOOR_NAME, "tournament.dat");
+  return unless $t && $t->{active};
+  my $now = time();
+  writeline($config{'themecolor'} . " LIVE TOURNAMENT - " . $config{'usercolor'} . $t->{name} . $RST, 1);
+  my $remaining = $t->{end_time} - $now;
+  if ($remaining > 0) {
+    my $mins = int($remaining / 60);
+    writeline($config{'systemcolor'} . " Time remaining: " . $config{'datacolor'} . "$mins minutes" .
+      $config{'systemcolor'} . "   Prize pool: " . $config{'usercolor'} . _bc_money($t->{prize_pool}) . $RST, 1);
+    writeline("", 1);
+    if (%{$t->{entries}}) {
+      writeline($config{'systemcolor'} . sprintf("  %-18s %8s", "Angler", "Best Fish") . $RST, 1);
+      for my $n (sort { $t->{entries}{$b} <=> $t->{entries}{$a} } keys %{$t->{entries}}) {
+        my $c = (lc($n) eq lc($info{'handle'})) ? $config{'usercolor'} : $config{'datacolor'};
+        writeline(sprintf("  %s%-18s %s%7.1flb%s", $c, substr($n,0,18),
+          $config{'datacolor'}, $t->{entries}{$n}, $RST), 1);
+      }
+    }
+  } else {
+    writeline($config{'systemcolor'} . " Tournament ended." . $RST, 1);
   }
   writeline("", 1);
 }
@@ -1031,6 +1069,87 @@ sub _bc_update_derby {
       door_broadcast($DOOR_NAME, sprintf("%s holds the Big Catch record: %.1f lbs!", $info{'handle'}, $g->{biggest}));
     }
   }
+
+  # Update live tournament if active
+  _bc_update_tournament($g);
+}
+
+sub _bc_update_tournament {
+  my ($g) = @_;
+  my $t = door_load_shared($DOOR_NAME, "tournament.dat");
+  return unless $t && $t->{active};
+  my $now = time();
+  if ($now > $t->{end_time}) {
+    # Tournament ended - award prize to winner
+    if (%{$t->{entries}}) {
+      my ($winner) = sort { $t->{entries}{$b} <=> $t->{entries}{$a} } keys %{$t->{entries}};
+      my $prize = $t->{prize_pool};
+      door_broadcast($DOOR_NAME, "$winner won the $t->{name} tournament with " .
+        sprintf("%.1f", $t->{entries}{$winner}) . " lb! Prize: " . _bc_money($prize));
+      door_send_message($DOOR_NAME, $winner, "You won the $t->{name} tournament! " . _bc_money($prize) . " added to your account.");
+      door_add_credits($prize) if $winner eq $info{'handle'};
+      door_submit_score($DOOR_NAME, int($t->{entries}{$winner} * 100), { tournament => $t->{name} });
+    }
+    $t->{active} = 0;
+    door_save_shared($DOOR_NAME, "tournament.dat", $t);
+    return;
+  }
+  if (exists $t->{entries}{$info{'handle'}} || $t->{registered}{$info{'handle'}}) {
+    # Update our entry if we have a bigger fish
+    if ($g->{biggest} > ($t->{entries}{$info{'handle'}} // 0)) {
+      $t->{entries}{$info{'handle'}} = $g->{biggest};
+      door_save_shared($DOOR_NAME, "tournament.dat", $t);
+      door_broadcast($DOOR_NAME, sprintf("%s leads the %s tournament with %.1f lb!",
+        $info{'handle'}, $t->{name}, $g->{biggest})) if $g->{biggest} > 10;
+    }
+  }
+}
+
+sub _bc_join_tournament {
+  my ($g) = @_;
+  my $t = door_load_shared($DOOR_NAME, "tournament.dat");
+  my $entry_fee = 50;
+
+  if (!$t || !$t->{active} || time() > $t->{end_time}) {
+    # Start a new tournament
+    if (door_yesno("No active tournament. Start one? (Entry fee: " . _bc_money($entry_fee) . ")")) {
+      if ($g->{money} < $entry_fee) {
+        writeline($config{'errorcolor'} . " Not enough money." . $RST, 1);
+        return;
+      }
+      $g->{money} -= $entry_fee;
+      $t = {
+        active      => 1,
+        name        => "Invitational Derby",
+        start_time  => time(),
+        end_time    => time() + 3600,  # 1 hour tournament
+        prize_pool  => $entry_fee,
+        entries     => { $info{'handle'} => 0 },
+        registered  => { $info{'handle'} => 1 },
+      };
+      door_save_shared($DOOR_NAME, "tournament.dat", $t);
+      door_broadcast($DOOR_NAME, "$info{'handle'} started the Big Catch Invitational Derby! Join with 'T' in Big Catch. 1 hour, \$50 entry.");
+      writeline($config{'usercolor'} . " Tournament started! 1 hour. Good luck!" . $RST, 1);
+    }
+  } elsif ($t->{registered}{$info{'handle'}}) {
+    writeline($config{'systemcolor'} . " You are already in the tournament." . $RST, 1);
+  } else {
+    # Join existing tournament
+    if (door_yesno("Join '$t->{name}'? Entry fee: " . _bc_money($entry_fee))) {
+      if ($g->{money} < $entry_fee) {
+        writeline($config{'errorcolor'} . " Not enough money." . $RST, 1);
+        return;
+      }
+      $g->{money} -= $entry_fee;
+      $t->{prize_pool} += $entry_fee;
+      $t->{entries}{$info{'handle'}} = 0;
+      $t->{registered}{$info{'handle'}} = 1;
+      door_save_shared($DOOR_NAME, "tournament.dat", $t);
+      door_broadcast($DOOR_NAME, "$info{'handle'} joined the $t->{name}! Prize pool: " . _bc_money($t->{prize_pool}));
+      writeline($config{'usercolor'} . " Joined! Good luck!" . $RST, 1);
+    }
+  }
+  door_pause();
 }
 
 # ============================================================================

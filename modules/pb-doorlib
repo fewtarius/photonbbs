@@ -13,10 +13,110 @@
 #   - High score tracking
 #   - Turn/session management
 #   - Activity feed integration
+#   - Real-time in-game chat via PhotonBBS broker (optional)
 #
 
 use Storable qw(store retrieve lock_store lock_retrieve);
 use Fcntl qw(:flock);
+
+# Broker integration - optional, uses PhotonBBS broker if available
+our $_DOOR_BROKER_SOCK = undef;
+our $_DOOR_BROKER_ROOM = undef;
+our $_HAS_BROKER_CLIENT = 0;
+
+# Load broker client if available
+eval {
+  require_module("pb-broker-client") if defined &require_module;
+  $_HAS_BROKER_CLIENT = 1 if defined &broker_available;
+};
+
+# Connect door to broker, join a room (call at game start)
+sub door_broker_connect {
+  my ($doorname, $room_id) = @_;
+  return unless $_HAS_BROKER_CLIENT && broker_available();
+  my $player_id = "door-$doorname-" . ($info{'handle'} // 'anon');
+  $_DOOR_BROKER_SOCK = broker_connect($player_id);
+  return unless $_DOOR_BROKER_SOCK;
+  $room_id //= "door-$doorname";
+  $_DOOR_BROKER_ROOM = $room_id;
+  broker_join_room($_DOOR_BROKER_SOCK, $room_id);
+  logger("DOOR[$doorname]: Connected to broker, room=$room_id") if $config{'debug'};
+}
+
+# Move to a different room in the broker (e.g., entering a sector)
+sub door_broker_move {
+  my ($room_id) = @_;
+  return unless $_DOOR_BROKER_SOCK && $_HAS_BROKER_CLIENT;
+  $_DOOR_BROKER_ROOM = $room_id;
+  broker_join_room($_DOOR_BROKER_SOCK, $room_id);
+}
+
+# Disconnect door from broker (call at game end)
+sub door_broker_disconnect {
+  return unless $_DOOR_BROKER_SOCK && $_HAS_BROKER_CLIENT;
+  eval { broker_disconnect($_DOOR_BROKER_SOCK); };
+  $_DOOR_BROKER_SOCK = undef;
+  $_DOOR_BROKER_ROOM = undef;
+}
+
+# Send a chat message to the current door game room via broker
+sub door_chat_send {
+  my ($doorname, $message) = @_;
+  my $handle = $info{'handle'} // 'Unknown';
+  if ($_DOOR_BROKER_SOCK && $_DOOR_BROKER_ROOM && $_HAS_BROKER_CLIENT) {
+    broker_send_room_message($_DOOR_BROKER_SOCK, $_DOOR_BROKER_ROOM,
+      "[$doorname] <$handle> $message");
+  }
+}
+
+# Poll for new chat messages in current door room
+# Returns array of new message strings since last check
+sub door_chat_poll {
+  my ($doorname) = @_;
+  my @msgs;
+  if ($_DOOR_BROKER_SOCK && $_HAS_BROKER_CLIENT) {
+    eval {
+      my @broker_msgs = broker_poll($_DOOR_BROKER_SOCK);
+      for my $m (@broker_msgs) {
+        if ($m->{type} eq 'room_message' && $m->{message}) {
+          push @msgs, $m->{message};
+        } elsif ($m->{type} eq 'player_entered' && $m->{player}) {
+          push @msgs, "[$doorname] " . $m->{player} . " is now here.";
+        } elsif ($m->{type} eq 'player_left' && $m->{player}) {
+          push @msgs, "[$doorname] " . $m->{player} . " has left.";
+        }
+      }
+    };
+  }
+  return @msgs;
+}
+
+# Show chat prompt and send message (interactive)
+sub door_chat_input {
+  my ($doorname) = @_;
+  writeline($config{'promptcolor'} . " Chat> " . $RST);
+  my $msg = getline('text', 70, "", 1);
+  return unless $msg && $msg =~ /\S/;
+  my $handle = $info{'handle'} // 'Unknown';
+  writeline($config{'usercolor'} . "<$handle>" . $config{'systemcolor'} . " $msg" . $RST, 1);
+  door_chat_send($doorname, $msg);
+}
+
+# Display any pending chat messages (call during game loop)
+sub door_chat_display {
+  my ($doorname) = @_;
+  my @msgs = door_chat_poll($doorname);
+  for my $m (@msgs) {
+    writeline($config{'linecolor'} . $m . $RST, 1);
+  }
+  return scalar @msgs;
+}
+
+# File-based chat fallback: write to shared chat file
+sub door_broker_room_players {
+  return () unless $_DOOR_BROKER_SOCK && $_DOOR_BROKER_ROOM && $_HAS_BROKER_CLIENT;
+  return eval { broker_get_room_players($_DOOR_BROKER_SOCK, $_DOOR_BROKER_ROOM) };
+}
 
 # ============================================================================
 # DOOR DATA PATHS
@@ -245,7 +345,6 @@ sub door_show_scores {
 
   writeline("", 1);
   writeline($config{'themecolor'} . " $title" . $RST, 1);
-  writeline($config{'linecolor'} . (" " . ("-" x 50)) . $RST, 1);
 
   if (@$scores == 0) {
     writeline($config{'systemcolor'} . "  No scores yet." . $RST, 1);
@@ -287,7 +386,7 @@ sub door_header {
   my ($title) = @_;
   door_clear();
   writeline($config{'themecolor'} . " $title" . $RST, 1);
-  writeline($config{'linecolor'} . (" " . ("-" x 50)) . $RST, 1);
+  door_hrule(50);
   writeline("", 1);
 }
 
@@ -432,47 +531,43 @@ sub door_post_activity {
 sub door_broadcast {
   my ($doorname, $message) = @_;
   my $formatted = "\@DATACLR[\@USERCLR$doorname\@DATACLR] \@SYSTEMCLR$message";
-  eval {
-    # Use BBS pageall if available
-    if (defined &main::pageall) {
-      # Temporarily override handle for the broadcast source
-      my $saved = $info{'handle'};
-      $info{'handle'} = $doorname;
-      main::pageall($message);
-      $info{'handle'} = $saved;
-    } else {
-      # Fallback: write to all node page files directly
-      my @nodes = glob("$config{'home'}$config{'nodes'}/*");
-      for my $nf (@nodes) {
-        my $node = $nf;
-        $node =~ s/^.*\///;
-        my $pagefile = "$config{'home'}$config{'messages'}/$node.page";
-        eval {
-          lockfile($pagefile);
-          open(my $fh, '>>', $pagefile);
-          print $fh "\n\@DATACLR[\@USERCLR$doorname\@DATACLR] \@SYSTEMCLR$message\n";
-          close($fh);
-          unlockfile($pagefile);
-        };
-      }
-    }
-  };
+
+  # Send via global broker to all logged-in sessions
+  if ($_BBS_BROKER_SOCK && defined &broker_send_room_message) {
+    eval {
+      broker_send_room_message($_BBS_BROKER_SOCK, "bbs-global", $formatted);
+    };
+  } elsif (defined &main::pageall) {
+    # Last-resort: fall back to pageall
+    my $saved = $info{'handle'};
+    $info{'handle'} = $doorname;
+    main::pageall($message);
+    $info{'handle'} = $saved;
+  }
+
   door_log_activity($doorname, $message);
 }
 
 # Get list of currently online player handles
 sub door_get_online_players {
+  my ($doorname) = @_;
   my @players;
   my @nodefiles = glob("$config{'home'}$config{'nodes'}/*");
+  my $my_handle = $info{'handle'} // '';
   for my $nf (@nodefiles) {
     eval {
       open(my $fh, '<', $nf);
       my $line = <$fh>;
       close($fh);
       chomp $line if $line;
-      # Node files contain handle or handle info
       if ($line && $line =~ /\S/) {
-        push @players, $line;
+        # Node file format: ip|node|pid|timestamp|handle|proto|location
+        my @fields = split(/\|/, $line);
+        my $handle = $fields[4] // $line;
+        # Skip system entries and the current user
+        next if !$handle || $handle eq 'CONNECT' || $handle eq '*** HIDDEN ***';
+        next if $handle eq $my_handle;
+        push @players, $handle;
       }
     };
   }
@@ -517,6 +612,8 @@ sub door_save_player {
 # Send a message to a specific player (delivered on their next login/check)
 sub door_send_message {
   my ($doorname, $target_handle, $message) = @_;
+
+  # Persist message for offline/missed delivery
   my $dir = door_data_dir($doorname);
   my $msgfile = "$dir/messages.dat";
   my $messages = [];
@@ -534,6 +631,19 @@ sub door_send_message {
   # Keep only last 100 messages
   splice(@$messages, 0, @$messages - 100) if @$messages > 100;
   eval { lock_store($messages, $msgfile); };
+
+  # Also deliver immediately via broker direct message if target is online
+  my $dm = "\@DATACLR[$doorname\@DATACLR] \@USERCLR" . ($info{'handle'} // $doorname) .
+           "\@DATACLR: \@SYSTEMCLR$message";
+  if ($_BBS_BROKER_SOCK && defined &broker_send_direct_message) {
+    eval {
+      broker_send_direct_message($_BBS_BROKER_SOCK, "user-$target_handle", $dm);
+    };
+  } elsif ($_DOOR_BROKER_SOCK && defined &broker_send_direct_message) {
+    eval {
+      broker_send_direct_message($_DOOR_BROKER_SOCK, "user-$target_handle", $dm);
+    };
+  }
 }
 
 # Get unread messages for current player
@@ -571,7 +681,7 @@ sub door_show_messages {
   return unless @$msgs;
   writeline("", 1);
   writeline($config{'themecolor'} . " You have " . scalar(@$msgs) . " message(s):" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   for my $m (@$msgs) {
     my $when = localtime($m->{timestamp});
     writeline($config{'usercolor'} . " From $m->{from}" . $config{'systemcolor'} . " ($when):" . $RST, 1);
@@ -579,6 +689,129 @@ sub door_show_messages {
   }
   writeline("", 1);
   door_mark_messages_read($doorname);
+}
+
+# ============================================================================
+# UI HELPERS
+# ============================================================================
+
+# Draw a horizontal rule using box-drawing chars
+# door_hrule($width, $color)  -- defaults to 50 wide, linecolor
+sub door_hrule {
+  my ($width, $color) = @_;
+  $width //= 50;
+  $color //= $config{'linecolor'};
+  writeline($color . " " . (boxchar('horizontal') x $width) . $RST, 1);
+}
+
+# ============================================================================
+# CARD ART
+# ============================================================================
+#
+# Draws playing cards as box-art, side by side. Each card is 9 chars wide x 5 tall.
+#
+#  ┌───────┐
+#  │ A     │    row 1: rank top-left
+#  │   ♥   │    row 2: suit center
+#  │     A │    row 3: rank bottom-right
+#  └───────┘
+#
+# Usage: door_draw_cards(\@cards, $base_color, $label)
+#   @cards - card strings like "AH", "10D", "KS", or "?" for face-down
+
+my %_SUIT_SYMBOL = (
+  'H' => chr(3),   # CP437 heart
+  'D' => chr(4),   # CP437 diamond
+  'C' => chr(5),   # CP437 club
+  'S' => chr(6),   # CP437 spade
+  '?' => '?',
+);
+
+sub _door_parse_card {
+  my ($card) = @_;
+  return ('?', '?') if !defined($card) || $card eq '?';
+  if ($card =~ /^(10)([HDCS])$/) { return ($1, $2); }
+  if ($card =~ /^([2-9AJQK])([HDCS])$/) { return ($1, $2); }
+  return ('?', '?');
+}
+
+sub door_draw_cards {
+  my ($cards, $base_color, $label) = @_;
+  $base_color //= $config{'linecolor'};
+  my $n = scalar @$cards;
+  return unless $n > 0;
+
+  my $h  = boxchar('horizontal') x 7;
+  my $tl = boxchar('topleft');
+  my $tr = boxchar('topright');
+  my $bl = boxchar('bottomleft');
+  my $br = boxchar('bottomright');
+  my $vl = boxchar('vertical');
+
+  writeline($config{'systemcolor'} . " $label" . $RST, 1) if $label;
+
+  my @parsed;
+  for my $c (@$cards) {
+    my ($rank, $suit) = _door_parse_card($c);
+    my $sym  = $_SUIT_SYMBOL{$suit} // '?';
+    my $scol = ($suit eq 'H' || $suit eq 'D') ? $config{'errorcolor'} : $config{'datacolor'};
+    $scol    = $config{'linecolor'} if $suit eq '?';
+    push @parsed, { rank => $rank, suit => $suit, sym => $sym, scol => $scol };
+  }
+
+  for my $row (0 .. 4) {
+    my $line = " ";
+    for my $i (0 .. $n - 1) {
+      my $p = $parsed[$i];
+      my ($r, $s, $sc) = ($p->{rank}, $p->{sym}, $p->{scol});
+      my $hidden = ($p->{suit} eq '?');
+
+      if    ($row == 0) { $line .= $base_color . $tl . $h . $tr . $RST; }
+      elsif ($row == 1) { my $rl = $hidden ? "? " : sprintf("%-2s", $r);
+                          $line .= $base_color . $vl . $RST . $sc . " $rl    " . $base_color . $vl . $RST; }
+      elsif ($row == 2) { my $c2 = $hidden ? "  ?  " : "  $s  ";
+                          $line .= $base_color . $vl . $RST . $sc . " $c2 " . $base_color . $vl . $RST; }
+      elsif ($row == 3) { my $rr = $hidden ? " ? " : sprintf("%2s ", $r);
+                          $line .= $base_color . $vl . $RST . $sc . "    $rr" . $base_color . $vl . $RST; }
+      elsif ($row == 4) { $line .= $base_color . $bl . $h . $br . $RST; }
+
+      $line .= " " if $i < $n - 1;
+    }
+    writeline($line, 1);
+  }
+}
+
+# ============================================================================
+# SLOT MACHINE DISPLAY
+# ============================================================================
+#
+#  ┌─────────┬─────────┬─────────┐
+#  │  Cherry  │  Bell   │   7    │
+#  └─────────┴─────────┴─────────┘
+#
+# door_draw_slots(\@reels, $winning)  -- @reels = 3 symbol strings
+
+sub door_draw_slots {
+  my ($reels, $winning) = @_;
+  $reels //= ['?', '?', '?'];
+
+  my $h9  = boxchar('horizontal') x 9;
+  my $vl  = boxchar('vertical');
+  my $tl  = boxchar('topleft');   my $tr = boxchar('topright');
+  my $bl  = boxchar('bottomleft');my $br = boxchar('bottomright');
+  my $td  = boxchar('tdown');     my $tu = boxchar('tup');
+
+  my $lc = $config{'linecolor'};
+  my $dc = $winning ? $config{'usercolor'} : $config{'datacolor'};
+
+  writeline(" " . $lc . $tl . $h9 . $td . $h9 . $td . $h9 . $tr . $RST, 1);
+  my $mid = " " . $lc . $vl . $RST;
+  for my $i (0 .. 2) {
+    my $sym = $reels->[$i] // '?';
+    $mid .= $dc . sprintf(" %-8s", substr($sym, 0, 8)) . $RST . $lc . $vl . $RST;
+  }
+  writeline($mid, 1);
+  writeline(" " . $lc . $bl . $h9 . $tu . $h9 . $tu . $h9 . $br . $RST, 1);
 }
 
 # ============================================================================

@@ -1,0 +1,43 @@
+#!/bin/bash
+# PhotonBBS Hourly: Broker Health Check
+# Verifies the BBS message broker is running, restarts if needed
+
+PHOTONBBS_HOME="${PHOTONBBS_HOME:-/opt/photonbbs}"
+BROKER="${PHOTONBBS_HOME}/services.d/photonbbs-broker"
+BROKER_SOCK="/dev/shm/photonbbs/broker.sock"
+
+echo "[hourly.d] [broker-check] Running at $(date)"
+
+# Check if broker socket exists and is active
+if [ -S "${BROKER_SOCK}" ]; then
+    echo "[hourly.d] [broker-check] Broker socket present at ${BROKER_SOCK}"
+    exit 0
+fi
+
+# Socket missing - check if process is running
+BROKER_PID=$(pgrep -f "photonbbs-broker" 2>/dev/null)
+if [ -n "${BROKER_PID}" ]; then
+    echo "[hourly.d] [broker-check] Broker running (PID ${BROKER_PID}) but socket missing, killing..."
+    kill "${BROKER_PID}" 2>/dev/null
+    sleep 1
+fi
+
+# Restart broker
+echo "[hourly.d] [broker-check] Restarting broker..."
+mkdir -p /dev/shm/photonbbs
+chmod 777 /dev/shm/photonbbs
+
+if [ -x "${BROKER}" ]; then
+    su -s /bin/sh nobody -c "${BROKER}" &
+    sleep 2
+    if [ -S "${BROKER_SOCK}" ]; then
+        echo "[hourly.d] [broker-check] Broker restarted successfully"
+    else
+        echo "[hourly.d] [broker-check] WARNING: Broker restart may have failed (socket not yet present)"
+    fi
+else
+    echo "[hourly.d] [broker-check] ERROR: Broker script not found or not executable at ${BROKER}"
+    exit 1
+fi
+
+exit 0

@@ -46,8 +46,8 @@ if (-e "$config{'doors'}/nodes/$node/fusiondoor") {
     $fusiondoor{$key}=$value;
   }
   close ($fd_fh);
-  if ($fusiondoor{'security'} <= $config{'sysopsecurity'}) {
-    die "You do not have permission to run this tool!";
+  if ($fusiondoor{'security'} < $config{'sysopsecurity'}) {
+    die "You do not have permission to run this tool!\n";
   }
 } else {
   $fusiondoor{'ansi'}=1;

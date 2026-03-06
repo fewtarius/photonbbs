@@ -66,6 +66,9 @@ sub startrader_main {
   my $universe = _st_load_universe();
   my $player   = _st_load_player($universe);
 
+  # Connect to broker for real-time sector chat
+  door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-sector-" . $player->{sector});
+
   _st_title($player);
 
   # Main game loop
@@ -80,9 +83,10 @@ sub startrader_main {
     door_pause();
   }
 
-  # Save state
+  # Save state and disconnect
   _st_save_player($player);
   _st_save_universe($universe);
+  door_broker_disconnect();
 
   iamat($info{'handle'}, "Left Star Trader");
 }
@@ -314,6 +318,23 @@ sub _st_command_menu {
 
   _st_display_sector($u, $p);
 
+  # Show any incoming sector chat
+  my @chat = door_chat_poll($DOOR_NAME);
+  for my $m (@chat) {
+    writeline($config{'linecolor'} . $m . $RST, 1);
+  }
+
+  # Show who else is in this sector
+  my @sector_players = door_broker_room_players();
+  if (@sector_players) {
+    my @others = grep { $_ !~ /^door-$DOOR_NAME-/ } @sector_players;  # filter own entries
+    if (@others) {
+      @others = map { s/^door-[^-]+-//r } @others;  # strip prefix
+      writeline($config{'datacolor'} . " Also in sector: " .
+        join(", ", map { $config{'usercolor'} . $_ . $RST } @others), 1);
+    }
+  }
+
   my $sector = $u->{sectors}[$p->{sector}];
 
   # Build warp choices
@@ -382,6 +403,16 @@ sub _st_command_menu {
     door_show_scores($DOOR_NAME, "Star Trader Rankings", "Experience");
     door_pause();
   }
+  elsif ($cmd eq 'G') {
+    _st_galactic_news($u, $p);
+  }
+  elsif ($cmd eq 'X') {
+    _st_trade_exchange($u, $p);
+  }
+  elsif ($cmd eq 'C') {
+    # In-game sector chat
+    door_chat_input($DOOR_NAME);
+  }
   elsif ($cmd eq '?') {
     _st_help();
     door_pause();
@@ -408,7 +439,7 @@ sub _st_display_sector {
     $config{'systemcolor'} . "  Turns: " . $config{'datacolor'} . $p->{turns} .
     $config{'systemcolor'} . "  Credits: " . $config{'datacolor'} . door_money($p->{credits}) .
     $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 55) . $RST, 1);
+  door_hrule(55);
 
   # Warps
   my $warp_str = join(", ", map { $_ + 1 } @{$sector->{warps}});
@@ -519,6 +550,9 @@ sub _st_warp {
     }
     _st_save_universe($u);
   }
+
+  # Move broker room to match new sector
+  door_broker_move("door-$DOOR_NAME-sector-" . $p->{sector});
 }
 
 # ============================================================================
@@ -538,7 +572,7 @@ sub _st_port {
     door_clear();
     writeline($config{'themecolor'} . " Port: " . $port->{name} .
       $config{'systemcolor'} . " [" . $type . "]" . $RST, 1);
-    writeline($config{'linecolor'} . " " . ("-" x 45) . $RST, 1);
+    door_hrule(45, $config{'linecolor'});
     writeline($config{'systemcolor'} . " Credits: " . $config{'datacolor'} . door_money($p->{credits}) .
       $config{'systemcolor'} . "  Holds: " . $config{'datacolor'} . _st_free_holds($p) . "/" . $p->{holds} .
       $RST, 1);
@@ -546,6 +580,7 @@ sub _st_port {
 
     # Show commodities
     writeline($config{'systemcolor'} . sprintf("  %-4s %-12s %8s %8s %8s", "#", "Commodity", "Port", "Price", "Cargo") . $RST, 1);
+    door_hrule(46, $config{'linecolor'});
     for my $i (0 .. 2) {
       my $action = substr($type, $i, 1);
       my $action_str = $action eq 'B' ? "BUYING" : "SELLING";
@@ -639,6 +674,13 @@ sub _st_free_holds {
   return $p->{holds} - $used;
 }
 
+sub _st_cargo_used {
+  my ($p) = @_;
+  my $used = 0;
+  $used += $_ for @{$p->{cargo}};
+  return $used;
+}
+
 # ============================================================================
 # PLANETS
 # ============================================================================
@@ -655,7 +697,7 @@ sub _st_land_planet {
   my $pl = $sector->{planet};
   writeline("", 1);
   writeline($config{'themecolor'} . " Landing on " . $pl->{name} . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 30) . $RST, 1);
+  door_hrule(30);
   writeline($config{'systemcolor'} . " Owner: " . $config{'datacolor'} . ($pl->{owner} || "Unclaimed") . $RST, 1);
   writeline($config{'systemcolor'} . " Ore: " . $config{'datacolor'} . $pl->{ore} .
     $config{'systemcolor'} . "  Organics: " . $config{'datacolor'} . $pl->{organics} .
@@ -830,7 +872,11 @@ sub _st_attack {
 
     # Broadcast notable kills
     if ($p->{kills} % 10 == 0) {
-      door_broadcast($DOOR_NAME, "$info{'handle'} has destroyed $p->{kills} pirates in Star Trader!");
+      my $bc = "$info{'handle'} has destroyed $p->{kills} pirates in Star Trader!";
+      door_broadcast($DOOR_NAME, $bc);
+      _st_post_news($bc);
+    } elsif ($p->{kills} == 1) {
+      _st_post_news("$info{'handle'} destroyed their first pirate!");
     }
     door_submit_score($DOOR_NAME, $p->{experience}, { kills => $p->{kills} });
   } else {
@@ -957,7 +1003,7 @@ sub _st_ship_info {
   my $sc = $SHIP_CLASSES[$p->{ship_class}];
   writeline("", 1);
   writeline($config{'themecolor'} . " Ship Status" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 35) . $RST, 1);
+  door_hrule(35);
   writeline($config{'systemcolor'} . " Ship: " . $config{'usercolor'} . $sc->{name} . $RST, 1);
   writeline($config{'systemcolor'} . " Sector: " . $config{'datacolor'} . ($p->{sector}+1) . $RST, 1);
   writeline($config{'systemcolor'} . " Credits: " . $config{'datacolor'} . door_money($p->{credits}) . $RST, 1);
@@ -981,7 +1027,7 @@ sub _st_ship_info {
 sub _st_help {
   door_clear();
   writeline($config{'themecolor'} . " Star Trader Commands" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 40) . $RST, 1);
+  door_hrule(40);
   my @help = (
     ['M/W', 'Move/Warp to sector'],
     ['P',   'Enter port (trade)'],
@@ -993,6 +1039,9 @@ sub _st_help {
     ['T',   'Attack (fighters in sector)'],
     ['N',   'Lay mines in sector'],
     ['S',   'Scan for other players'],
+    ['G',   'Galactic news feed'],
+    ['X',   'Trade exchange (player trading)'],
+    ['C',   'Chat (sector chat)'],
     ['R',   'Rankings'],
     ['Q',   'Quit game'],
     ['#',   'Quick warp (type sector number)'],
@@ -1005,6 +1054,202 @@ sub _st_help {
   writeline($config{'systemcolor'} . " Port Types: B=Buying from you, S=Selling to you" . $RST, 1);
   writeline($config{'systemcolor'} . " Commodities: Ore, Organics, Equipment" . $RST, 1);
   writeline($config{'systemcolor'} . " Galaxy: " . $config{'datacolor'} . "$NUM_SECTORS sectors, $NUM_PORTS ports, $NUM_PLANETS planets" . $RST, 1);
+}
+
+# ============================================================================
+# MULTIPLAYER - Galactic News Feed
+# ============================================================================
+
+sub _st_galactic_news {
+  my ($u, $p) = @_;
+  door_clear();
+  writeline($config{'themecolor'} . " Galactic News Network" . $RST, 1);
+  door_hrule(40);
+  writeline("", 1);
+
+  my $news = door_load_shared($DOOR_NAME, "news.dat") // { items => [] };
+  my @items = @{$news->{items}};
+
+  if (@items) {
+    for my $item (reverse @items[-15..-1]) {
+      next unless defined $item;
+      writeline($config{'datacolor'} . "  " . $item . $RST, 1);
+    }
+  } else {
+    writeline($config{'systemcolor'} . "  No recent galactic news." . $RST, 1);
+  }
+
+  # Show active players
+  writeline("", 1);
+  my @online = door_get_online_players($DOOR_NAME);
+  if (@online) {
+    writeline($config{'systemcolor'} . " Active captains: " .
+      join(", ", map { $config{'usercolor'} . $_ . $RST } @online), 1);
+  }
+  writeline("", 1);
+  door_pause();
+}
+
+# Post a news item to the galactic feed
+sub _st_post_news {
+  my ($msg) = @_;
+  my $news = door_load_shared($DOOR_NAME, "news.dat") // { items => [] };
+  push @{$news->{items}}, $msg;
+  if (scalar @{$news->{items}} > 25) {
+    splice @{$news->{items}}, 0, scalar(@{$news->{items}}) - 25;
+  }
+  door_save_shared($DOOR_NAME, "news.dat", $news);
+}
+
+# ============================================================================
+# MULTIPLAYER - Player Trade Exchange
+# ============================================================================
+
+sub _st_trade_exchange {
+  my ($u, $p) = @_;
+  my $playing = 1;
+  while ($playing) {
+    door_clear();
+    writeline($config{'themecolor'} . " Galactic Trade Exchange" . $RST, 1);
+    door_hrule(40);
+    writeline("", 1);
+
+    # Show open offers
+    my $board = door_load_shared($DOOR_NAME, "exchange.dat") // { offers => [] };
+    my @offers = @{$board->{offers}};
+    # Expire offers older than 24 hours
+    my $now = time();
+    @offers = grep { $now - $_->{posted} < 86400 } @offers;
+
+    if (@offers) {
+      writeline($config{'systemcolor'} . " Open Trade Offers:" . $RST, 1);
+      my $i = 1;
+      for my $offer (@offers) {
+        next if $offer->{seller} eq $info{'handle'};  # Skip own offers
+        my $comm = $COMMODITIES[$offer->{commodity}]{name};
+        writeline($config{'datacolor'} . "  $i. " . $config{'usercolor'} . $offer->{seller} .
+          $config{'systemcolor'} . " selling " . $config{'datacolor'} .
+          "$offer->{amount} $comm" . $config{'systemcolor'} . " at " .
+          $config{'usercolor'} . door_money($offer->{price_each}) . "/unit" . $RST, 1);
+        $i++;
+      }
+    } else {
+      writeline($config{'systemcolor'} . "  No open offers right now." . $RST, 1);
+    }
+    writeline("", 1);
+
+    my $choice = door_menu([
+      ['P', 'Post a sell offer'],
+      ['A', 'Accept an offer'],
+      ['R', 'Remove my offers'],
+      ['Q', 'Leave exchange'],
+    ], "Exchange");
+
+    if ($choice eq 'P') {
+      # Post a sell offer
+      writeline($config{'systemcolor'} . " What do you want to sell?" . $RST, 1);
+      my $ci = 0;
+      for my $c (@COMMODITIES) {
+        writeline($config{'datacolor'} . "  $ci. " . $config{'systemcolor'} . $c->{name} .
+          " (you have " . $config{'datacolor'} . $p->{cargo}[$ci] . $RST . ")", 1);
+        $ci++;
+      }
+      my $cnum = door_getnum("Commodity number:", scalar(@COMMODITIES) - 1);
+      if ($p->{cargo}[$cnum] <= 0) {
+        writeline($config{'errorcolor'} . " You have none of that to sell." . $RST, 1);
+        door_pause();
+        next;
+      }
+      my $amt = door_getnum("How many units:", $p->{cargo}[$cnum]);
+      next unless $amt > 0;
+      my $price = door_getnum("Price per unit:", 9999);
+      next unless $price > 0;
+
+      push @{$board->{offers}}, {
+        seller    => $info{'handle'},
+        commodity => $cnum,
+        amount    => $amt,
+        price_each => $price,
+        posted    => time(),
+      };
+      door_save_shared($DOOR_NAME, "exchange.dat", $board);
+      writeline($config{'usercolor'} . " Offer posted!" . $RST, 1);
+      door_pause();
+
+    } elsif ($choice eq 'A') {
+      # Accept an offer
+      my @buyable = grep { $_->{seller} ne $info{'handle'} } @offers;
+      unless (@buyable) {
+        writeline($config{'errorcolor'} . " No offers to accept." . $RST, 1);
+        door_pause();
+        next;
+      }
+      my $onum = door_getnum("Offer number:", scalar(@buyable));
+      next unless $onum > 0 && $onum <= scalar(@buyable);
+      my $offer = $buyable[$onum - 1];
+
+      my $total = $offer->{amount} * $offer->{price_each};
+      writeline($config{'systemcolor'} . " Buy $offer->{amount} " . $COMMODITIES[$offer->{commodity}]{name} .
+        " from " . $config{'usercolor'} . $offer->{seller} . $config{'systemcolor'} .
+        " for " . $config{'datacolor'} . door_money($total) . "?" . $RST, 1);
+
+      # Check capacity and credits
+      my $free_holds = $SHIP_CLASSES[$p->{ship_class}]{holds} - _st_cargo_used($p);
+      if ($offer->{amount} > $free_holds) {
+        writeline($config{'errorcolor'} . " Not enough cargo space (need $offer->{amount}, have $free_holds)." . $RST, 1);
+        door_pause();
+        next;
+      }
+      if ($p->{credits} < $total) {
+        writeline($config{'errorcolor'} . " You can't afford that." . $RST, 1);
+        door_pause();
+        next;
+      }
+
+      if (door_yesno("Confirm purchase?")) {
+        $p->{credits} -= $total;
+        $p->{cargo}[$offer->{commodity}] += $offer->{amount};
+
+        # Pay the seller via their save file
+        my $seller_save = door_load($DOOR_NAME, $offer->{seller});
+        if ($seller_save) {
+          $seller_save->{credits} = ($seller_save->{credits} // 0) + $total;
+          door_save($DOOR_NAME, $seller_save, $offer->{seller});
+        }
+        # Send message to seller
+        door_send_message($DOOR_NAME, $offer->{seller},
+          "$info{'handle'} bought $offer->{amount} " . $COMMODITIES[$offer->{commodity}]{name} .
+          " from your exchange offer for " . door_money($total) . ".");
+
+        # Remove fulfilled offer from board
+        @{$board->{offers}} = grep {
+          !($_->{seller} eq $offer->{seller} &&
+            $_->{commodity} == $offer->{commodity} &&
+            $_->{posted} == $offer->{posted})
+        } @{$board->{offers}};
+        door_save_shared($DOOR_NAME, "exchange.dat", $board);
+
+        my $news_msg = "$info{'handle'} bought " . $COMMODITIES[$offer->{commodity}]{name} .
+          " from " . $offer->{seller} . " on the Exchange.";
+        _st_post_news($news_msg);
+
+        writeline($config{'usercolor'} . " Purchase complete!" . $RST, 1);
+        door_pause();
+      }
+
+    } elsif ($choice eq 'R') {
+      # Remove own offers
+      my $before = scalar @{$board->{offers}};
+      @{$board->{offers}} = grep { $_->{seller} ne $info{'handle'} } @{$board->{offers}};
+      my $removed = $before - scalar @{$board->{offers}};
+      door_save_shared($DOOR_NAME, "exchange.dat", $board);
+      writeline($config{'systemcolor'} . " Removed $removed offer(s)." . $RST, 1);
+      door_pause();
+
+    } elsif ($choice eq 'Q') {
+      $playing = 0;
+    }
+  }
 }
 
 # ============================================================================
@@ -1070,7 +1315,7 @@ sub _st_scan_players {
 
   writeline(sprintf("  %s%-20s %-6s %-8s %-18s %-6s%s",
     $config{'systemcolor'}, "Trader", "Kills", "Credits", "Ship", "Align", $RST), 1);
-  writeline($config{'linecolor'} . " " . ("-" x 62) . $RST, 1);
+  door_hrule(62);
 
   for my $name (@all_players) {
     next if lc($name) eq lc($info{'handle'});

@@ -117,6 +117,8 @@ sub druglord_main {
   # Set iamat for who's online
   iamat($info{'handle'}, "Playing DrugLord");
 
+  door_broker_connect("druglord", "door-druglord-streets");
+
   # Show title screen
   _dl_title_screen();
 
@@ -138,6 +140,7 @@ sub druglord_main {
   # Game over
   _dl_game_over(\%game);
 
+  door_broker_disconnect();
   iamat($info{'handle'}, "Finished DrugLord");
 }
 
@@ -300,7 +303,7 @@ sub _dl_show_status {
     $config{'systemcolor'} . "  Guns: " . $config{'datacolor'} . "$gun_count" .
     $RST, 1);
 
-  writeline($config{'linecolor'} . " " . ("-" x 60) . $RST, 1);
+  door_hrule(60);
 
   # Show events
   for my $ev (@{$g->{events}}) {
@@ -310,6 +313,7 @@ sub _dl_show_status {
 
   # Drug price list
   writeline($config{'systemcolor'} . sprintf("  %-4s %-12s %10s %8s", "#", "Drug", "Price", "Owned") . $RST, 1);
+  door_hrule(38, $config{'linecolor'});
   for my $i (0 .. $#DRUGS) {
     next if $g->{prices}[$i] == 0;  # Not available here
     my $carried = $g->{drugs}[$i]{carried};
@@ -666,18 +670,97 @@ sub _dl_total_drugs {
 sub _dl_trade_menu {
   my ($g) = @_;
 
+  # Compact status bar for trade menu - just enough to see current state
+  my $_dl_trade_header = sub {
+    my ($g) = @_;
+    door_clear();
+    my $loc  = $LOCATIONS[$g->{location}];
+    my $net  = $g->{cash} + $g->{bank} - $g->{debt};
+    my $space = _dl_free_space($g);
+    writeline($config{'themecolor'} . " DrugLord" .
+      $config{'systemcolor'} . "  Day " . $config{'datacolor'} . "$g->{turn}" .
+      $config{'systemcolor'} . " of " . $config{'datacolor'} . "$MAX_TURNS" .
+      $config{'systemcolor'} . "  |  " . $config{'usercolor'} . $loc->{name} . $RST, 1);
+    writeline($config{'systemcolor'} . " Cash: " . $config{'datacolor'} . door_money($g->{cash}) .
+      $config{'systemcolor'} . "  Net: " . ($net >= 0 ? $config{'usercolor'} : $config{'errorcolor'}) . door_money($net) .
+      $config{'systemcolor'} . "  Space: " . $config{'datacolor'} . "$space" .
+      $config{'systemcolor'} . "  Health: " . _dl_health_color($g->{health}) . "$g->{health}%" . $RST, 1);
+    door_hrule(50);
+  };
+
   my $trading = 1;
   while ($trading) {
-    my @options = (
-      ['B', 'Buy drugs'],
-      ['S', 'Sell drugs'],
-      ['J', 'Jet to new location'],
-      ['I', 'Inventory'],
-      ['H', 'High scores'],
-      ['Q', 'Quit game'],
+    $_dl_trade_header->($g);
+
+    # Layout:
+    # Left cell: "  %-4s %-12s %10s %8s" = 2+4+1+12+1+10+1+8 = 39 visible chars
+    # Separator:  " " + vertical + " " = 3 chars
+    # Total row width: 42 + menu text
+    # Full-width separator matches _dl_show_status: 60 chars
+    my $FW  = 60;  # full-width separator
+    my $h   = boxchar('horizontal');
+    my $sep = $config{'linecolor'} . " " . ($h x $FW) . $RST;
+    my $vl  = " " . $config{'linecolor'} . boxchar('vertical') . $RST . " ";
+
+    # Events (full width, all together, then one separator)
+    for my $ev (@{$g->{events}}) {
+      writeline($ev, 1);
+    }
+    # Single separator after events (or after header if no events)
+    writeline($sep, 1);
+
+    # Column headers
+    # Drug rows: "  " + "%-4s" + "%-12s " + "%10s " + "%8s" = 2+4+13+11+8 = 38 chars
+    # Header must match: "  " + "#   " + "Drug         " + "     Price " + "   Owned" = 38
+    writeline(
+      "  " . $config{'systemcolor'} . sprintf("%-4s%-13s%10s %8s", "#", "Drug", "Price", "Owned") . $RST .
+      $vl . $config{'systemcolor'} . "Commands" . $RST,
+      1);
+    writeline($sep, 1);
+
+    # Drug list (left) paired with menu items (right)
+    my @menu_labels = (
+      $config{'promptcolor'} . "[B]" . $config{'usercolor'} . "uy drugs",
+      $config{'promptcolor'} . "[S]" . $config{'usercolor'} . "ell drugs",
+      $config{'promptcolor'} . "[J]" . $config{'usercolor'} . "et to location",
+      $config{'promptcolor'} . "[I]" . $config{'usercolor'} . "nventory",
+      $config{'promptcolor'} . "[R]" . $config{'usercolor'} . "ob a dealer",
+      $config{'promptcolor'} . "[C]" . $config{'usercolor'} . "hat",
+      $config{'promptcolor'} . "[N]" . $config{'usercolor'} . "ews",
+      $config{'promptcolor'} . "[H]" . $config{'usercolor'} . "igh scores",
+      $config{'promptcolor'} . "[Q]" . $config{'usercolor'} . "uit game",
     );
 
-    my $choice = door_menu(\@options, "What now");
+    my @drug_rows;
+    for my $i (0 .. $#DRUGS) {
+      next if $g->{prices}[$i] == 0;
+      my $carried = $g->{drugs}[$i]{carried};
+      my $ccolor  = $carried > 0 ? $config{'usercolor'} : $config{'linecolor'};
+      # "  %-4s %-12s %10s %8s" = 39 visible chars
+      push @drug_rows,
+        "  " .
+        $config{'promptcolor'} . sprintf("%-4s", $i + 1) .
+        $config{'themecolor'}  . sprintf("%-12s ", $DRUGS[$i]{name}) .
+        $config{'datacolor'}   . sprintf("%10s ", door_money($g->{prices}[$i])) .
+        $ccolor                . sprintf("%8s", ($carried > 0 ? $carried : "-")) .
+        $RST;
+    }
+
+    my $nrows = @drug_rows > @menu_labels ? scalar @drug_rows : scalar @menu_labels;
+    for my $i (0 .. $nrows - 1) {
+      # Left: drug row (38 visible) or 38 spaces if none
+      my $lpart = $drug_rows[$i] // (" " x 38);
+      my $rpart = $menu_labels[$i] // "";
+      writeline($lpart . $vl . $rpart . $RST, 1);
+    }
+
+    # Bottom separator
+    writeline($sep, 1);
+
+    writeline("", 1);
+    writeline($config{'promptcolor'} . " What now: " . $RST);
+    my $choice = uc(waitkey(""));
+    writeline("", 1);
 
     if ($choice eq 'B') {
       _dl_buy($g);
@@ -687,6 +770,12 @@ sub _dl_trade_menu {
       $trading = 0;
     } elsif ($choice eq 'I') {
       _dl_show_inventory($g);
+    } elsif ($choice eq 'C') {
+      door_chat_input("druglord");
+    } elsif ($choice eq 'N') {
+      _dl_street_news($g);
+    } elsif ($choice eq 'R') {
+      _dl_rob_player($g);
     } elsif ($choice eq 'H') {
       door_show_scores("druglord", "DrugLord High Scores", "Net Worth");
       door_pause();
@@ -706,6 +795,7 @@ sub _dl_trade_menu {
 
 sub _dl_buy {
   my ($g) = @_;
+  _dl_show_status($g);
   my $space = _dl_free_space($g);
   if ($space <= 0) {
     writeline($config{'errorcolor'} . "  Your coat is full!" . $RST, 1);
@@ -750,6 +840,7 @@ sub _dl_buy {
 
 sub _dl_sell {
   my ($g) = @_;
+  _dl_show_status($g);
   if (_dl_total_drugs($g) == 0) {
     writeline($config{'errorcolor'} . "  You have nothing to sell!" . $RST, 1);
     return;
@@ -805,7 +896,7 @@ sub _dl_show_inventory {
   my ($g) = @_;
   writeline("", 1);
   writeline($config{'themecolor'} . "  Your Inventory" . $RST, 1);
-  writeline($config{'linecolor'} . "  " . ("-" x 40) . $RST, 1);
+  door_hrule(40);
 
   my $any = 0;
   for my $i (0 .. $#DRUGS) {
@@ -839,7 +930,23 @@ sub _dl_show_inventory {
 sub _dl_jet {
   my ($g) = @_;
 
+  # Show compact status header
+  door_clear();
+  my $loc_name = $LOCATIONS[$g->{location}]{name};
+  my $net      = $g->{cash} + $g->{bank} - $g->{debt};
+  my $space    = _dl_free_space($g);
+  writeline($config{'themecolor'} . " DrugLord" .
+    $config{'systemcolor'} . "  Day " . $config{'datacolor'} . "$g->{turn}" .
+    $config{'systemcolor'} . " of " . $config{'datacolor'} . "$MAX_TURNS" .
+    $config{'systemcolor'} . "  |  " . $config{'usercolor'} . $loc_name . $RST, 1);
+  writeline($config{'systemcolor'} . " Cash: " . $config{'datacolor'} . door_money($g->{cash}) .
+    $config{'systemcolor'} . "  Net: " . ($net >= 0 ? $config{'usercolor'} : $config{'errorcolor'}) . door_money($net) .
+    $config{'systemcolor'} . "  Space: " . $config{'datacolor'} . "$space" .
+    $config{'systemcolor'} . "  Health: " . _dl_health_color($g->{health}) . "$g->{health}%" . $RST, 1);
+  door_hrule(60);
+  writeline("", 1);
   writeline($config{'themecolor'} . "  Where to, man?" . $RST, 1);
+  writeline("", 1);
   for my $i (0 .. $#LOCATIONS) {
     my $marker = ($i == $g->{location}) ? "*" : " ";
     my $extras = "";
@@ -888,8 +995,148 @@ sub _dl_jet {
 }
 
 # ============================================================================
-# GAME OVER
+# MULTIPLAYER - Street News Feed
 # ============================================================================
+
+sub _dl_post_news {
+  my ($msg) = @_;
+  my $news = door_load_shared("druglord", "news.dat") // { items => [] };
+  push @{$news->{items}}, $msg;
+  if (scalar @{$news->{items}} > 20) {
+    splice @{$news->{items}}, 0, scalar(@{$news->{items}}) - 20;
+  }
+  door_save_shared("druglord", "news.dat", $news);
+}
+
+sub _dl_street_news {
+  my ($g) = @_;
+  door_clear();
+  writeline($config{'themecolor'} . "  STREET NEWS" . $RST, 1);
+  door_hrule(38);
+  writeline("", 1);
+
+  my $news = door_load_shared("druglord", "news.dat") // { items => [] };
+  my @items = @{$news->{items}};
+
+  if (@items) {
+    for my $item (reverse @items[-12..-1]) {
+      next unless defined $item;
+      writeline($config{'datacolor'} . "  " . $item . $RST, 1);
+    }
+  } else {
+    writeline($config{'systemcolor'} . "  The streets are quiet." . $RST, 1);
+  }
+
+  # Also show who's playing right now
+  writeline("", 1);
+  my @online = door_get_online_players("druglord");
+  if (@online) {
+    writeline($config{'systemcolor'} . "  Active dealers: " .
+      join(", ", map { $config{'usercolor'} . $_ . $RST } @online), 1);
+  }
+
+  # Check for messages from players who robbed/were robbed
+  door_show_messages("druglord");
+
+  writeline("", 1);
+  door_pause();
+}
+
+# ============================================================================
+# MULTIPLAYER - Rob Another Dealer
+# ============================================================================
+
+sub _dl_rob_player {
+  my ($g) = @_;
+
+  # Need at least 1 gun to rob someone
+  if (!@{$g->{guns}}) {
+    writeline($config{'errorcolor'} . "  You need a gun to rob someone." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  # Get list of other players from the all-player list
+  my @all = door_get_all_players("druglord");
+  @all = grep { $_ ne $info{'handle'} } @all;
+
+  unless (@all) {
+    writeline($config{'errorcolor'} . "  No other dealers to rob." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  door_clear();
+  writeline($config{'themecolor'} . "  ROB A DEALER" . $RST, 1);
+  door_hrule(30);
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  Known dealers on the street:" . $RST, 1);
+  my $i = 1;
+  for my $p (@all) {
+    writeline($config{'datacolor'} . "  $i. " . $config{'usercolor'} . $p . $RST, 1);
+    $i++;
+  }
+  writeline("", 1);
+
+  my $num = door_getnum("Rob which dealer (0=cancel):", scalar @all);
+  return if $num == 0;
+
+  my $target = $all[$num - 1];
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . "  Attempting to rob " . $config{'usercolor'} . $target . $config{'systemcolor'} . "..." . $RST, 1);
+  door_pause("Press any key to try...");
+
+  # Rob chance: guns help attacker
+  my $attacker_power = scalar(@{$g->{guns}}) * 20 + 30 + int(rand(20));
+  my $defender_power = 40 + int(rand(30));  # Unknown opponent, moderate defense
+  my $success_chance = int($attacker_power / ($attacker_power + $defender_power) * 100);
+
+  if (rand(100) < $success_chance) {
+    # Success - steal from a bounty pool (symbolic since DL doesn't persist mid-game)
+    my $stolen = 500 + int(rand(2500));
+
+    $g->{cash} += $stolen;
+    writeline($config{'usercolor'} . "  Score! You grabbed " . door_money($stolen) . " from $target!" . $RST, 1);
+
+    # Notify the victim
+    door_send_message("druglord", $target,
+      "$info{'handle'} hit you on the street and grabbed " . door_money($stolen) . ". Get them back!");
+
+    # Post to street news
+    _dl_post_news("$info{'handle'} robbed $target for " . door_money($stolen) . ".");
+    door_broadcast("druglord", "$info{'handle'} hit $target on the street!")
+      if $stolen > 1500;
+
+    # Risky business - small health cost
+    my $health_loss = 5 + int(rand(10));
+    $g->{health} -= $health_loss;
+    writeline($config{'systemcolor'} . "  (Lost $health_loss health in the scuffle)" . $RST, 1);
+  } else {
+    # Failed - lose health and possibly cash
+    my $health_loss = 10 + int(rand(25));
+    $g->{health} -= $health_loss;
+    writeline($config{'errorcolor'} . "  They fought back! You lost $health_loss health." . $RST, 1);
+
+    if (rand(100) < 40) {
+      my $lost = int($g->{cash} * (0.05 + rand(0.15)));
+      if ($lost > 0 && $lost <= $g->{cash}) {
+        $g->{cash} -= $lost;
+        writeline($config{'errorcolor'} . "  They grabbed " . door_money($lost) . " off you!" . $RST, 1);
+        door_send_message("druglord", $target,
+          "$info{'handle'} tried to rob you but failed - you took " . door_money($lost) . " from them!");
+        _dl_post_news("$info{'handle'} tried to rob $target and got stomped.");
+      } else {
+        _dl_post_news("$info{'handle'} tried to rob $target and failed.");
+      }
+    } else {
+      _dl_post_news("$info{'handle'} tried to rob $target and failed.");
+    }
+  }
+
+  $g->{health} = 0 if $g->{health} < 0;
+  door_pause();
+}
 
 sub _dl_game_over {
   my ($g) = @_;
@@ -923,7 +1170,7 @@ sub _dl_game_over {
   writeline($config{'systemcolor'} . "  Bank savings:  " . $config{'datacolor'} . door_money($g->{bank}) . $RST, 1);
   writeline($config{'systemcolor'} . "  Drug value:    " . $config{'datacolor'} . door_money($drug_value) . $RST, 1);
   writeline($config{'systemcolor'} . "  Debt:         " . $config{'errorcolor'} . "-" . door_money($g->{debt}) . $RST, 1);
-  writeline($config{'linecolor'} . "  " . ("-" x 30) . $RST, 1);
+  door_hrule(30);
   writeline($config{'systemcolor'} . "  Net Worth:     " .
     ($net >= 0 ? $config{'usercolor'} : $config{'errorcolor'}) . door_money($net) . $RST, 1);
   writeline("", 1);
@@ -952,12 +1199,16 @@ sub _dl_game_over {
     _dl_save_economy($g);
     writeline("", 1);
     writeline($config{'usercolor'} . "  * You are the new KINGPIN! *" . $RST, 1);
+    my $bc;
     if ($old_kingpin && $old_kingpin ne $info{'handle'}) {
-      door_broadcast("druglord", "$info{'handle'} has dethroned $old_kingpin as the Kingpin of Drug Lord!");
+      $bc = "$info{'handle'} has dethroned $old_kingpin as the Kingpin of Drug Lord!";
+      door_broadcast("druglord", $bc);
       door_send_message("druglord", $old_kingpin, "$info{'handle'} has taken your Kingpin title with " . door_money($net) . " net worth!");
     } else {
-      door_broadcast("druglord", "$info{'handle'} is the Kingpin of Drug Lord with " . door_money($net) . " net worth!");
+      $bc = "$info{'handle'} is the Kingpin of Drug Lord with " . door_money($net) . " net worth!";
+      door_broadcast("druglord", $bc);
     }
+    _dl_post_news($bc);
   }
 
   # Log to activity feed

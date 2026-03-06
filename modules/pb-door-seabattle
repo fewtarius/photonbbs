@@ -85,7 +85,7 @@ sub _sb_records {
   my @all = door_get_all_players("seabattle");
   writeline(sprintf("  %s%-20s %s%-6s %-6s%s",
     $config{'systemcolor'}, "Player", $config{'datacolor'}, "Wins", "Losses", $RST), 1);
-  writeline($config{'linecolor'} . " " . ("-" x 36) . $RST, 1);
+  door_hrule(36);
   for my $name (@all) {
     my $pd = door_load_player("seabattle", $name);
     next unless $pd;
@@ -322,8 +322,21 @@ sub _sb_display {
   writeline("", 1);
 
   # Show both grids side by side
-  writeline($config{'themecolor'} . "  Your Fleet            Enemy Waters" . $RST, 1);
-  writeline($config{'systemcolor'} . "   1234567890           1234567890" . $RST, 1);
+  my $_sb_h10 = boxchar('horizontal') x 10;
+  my $_sb_h12 = boxchar('horizontal') x 12;
+  writeline($config{'themecolor'} .
+    "  " . boxchar('topleft') . $_sb_h12 . boxchar('topright') .
+    "    " .
+    boxchar('topleft') . $_sb_h12 . boxchar('topright') . $RST, 1);
+  writeline($config{'themecolor'} .
+    "  " . boxchar('vertical') . " Your Fleet " . boxchar('vertical') .
+    "    " .
+    boxchar('vertical') . " Enemy Waters" . boxchar('vertical') . $RST, 1);
+  writeline($config{'linecolor'} .
+    "  " . boxchar('tright') . $_sb_h12 . boxchar('tleft') .
+    "    " .
+    boxchar('tright') . $_sb_h12 . boxchar('tleft') . $RST, 1);
+  writeline($config{'systemcolor'} . "   " . "1234567890" . "             " . "1234567890" . $RST, 1);
 
   for my $y (0 .. $GRID_SIZE - 1) {
     my $row_label = chr(ord('A') + $y);

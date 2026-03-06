@@ -126,6 +126,9 @@ sub reddragon_main {
   # Check for daily reset
   _rd_daily_reset($p);
 
+  # Connect to broker for in-town chat
+  door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-town");
+
   _rd_title_screen();
   door_show_messages($DOOR_NAME);
   door_pause();
@@ -144,12 +147,14 @@ sub reddragon_main {
     elsif ($ch eq 'V') { _rd_view_stats($p); }
     elsif ($ch eq 'L') { _rd_player_list(); }
     elsif ($ch eq 'P') { _rd_pvp_attack($p); }
+    elsif ($ch eq 'C') { door_chat_input($DOOR_NAME); }
     elsif ($ch eq 'D') { _rd_dragon($p); }
     elsif ($ch eq 'S') { door_show_scores($DOOR_NAME, "Red Dragon Hall of Fame", "Kills", 10); door_pause(); }
     elsif ($ch eq 'Q') { $quit = 1; }
   }
 
   door_save($DOOR_NAME, $p);
+  door_broker_disconnect();
   writeline("", 1);
   writeline($config{'themecolor'} . " The town gates close behind you..." . $RST, 1);
   writeline("", 1);
@@ -166,7 +171,7 @@ sub _rd_title_screen {
   writeline($config{'errorcolor'} . "          Red Dragon" . $RST, 1);
   writeline($config{'themecolor'} . "              A PhotonBBS Door" . $RST, 1);
   writeline("", 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   writeline("", 1);
   writeline($config{'systemcolor'} . "  In the days of old, a mighty Red Dragon" . $RST, 1);
   writeline($config{'systemcolor'} . "  terrorized a small village. Many brave" . $RST, 1);
@@ -239,7 +244,7 @@ sub _rd_town_menu {
 
   door_clear();
   writeline($config{'themecolor'} . " The Town of Havenwood" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   writeline("", 1);
   writeline($config{'usercolor'} . " $info{'handle'}" . $config{'systemcolor'} . " the " . $config{'datacolor'} . "$title" . $RST, 1);
   writeline($config{'systemcolor'} . " Level " . $config{'datacolor'} . "$p->{level}" .
@@ -259,6 +264,7 @@ sub _rd_town_menu {
   writeline("  " . $config{'promptcolor'} . "T" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Training Grounds" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "V" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "View Stats" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "L" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Player List" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "C" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Town Chat" . $RST, 1);
   if ($p->{pvp_fights} > 0) {
     writeline("  " . $config{'promptcolor'} . "P" . $config{'themecolor'} . " ... " . $config{'errorcolor'} . "Attack a Player ($p->{pvp_fights} left)" . $RST, 1);
   }
@@ -268,6 +274,25 @@ sub _rd_town_menu {
   writeline("  " . $config{'promptcolor'} . "S" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Hall of Fame" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Quit" . $RST, 1);
   writeline("", 1);
+
+  # Show any incoming town chat
+  my @chat = door_chat_poll($DOOR_NAME);
+  for my $m (@chat) {
+    writeline($config{'linecolor'} . $m . $RST, 1);
+  }
+
+  # Show who else is in town
+  my @town = door_broker_room_players();
+  if (@town) {
+    my @others = grep { $_ !~ /^door-$DOOR_NAME-/ || ($_ =~ s/^door-[^-]+-//r) ne ($info{'handle'} // '') } @town;
+    @others = grep { defined } map { /^door-[^-]+-(.+)$/ ? $1 : undef } @town;
+    @others = grep { $_ ne ($info{'handle'} // '') } @others;
+    if (@others) {
+      writeline($config{'datacolor'} . " Also in town: " .
+        join(", ", map { $config{'usercolor'} . $_ . $RST } @others), 1);
+    }
+  }
+
   writeline($config{'systemcolor'} . " Your choice? " . $RST);
 }
 
@@ -373,10 +398,18 @@ sub _rd_forest_combat {
   writeline("", 1);
 
   my $fled = 0;
+  my @combat_log = ();
   while ($mhp > 0 && $p->{hp} > 0) {
-    # Display status
-    writeline($config{'systemcolor'} . " Your HP: " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" .
-      $config{'systemcolor'} . "   $mname HP: " . $config{'errorcolor'} . "$mhp" . $RST, 1);
+    door_clear();
+    writeline($config{'themecolor'} . " Forest Combat" . $RST, 1);
+    door_hrule(50);
+    writeline($config{'errorcolor'} . " " . $mname .
+      $config{'systemcolor'} . "   HP: " . $config{'errorcolor'} . $mhp . $RST, 1);
+    writeline($config{'usercolor'} . " " . $info{'handle'} .
+      $config{'systemcolor'} . "   HP: " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" . $RST, 1);
+    writeline("", 1);
+    for my $log_line (@combat_log) { writeline($log_line, 1); }
+    @combat_log = ();
     writeline("", 1);
     writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} . "ttack  " .
               $config{'promptcolor'} . "R" . $config{'themecolor'} . "un  " .
@@ -391,8 +424,7 @@ sub _rd_forest_combat {
       $pdmg -= int($mdef * 0.3);
       $pdmg = 1 if $pdmg < 1;
       $mhp -= $pdmg;
-      writeline("", 1);
-      writeline($config{'usercolor'} . " You hit the $mname for " . $config{'datacolor'} . "$pdmg" . $config{'usercolor'} . " damage!" . $RST, 1);
+      push @combat_log, $config{'usercolor'} . " You hit the $mname for " . $config{'datacolor'} . "$pdmg" . $config{'usercolor'} . " damage!" . $RST;
 
       # Monster attacks back (if alive)
       if ($mhp > 0) {
@@ -401,9 +433,8 @@ sub _rd_forest_combat {
         $mdmg -= int($total_def * 0.3);
         $mdmg = 1 if $mdmg < 1;
         $p->{hp} -= $mdmg;
-        writeline($config{'errorcolor'} . " The $mname hits you for " . $config{'datacolor'} . "$mdmg" . $config{'errorcolor'} . " damage!" . $RST, 1);
+        push @combat_log, $config{'errorcolor'} . " The $mname hits you for " . $config{'datacolor'} . "$mdmg" . $config{'errorcolor'} . " damage!" . $RST;
       }
-      writeline("", 1);
     }
     elsif ($ch eq 'R') {
       if (rand(100) < 60) {
@@ -412,16 +443,14 @@ sub _rd_forest_combat {
         $fled = 1;
         last;
       } else {
-        writeline("", 1);
-        writeline($config{'errorcolor'} . " You couldn't escape!" . $RST, 1);
+        push @combat_log, $config{'errorcolor'} . " You couldn't escape!" . $RST;
         # Monster gets free hit
         my $total_def = $p->{def} + $ARMORS[$p->{armor}]{def};
         my $mdmg = int(rand($mstr) * 0.8) + int($mstr * 0.3);
         $mdmg -= int($total_def * 0.3);
         $mdmg = 1 if $mdmg < 1;
         $p->{hp} -= $mdmg;
-        writeline($config{'errorcolor'} . " The $mname hits you for " . $config{'datacolor'} . "$mdmg" . $config{'errorcolor'} . " damage!" . $RST, 1);
-        writeline("", 1);
+        push @combat_log, $config{'errorcolor'} . " The $mname hits you for " . $config{'datacolor'} . "$mdmg" . $config{'errorcolor'} . " damage!" . $RST;
       }
     }
     elsif ($ch eq 'U') {
@@ -429,12 +458,10 @@ sub _rd_forest_combat {
         $p->{gems}--;
         my $gdmg = int($p->{str} * 2) + int(rand(50));
         $mhp -= $gdmg;
-        writeline("", 1);
-        writeline($config{'datacolor'} . " The gem explodes with energy!" . $RST, 1);
-        writeline($config{'usercolor'} . " You blast the $mname for " . $config{'datacolor'} . "$gdmg" . $config{'usercolor'} . " damage!" . $RST, 1);
-        writeline("", 1);
+        push @combat_log, $config{'datacolor'} . " The gem explodes with energy!" . $RST;
+        push @combat_log, $config{'usercolor'} . " You blast the $mname for " . $config{'datacolor'} . "$gdmg" . $config{'usercolor'} . " damage!" . $RST;
       } else {
-        writeline("", 1);
+        push @combat_log, $config{'systemcolor'} . " No gems!" . $RST;
         writeline($config{'systemcolor'} . " You have no gems!" . $RST, 1);
         writeline("", 1);
       }
@@ -933,7 +960,7 @@ sub _rd_player_list {
 
   writeline(sprintf("  %s%-18s %-4s %-14s %-6s %-6s%s",
     $config{'systemcolor'}, "Name", "Lvl", "Title", "Kills", "Status", $RST), 1);
-  writeline($config{'linecolor'} . " " . ("-" x 56) . $RST, 1);
+  door_hrule(56);
 
   for my $file (sort @files) {
     my $data;

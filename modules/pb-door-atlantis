@@ -115,6 +115,9 @@ my @ARTIFACTS = (
 sub atlantis_main {
   my $p = _atl_load_player();
   _atl_daily_reset($p);
+
+  door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-port");
+
   _atl_title_screen();
   door_pause();
 
@@ -130,10 +133,14 @@ sub atlantis_main {
     elsif ($ch eq 'V') { _atl_view_stats($p); }
     elsif ($ch eq 'H') { door_show_scores($DOOR_NAME, "Atlantis Explorers", "Depth", 10); door_pause(); }
     elsif ($ch eq 'R') { _atl_depth_records(); }
+    elsif ($ch eq 'C') { _atl_cooperative_sites($p); }
+    elsif ($ch eq 'N') { _atl_ocean_news(); }
+    elsif ($ch eq 'T') { door_chat_input($DOOR_NAME); }
     elsif ($ch eq 'Q') { $quit = 1; }
   }
 
   door_save($DOOR_NAME, $p);
+  door_broker_disconnect();
   writeline("", 1);
   writeline($config{'themecolor'} . " You surface and return to port..." . $RST, 1);
   writeline("", 1);
@@ -150,7 +157,7 @@ sub _atl_title_screen {
   writeline($config{'promptcolor'} . "            Atlantis" . $RST, 1);
   writeline($config{'themecolor'} . "      An Underwater Adventure" . $RST, 1);
   writeline("", 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   writeline("", 1);
   writeline($config{'systemcolor'} . "  Ancient maps speak of a lost civilization" . $RST, 1);
   writeline($config{'systemcolor'} . "  buried beneath the waves. Brave divers" . $RST, 1);
@@ -276,7 +283,7 @@ sub _atl_main_menu {
 
   door_clear();
   writeline($config{'themecolor'} . " Port Meridian - Diving Base" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   writeline("", 1);
   writeline($config{'usercolor'} . " $info{'handle'}" . $config{'systemcolor'} . " - Depth Diver" . $RST, 1);
   writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . _afmt($p->{gold}) .
@@ -287,6 +294,14 @@ sub _atl_main_menu {
     $config{'systemcolor'} . "  Exp: " . $config{'datacolor'} . _afmt($p->{exp}) . $RST, 1);
   writeline("", 1);
 
+  # Show active cooperative sites
+  my $sites = door_load_shared($DOOR_NAME, "excavations.dat") // { sites => [] };
+  my @active = grep { ($_->{progress} // 0) < 100 } @{$sites->{sites}};
+  if (@active) {
+    writeline($config{'themecolor'} . " Active Excavation Sites: " . $config{'datacolor'} .
+      scalar(@active) . $RST, 1);
+  }
+
   writeline("  " . $config{'promptcolor'} . "D" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Dive" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "M" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "View Depth Map" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "E" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Equipment Shop" . $RST, 1);
@@ -294,8 +309,18 @@ sub _atl_main_menu {
   writeline("  " . $config{'promptcolor'} . "V" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "View Stats" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "H" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Hall of Fame" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "R" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Depth Records" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "C" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Cooperative Excavation Sites" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "N" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Ocean News" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "T" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Talk (Port Chat)" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Quit" . $RST, 1);
   writeline("", 1);
+
+  # Show any port chat
+  my @chat = door_chat_poll($DOOR_NAME);
+  for my $m (@chat) {
+    writeline($config{'linecolor'} . $m . $RST, 1);
+  }
+
   writeline($config{'systemcolor'} . " Your choice? " . $RST);
 }
 
@@ -406,7 +431,7 @@ sub _atl_dive_screen {
 
   door_clear();
   writeline($config{'themecolor'} . " Depth Level $p->{depth}" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   writeline($config{'systemcolor'} . " O2: " . $config{'datacolor'} . "$p->{oxygen}" .
     $config{'systemcolor'} . "  HP: " . $config{'datacolor'} . "$p->{hp}/$p->{max_hp}" .
     $config{'systemcolor'} . "  Turns: " . $config{'datacolor'} . "$p->{turns}" .
@@ -681,7 +706,9 @@ sub _atl_atlantis_gate {
     writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . "+" . _afmt($GUARDIAN{gold}) . $RST, 1);
 
     door_submit_score($DOOR_NAME, $p->{max_depth}, { artifacts => $p->{artifacts_found} });
-    door_broadcast($DOOR_NAME, "$info{'handle'} has discovered the lost city of Atlantis!");
+    my $atlantis_bc = "$info{'handle'} has discovered the lost city of Atlantis!";
+    door_broadcast($DOOR_NAME, $atlantis_bc);
+    _atl_post_news($atlantis_bc);
   }
 
   door_save($DOOR_NAME, $p);
@@ -1012,8 +1039,7 @@ sub _atl_depth_records {
 
   writeline(sprintf("  %s%-3s %-18s %-6s %-10s %-6s %-8s%s",
     $config{'systemcolor'}, "#", "Diver", "Depth", "Artifacts", "Kills", "Atlantis", $RST), 1);
-  writeline($config{'linecolor'} . " " . ("-" x 56) . $RST, 1);
-
+  door_hrule(56);
   my $rank = 1;
   for my $r (@records) {
     my $color = ($r->{name} eq $info{'handle'}) ? $config{'usercolor'} : $config{'datacolor'};
@@ -1028,6 +1054,218 @@ sub _atl_depth_records {
   }
   writeline("", 1);
   door_pause();
+}
+
+# ============================================================================
+# MULTIPLAYER - Cooperative Excavation
+# ============================================================================
+
+my @EXCAVATION_NAMES = (
+  "Ancient Amphora", "Sunken Trireme", "Poseidon's Trident", "Golden Idol",
+  "Atlantean Codex", "Crystal Obelisk", "Leviathan Skull", "Temple Bell",
+);
+
+sub _atl_cooperative_sites {
+  my ($p) = @_;
+  my $playing = 1;
+  while ($playing) {
+    my $sites = door_load_shared($DOOR_NAME, "excavations.dat") // { sites => [] };
+    # Clean completed sites older than 7 days
+    my $now = time();
+    @{$sites->{sites}} = grep {
+      ($_->{progress} // 0) < 100 || ($now - ($_->{completed_at} // 0)) < 604800
+    } @{$sites->{sites}};
+
+    door_clear();
+    writeline($config{'themecolor'} . " Cooperative Excavation Sites" . $RST, 1);
+    door_hrule(50);
+    writeline("", 1);
+
+    my @active = grep { ($_->{progress} // 0) < 100 } @{$sites->{sites}};
+    my @done   = grep { ($_->{progress} // 0) >= 100 } @{$sites->{sites}};
+
+    if (@active) {
+      writeline($config{'systemcolor'} . " Active Sites:" . $RST, 1);
+      my $i = 1;
+      for my $site (@active) {
+        my $bar = "#" x int($site->{progress} / 5) . "." x (20 - int($site->{progress} / 5));
+        my $divers = join(", ", map { $config{'usercolor'} . $_ . $RST } @{$site->{divers} // []});
+        writeline(sprintf("  %s%d. %s%s%s [%s%s%s] %s%d%%%s",
+          $config{'datacolor'}, $i,
+          $config{'themecolor'}, $site->{name}, $config{'linecolor'},
+          $config{'usercolor'}, $bar, $config{'linecolor'},
+          $config{'systemcolor'}, $site->{progress}, $RST), 1);
+        writeline("     Divers: " . ($divers || $config{'linecolor'} . "none" . $RST), 1);
+        $i++;
+      }
+    } else {
+      writeline($config{'systemcolor'} . " No active excavation sites." . $RST, 1);
+    }
+
+    if (@done) {
+      writeline("", 1);
+      writeline($config{'linecolor'} . " Recently Completed:" . $RST, 1);
+      for my $site (@done[-3..-1]) {
+        next unless defined $site;
+        writeline($config{'datacolor'} . "  " . $site->{name} . $config{'linecolor'} .
+          " - completed by " . join(", ", @{$site->{divers} // []}) . $RST, 1);
+      }
+    }
+    writeline("", 1);
+
+    my $choice = door_menu([
+      ['D', 'Dive on a site (contribute)'],
+      ['S', 'Start new excavation'],
+      ['Q', 'Back'],
+    ], "Excavation");
+
+    if ($choice eq 'S') {
+      # Start a new excavation - costs turns
+      if ($p->{turns} <= 0) {
+        writeline($config{'errorcolor'} . " No turns left today." . $RST, 1);
+        door_pause();
+        next;
+      }
+      if (scalar(@active) >= 5) {
+        writeline($config{'errorcolor'} . " Too many active sites. Complete some first." . $RST, 1);
+        door_pause();
+        next;
+      }
+      my $name = $EXCAVATION_NAMES[int(rand(@EXCAVATION_NAMES))];
+      my $required = 3 + int(rand(5)); # 3-7 contributions needed
+      push @{$sites->{sites}}, {
+        name       => $name,
+        required   => $required,
+        progress   => 0,
+        divers     => [],
+        discoverer => $info{'handle'},
+        started_at => time(),
+      };
+      $p->{turns}--;
+      door_save_shared($DOOR_NAME, "excavations.dat", $sites);
+      door_broadcast($DOOR_NAME, "$info{'handle'} discovered an excavation site: $name! Help dig it up.");
+      _atl_post_news("$info{'handle'} started excavating: $name");
+      writeline($config{'usercolor'} . " New site started: $name" . $RST, 1);
+      door_pause();
+
+    } elsif ($choice eq 'D') {
+      unless (@active) {
+        writeline($config{'errorcolor'} . " No active sites to dive on." . $RST, 1);
+        door_pause();
+        next;
+      }
+      if ($p->{turns} <= 0) {
+        writeline($config{'errorcolor'} . " No turns left." . $RST, 1);
+        door_pause();
+        next;
+      }
+      my $snum = door_getnum("Dive on which site (0=cancel):", scalar @active);
+      next if $snum == 0;
+      my $site = $active[$snum - 1];
+
+      # Find this site in the full array
+      my ($si) = grep { $sites->{sites}[$_]{name} eq $site->{name} &&
+                        $sites->{sites}[$_]{started_at} == $site->{started_at} } 0 .. $#{$sites->{sites}};
+      next unless defined $si;
+
+      writeline($config{'systemcolor'} . " Diving on " . $config{'usercolor'} . $site->{name} .
+        $config{'systemcolor'} . "..." . $RST, 1);
+      $p->{turns}--;
+      my $contribution = 20 + int(rand(20));  # 20-39% per dive
+      $sites->{sites}[$si]{progress} = ($sites->{sites}[$si]{progress} // 0) + $contribution;
+      $sites->{sites}[$si]{progress} = 100 if $sites->{sites}[$si]{progress} > 100;
+
+      # Add diver to list if not already there
+      unless (grep { $_ eq $info{'handle'} } @{$sites->{sites}[$si]{divers}}) {
+        push @{$sites->{sites}[$si]{divers}}, $info{'handle'};
+      }
+
+      writeline($config{'datacolor'} . " Excavation progress: " . $config{'usercolor'} .
+        $sites->{sites}[$si]{progress} . "%" . $RST, 1);
+
+      if ($sites->{sites}[$si]{progress} >= 100) {
+        $sites->{sites}[$si]{completed_at} = time();
+        # Award all contributors
+        my @contributors = @{$sites->{sites}[$si]{divers}};
+        my $reward = 500 + int(rand(1500));
+        my $is_discoverer = ($sites->{sites}[$si]{discoverer} eq $info{'handle'});
+
+        writeline($config{'usercolor'} . " EXCAVATION COMPLETE: " . $site->{name} . "!" . $RST, 1);
+        writeline($config{'systemcolor'} . " Contributors: " .
+          join(", ", @contributors) . $RST, 1);
+
+        # Give reward to this player
+        $p->{gold} += $reward;
+        $p->{artifacts_found} = ($p->{artifacts_found} // 0) + 1;
+        writeline($config{'usercolor'} . " You receive " . _afmt($reward) . " gold!" . $RST, 1);
+
+        # Bonus for discoverer
+        if ($is_discoverer) {
+          $p->{gold} += int($reward * 0.5);
+          writeline($config{'usercolor'} . " Discovery bonus: " . _afmt(int($reward * 0.5)) . " gold!" . $RST, 1);
+        }
+
+        # Notify other contributors
+        for my $c (@contributors) {
+          next if $c eq $info{'handle'};
+          door_send_message($DOOR_NAME, $c,
+            "Excavation complete: $site->{name}! You contributed. $info{'handle'} finished it. " .
+            _afmt($reward) . " gold added to your account next login.");
+        }
+
+        door_broadcast($DOOR_NAME, "Excavation complete: $site->{name}! " .
+          join(", ", @contributors) . " uncovered this treasure!");
+        _atl_post_news("Team uncovered " . $site->{name} . ": " . join(", ", @contributors));
+        door_submit_score($DOOR_NAME, $p->{max_depth} + $reward,
+          { artifact => $site->{name}, contributors => scalar @contributors });
+      }
+
+      door_save_shared($DOOR_NAME, "excavations.dat", $sites);
+      door_save($DOOR_NAME, $p);
+      door_pause();
+
+    } elsif ($choice eq 'Q') {
+      $playing = 0;
+    }
+  }
+}
+
+sub _atl_ocean_news {
+  door_clear();
+  writeline($config{'themecolor'} . " Ocean News" . $RST, 1);
+  door_hrule(40);
+  writeline("", 1);
+
+  my $news = door_load_shared($DOOR_NAME, "news.dat") // { items => [] };
+  my @items = @{$news->{items}};
+  if (@items) {
+    for my $item (reverse @items[-12..-1]) {
+      next unless defined $item;
+      writeline($config{'datacolor'} . "  " . $item . $RST, 1);
+    }
+  } else {
+    writeline($config{'systemcolor'} . "  No recent news from the deep." . $RST, 1);
+  }
+
+  writeline("", 1);
+  my @online = door_get_online_players($DOOR_NAME);
+  if (@online) {
+    writeline($config{'systemcolor'} . " Active divers: " .
+      join(", ", map { $config{'usercolor'} . $_ . $RST } @online), 1);
+  }
+  door_show_messages($DOOR_NAME);
+  writeline("", 1);
+  door_pause();
+}
+
+sub _atl_post_news {
+  my ($msg) = @_;
+  my $news = door_load_shared($DOOR_NAME, "news.dat") // { items => [] };
+  push @{$news->{items}}, $msg;
+  if (scalar @{$news->{items}} > 20) {
+    splice @{$news->{items}}, 0, scalar(@{$news->{items}}) - 20;
+  }
+  door_save_shared($DOOR_NAME, "news.dat", $news);
 }
 
 # ============================================================================

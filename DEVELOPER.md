@@ -176,26 +176,75 @@ The `pb-doorlib` module provides these functions:
 | `door_sub_credits($game, $amount)` | Subtract credits (returns 0 if insufficient) |
 | `door_check_turns($game, $max)` | Check remaining turns today |
 | `door_use_turn($game)` | Consume a turn |
-| `door_broadcast($game, $msg)` | Send message to online users |
+| `door_broadcast($game, $msg)` | Send message to all online users |
 | `door_send_message($game, $user, $msg)` | Send message to specific user |
-| `door_get_messages($game)` | Get pending messages |
+| `door_get_messages($game)` | Get pending messages for current player |
+| `door_mark_messages_read($game)` | Mark messages as read |
+| `door_show_messages($game)` | Display and clear pending messages |
 | `door_get_online_players($game)` | List online players in this game |
+| `door_get_all_players($game)` | List all players (ever) for this game |
+| `door_load_player($game, $name)` | Load another player's save |
+| `door_save_player($game, $name, \%data)` | Save another player's data |
+| `door_chat_send($game, $msg)` | Send in-game chat message |
+| `door_chat_poll($game)` | Poll for new chat messages (returns list) |
+| `door_chat_input($game)` | Interactive chat prompt |
+| `door_chat_display($game)` | Display and clear pending chat |
 | `door_clear()` | Clear screen |
 | `door_pause($msg)` | Wait for keypress |
 | `door_yesno($prompt)` | Y/N prompt (default Y) |
 | `door_noyes($prompt)` | Y/N prompt (default N) |
 | `door_getnum($prompt, $min, $max)` | Numeric input |
-| `door_menu(\@items)` | Display menu and get selection |
-| `door_money($amount)` | Format number with commas |
-| `door_log_activity($game, $msg)` | Log to activity file |
+| `door_getamount($prompt, $max)` | Monetary amount input |
+| `door_menu(\@items, $prompt)` | Display menu and get selection |
+| `door_money($amount)` | Format number as currency |
+| `door_log_activity($game, $msg)` | Log to activity feed |
+
+### Multiplayer Patterns
+
+Door games can use the shared PhotonBBS message broker for real-time multiplayer:
+
+```perl
+# At game startup - connect to broker
+door_broker_connect("mygame");
+
+# In game loop - show pending chat from other players
+my @chat = door_chat_poll("mygame");
+for my $m (@chat) {
+    writeline($config{'linecolor'} . $m . $RST, 1);
+}
+
+# Send in-game chat
+door_chat_input("mygame");  # interactive
+door_chat_send("mygame", "message");  # programmatic
+
+# Broadcast to all BBS users (shows in teleconference pages)
+door_broadcast("mygame", "$info{'handle'} scored 10000 points!");
+
+# Send direct message to a player
+door_send_message("mygame", "PlayerName", "You've been challenged!");
+
+# See who's online in your game right now
+my @online = door_get_online_players("mygame");
+
+# At game exit
+door_broker_disconnect();
+```
+
+The broker is optional - games degrade gracefully if it's unavailable. The file-based fallback (`.page` files) handles broadcasts when the broker is down.
 
 ### Data Storage
 
 Door game data is stored in `data/doors/<gamename>/`:
 - `<username>.dat` - Per-user save (Storable format)
-- `scores.dat` - High score board
-- `credits.dat` - Credit balances
-- `shared/` - Shared game state files
+- `scores.dat` - High score board (shared)
+- `credits.dat` - Credit balances (shared)
+- `news.dat` - Recent broadcast feed (shared, auto-trimmed to 25 items)
+- `exchange.dat`, `universe.dat`, etc. - Game-specific shared state
+- `chat.dat` - In-game chat buffer (shared, expires after 5 minutes)
+- `messages_<username>.dat` - Pending messages for a player
+
+All shared files use Storable `lock_store`/`lock_retrieve` for safe concurrent access.
+Register your game's shared files in `sbin/photonbbs-dooredit` under the `shared` array.
 
 ### Existing Games
 

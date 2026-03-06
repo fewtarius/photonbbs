@@ -71,13 +71,17 @@ if ($@ || !$sysinfo{'ip'}) {
 ###
 
 $|=1;
+binmode(STDOUT, ':raw');  # Raw byte output - required for CP437 box-drawing characters
 $BSD_STYLE=1;
 
 require ($config{'home'}."/modules/pb-framework");
+require ($config{'home'}."/modules/pb-render");    # Markdown, table, ANSI renderer
 require ($config{'home'}."/modules/pb-usertools");
 require ($config{'home'}."/modules/pb-main");
 require ($config{'home'}."/modules/pb-doors");
 require ($config{'home'}."/modules/pb-doorlib");
+# Load BBS broker client if available (optional - door games degrade gracefully without it)
+eval { require ($config{'home'}."/modules/pb-broker-client"); };
 require ($config{'home'}."/modules/pb-door-atlantis");
 require ($config{'home'}."/modules/pb-door-bigcatch");
 require ($config{'home'}."/modules/pb-door-casino");
@@ -89,8 +93,8 @@ require ($config{'home'}."/modules/pb-door-startrek");
 require ($config{'home'}."/modules/pb-door-1000miles");
 require	($config{'home'}."/modules/pb-lastcallers");
 require ($config{'home'}."/modules/pb-oneliners");
-require ($config{'home'}."/modules/pb-activity");
-require ($config{'home'}."/modules/pb-polls");
+eval { require ($config{'home'}."/modules/pb-activity"); };
+eval { require ($config{'home'}."/modules/pb-polls"); };
 
 # Get TTY device path using POSIX (no fork needed)
 eval {
@@ -123,13 +127,10 @@ main: {
   applytheme($config{'theme'});
   cbreak(on);
   begin: {
-    if (-e "$config{'home'}$config{'text'}/welcome.$info{'ext'}") {
-      readfile("welcome.$info{'ext'}");
-      $readit=1;
-    }
-    if (-e "$config{'home'}$config{'text'}/welcome.txt" && $readit ne "1") {
-      readfile("welcome.txt");
-      $readit=1;
+    # Find best welcome file: .ext (ANSI/PETSCII) > .md (ANSI rendered) > .txt
+    my $welcome_file = find_textfile('welcome');
+    if ($welcome_file) {
+      readfile($welcome_file);
     }
     authenticate();
     initialize_terminal_config();  # Re-initialize to use saved terminal width from user profile
@@ -138,19 +139,15 @@ main: {
         writeline($theme{'banned'});
         bye();
     }
+    # Connect to global broker for pages, broadcasts, and whispers
+    broker_session_connect() if defined &broker_session_connect;
   }
 
   iamat($info{'handle'},"Heading to Chat");
 
-  $readit=0;
-  if (-e "$config{'home'}$config{'text'}/login.txt") {
-     readfile("login.txt");
-     $readit=1;
-   }
-   if (-e "$config{'home'}$config{'text'}/login.$info{'ext'}" && $readit ne "1") {
-     readfile("login.$info{'ext'}");
-     $readit=1;
-   }
+  # Find best login file: .txt > .ext (login.txt tried first for historical reasons)
+  my $login_file = find_textfile('login');
+  readfile($login_file) if $login_file;
   applytheme($config{'theme'});
   lastcallers();
 

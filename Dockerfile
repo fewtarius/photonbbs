@@ -15,7 +15,7 @@ FROM rockylinux:9
 WORKDIR /
 
 RUN yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
-RUN yum -y install perl git nano bind-utils procps systemd shadow-utils which gcc make socat
+RUN yum -y install perl git nano bind-utils procps systemd shadow-utils which gcc make socat openssh-server
 RUN yum -y install http://download1.rpmfusion.org/free/el/updates/6/i386/dosemu-1.4.0.8-15.20130205git.el6.i686.rpm
 
 COPY . /tmp/photonbbs-src

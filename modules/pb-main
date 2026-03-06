@@ -9,6 +9,10 @@ my %chan_passwords;
 my %chan_desc;
 my %chan_entry_exit_toggle;
 
+# --- Broker integration for teleconference (optional) ---
+our $_TC_BROKER_SOCK = undef;
+our $_TC_BROKER_CHAN = undef;
+
 
 sub menu_exit {
     # Prompt for confirmation if at main menu, using theme prompt
@@ -130,6 +134,9 @@ sub run_menu_command {
         
         # SECURITY: Build argument list for list-form system() to avoid shell injection
         @exec_args = ($exec_path, $config{'home'}, $info{'node'}, $info{'handle'});
+
+        # Write fusiondoor so sbin tools (useredit, bulledit, etc.) can read session info
+        setupdoors() if defined(&setupdoors);
 
         my $numuserslock = $config{'home'}.$config{'data'}."/".$arg;
         if ($concurrency && $concurrency > 0) {
@@ -409,28 +416,87 @@ sub show_menu {
         }
     }
 }
-sub pageall {
-  $msg=$_[0];
-  unless ( -e "$config{'home'}$config{'nodes'}" ) {
-    mkdir "$config{'home'}$config{'nodes'}";
+sub _show_game_scores {
+  use Storable qw(lock_retrieve);
+
+  writeline($config{'themecolor'} . "\n Door Game Hall of Fame" . $RST, 1);
+  writeline("", 1);
+
+  my @games = (
+    [ "reddragon",  "Red Dragon" ],
+    [ "startrader", "Star Trader" ],
+    [ "casino",     "Casino" ],
+    [ "druglord",   "Drug Lord" ],
+    [ "seabattle",  "Sea Battle" ],
+    [ "startrek",   "Star Trek" ],
+    [ "bigcatch",   "Big Catch" ],
+    [ "atlantis",   "Atlantis" ],
+    [ "1000miles",  "1000 Miles" ],
+  );
+
+  my $datadir = $config{'home'} . $config{'data'} . "/doors/";
+  my @scores_rows;
+
+  for my $entry (@games) {
+    my ($id, $name) = @$entry;
+    my $scorefile = "$datadir$id/scores.dat";
+    next unless -e $scorefile;
+    my $scores = eval { lock_retrieve($scorefile) };
+    next unless $scores && ref($scores) eq 'ARRAY' && @$scores;
+    my $top = $scores->[0];
+    next unless $top && $top->{handle};
+    push @scores_rows, [$name, $top->{handle}, $top->{score} // 0];
   }
-  @sendtonodes=<$config{'home'}$config{'nodes'}/*>;
-  foreach $snode(@sendtonodes) {
-    chomp $snode;
-    $snode=~s/^\/.*\///g;
-    lockfile("$config{'home'}$config{'messages'}/$snode.page");
-    open(my $page_fh, '>>', "$config{'home'}$config{'messages'}/$snode.page");
-    print $page_fh "\n\@DATACLR[\@USERCLR".$info{'handle'}."\@DATACLR] \@SYSTEMCLR".$msg."\n";
-    close ($page_fh);
-    unlockfile("$config{'home'}$config{'messages'}/$snode.page");
+
+  if (@scores_rows > 0) {
+    writeline($config{'systemcolor'} . sprintf("  %-14s %-20s %s", "Game", "Leader", "Score") . $RST, 1);
+    for my $r (@scores_rows) {
+      writeline($config{'datacolor'} . sprintf("  %-14s %-20s %s", @{$r}) . $RST, 1);
+    }
+  } else {
+    writeline($config{'systemcolor'} . " No scores recorded yet. Play some games!" . $RST, 1);
+  }
+
+  writeline("", 1);
+  pause();
+}
+
+sub pageall {
+  my $msg = $_[0];
+  # Send broadcast to global room via broker (all logged-in sessions receive it)
+  if (defined &broker_available && broker_available()) {
+    my $bcast = "\@DATACLR[\@USERCLR" . $info{'handle'} . "\@DATACLR] \@SYSTEMCLR" . $msg;
+    eval {
+      if ($_BBS_BROKER_SOCK && defined &broker_send_room_message) {
+        broker_send_room_message($_BBS_BROKER_SOCK, "bbs-global",
+          $bcast, "user-" . $info{'handle'});
+      }
+    };
   }
 }
 
 sub getpages {
-  if (-e "$config{'home'}/$config{'messages'}/$info{'node'}.page") {
-    readfile("$config{'home'}/$config{'messages'}/$info{'node'}.page",1,1);
-    $gotapage=0;
-    unlink("$config{'home'}/$config{'messages'}/$info{'node'}.page");
+  # Poll session broker socket for pages, broadcasts, and whispers
+  my @msgs = broker_session_poll() if defined &broker_session_poll;
+  # Also poll teleconf channel socket (separate connection, different rooms)
+  if ($_TC_BROKER_SOCK && defined &broker_poll) {
+    eval {
+      my @tc_msgs = broker_poll($_TC_BROKER_SOCK);
+      for my $m (@tc_msgs) {
+        push @msgs, $m->{message}
+          if ($m->{type} eq 'room_message' || $m->{type} eq 'direct_message')
+             && $m->{message};
+      }
+    };
+  }
+
+  for my $msg (@msgs) {
+    next unless defined $msg && $msg ne '';
+    my $text = colorline($msg);
+    my $width = $config{'terminal_width'} || 80;
+    print "\e[${width}D\e[2K" . $text . "\n";
+    writeline($RST . $config{'inputcolor'} . $config{'promptchr'} . " ");
+    $gotapage = "1";
   }
 }
 
@@ -657,6 +723,20 @@ sub telechannel {
   }
 
   iamat($info{'handle'},"Chat");
+
+  # Connect to broker teleconf channel room (separate from global session socket)
+  if (defined &broker_available && broker_available()) {
+    if (!$_TC_BROKER_SOCK || $_TC_BROKER_CHAN ne $chanid) {
+      # Disconnect from previous channel if switching
+      eval { broker_disconnect($_TC_BROKER_SOCK); } if $_TC_BROKER_SOCK;
+      my $player_id = "tc-" . $info{'handle'};
+      $_TC_BROKER_SOCK = broker_connect($player_id);
+      if ($_TC_BROKER_SOCK) {
+        broker_join_room($_TC_BROKER_SOCK, "tc-$chanid");
+        $_TC_BROKER_CHAN = $chanid;
+      }
+    }
+  }
 
   $leaving="1";
   unless ($rescan eq "1") {
@@ -1256,6 +1336,14 @@ sub teleconf {
        goto telemain;
     }
 
+    # Door game leaderboards
+    if ($chatline =~/^\/[Ss][Cc][Oo][Rr][Ee][Ss]$/ || $chatline =~/^\/[Tt][Oo][Pp]$/) {
+       $inteleconf="0";
+       _show_game_scores();
+       $inteleconf="1";
+       goto telemain;
+    }
+
     if ($chatline eq "$config{'help'}") {
        $inteleconf="0";
        readfile("telehelp.txt");
@@ -1366,6 +1454,12 @@ sub teleconf {
     $plcholder="1";
   }
  }
+  # Disconnect from teleconf channel (keep global session socket active)
+  if ($_TC_BROKER_SOCK && defined &broker_disconnect) {
+    eval { broker_disconnect($_TC_BROKER_SOCK); };
+    $_TC_BROKER_SOCK = undef;
+    $_TC_BROKER_CHAN = undef;
+  }
 }
 
 sub telesend {
@@ -1381,93 +1475,86 @@ sub telesend {
       writeline ($config{'themecolor'}."There is no one here with you!",1);
     }
   } else {
-    foreach $channode(@telesendto) {
-      chomp ($channode);
-      # Get username for this node
-      open(my $fh, '<', $channode); my $target = <$fh>; close($fh);
-      # Ignore/mute logic
-      next if $muted_users{$chanid}{$info{'handle'}}; # muted by op
-      next if $ignore_list{$target}{$info{'handle'}}; # target ignores sender
-      $chatline = colorline($chatline);
-      $sendmessage = colorline($sendmessage);
-
-      lockfile("$config{'home'}$config{'messages'}/$channode.page");
-      open(my $page_fh, '>>', "$config{'home'}$config{'messages'}/$channode.page");
-       unless (defined($sendmessage)) {
-         print $page_fh "\@USERCLR".$info{'handle'}."\@DATACLR".": "."\@INPUTCLR".$chatline."\@INPUTCLR"."\n";
-       } else {
-         print $page_fh "\@INPUTCLR".$info{'handle'}." ".$sendmessage."\@INPUTCLR"."\n";
-       }
-      close ($page_fh);
-      unlockfile("$config{'home'}$config{'messages'}/$channode.page");
-      # Track last message for edit/delete
+    # Build the message for the broker room
+    my $broker_msg;
+    unless (defined($sendmessage)) {
+      $broker_msg = "\@USERCLR" . $info{'handle'} . "\@DATACLR: \@INPUTCLR" . $chatline . "\@INPUTCLR";
       $last_message{$info{'handle'}} = $chatline if defined $chatline;
+    } else {
+      $broker_msg = "\@INPUTCLR" . $info{'handle'} . " " . $sendmessage . "\@INPUTCLR";
+    }
+
+    # All delivery is via broker - excludes the sender
+    if ($_TC_BROKER_SOCK && $_TC_BROKER_CHAN && defined &broker_send_room_message) {
+      eval {
+        broker_send_room_message($_TC_BROKER_SOCK, "tc-$_TC_BROKER_CHAN",
+          colorline($broker_msg), "tc-" . $info{'handle'});
+      };
     }
   }
 }
 
 sub telewhisper {
-   $page=$_[0];
-   chomp ($page);
-   @parts=split(/\s/,$page);
-   $pguser=shift(@parts);
-   $found=0;
-   @usersonline=();
-   @activenodes=<$config{'home'}$config{'nodes'}/*>;
-   foreach $node(@activenodes) {
-     lockfile("$node");
-     open(my $node_fh, '<', $node);
-     $nodeinfo=<$node_fh>;
-     close($node_fh);
-     unlockfile("$node");
-     chomp ($nodeinfo);
-     ($discard,$discard,$discard,$discard,$person,$discard,$discard)=split(/\|/,$nodeinfo);
-     push(@usersonline,$person);
-   }
+  my ($page) = @_;
+  chomp $page;
+  my ($pguser, $pmsg_raw) = split(/\s+/, $page, 2);
+  $pguser = lc($pguser // '');
+  $pmsg_raw //= '';
 
-   foreach $user(@usersonline) {
-     chomp ($user);
-     if ($user eq "CONNECT") {
-       next;
-     }
+  # Check if target user is online via node files
+  my $found = 0;
+  my $target_handle = '';
+  my @activenodes = glob("$config{'home'}$config{'nodes'}/*");
+  for my $node (@activenodes) {
+    eval {
+      lockfile($node);
+      open(my $nfh, '<', $node);
+      my $nodeinfo = <$nfh>;
+      close($nfh);
+      unlockfile($node);
+      chomp $nodeinfo;
+      my (undef, undef, undef, undef, $person, undef, undef) = split(/\|/, $nodeinfo);
+      if (lc($person // '') eq $pguser) {
+        $target_handle = $person;
+        $found = 1;
+      }
+    };
+    last if $found;
+  }
 
-     $pguser=lc($pguser);
-     $user=lc($user);
-     if ($pguser eq $user) {
-        $found=1;
-        $pmsg=join(' ',@parts);
-        # Check DND
-        my $targetid = finduserid($user);
-        my $dnd = 0;
-        if ($targetid ne "") {
-          my $ufile = "$config{'home'}$config{'data'}/users/$targetid.dat";
-          open(my $ufh, '<', $ufile);
-          while (<$ufh>) { $dnd=1 if /^dnd=1/; }
-          close($ufh);
-        }
-        if ($dnd) {
-          writeline($config{'datacolor'}."$user is in Do Not Disturb mode.",1);
-          last;
-        }
-     }
+  unless ($found) {
+    writeline($config{'datacolor'} . "$pguser is not online", 1);
+    return;
+  }
 
-     if ($found eq "1") {
-       $pmsg = colorline($pmsg);
-
-      ($discard,$pnode,$discard,$discard,$person,$discard,$discard)=split(/\|/,$nodeinfo);
-      writeline($config{'usercolor'}."You whispered to $person: ".$pmsg,1);
-      lockfile("$config{'home'}$config{'messages'}/$pnode.page");
-      open (my $pmsg_fh, '>>', "$config{'home'}$config{'messages'}/$pnode.page");
-      print $pmsg_fh "\@USERCLR".$info{'handle'}."\@USERCLR whispers\@DATACLR: \@SYSTEMCLR".$pmsg."\n";
-      close ($pmsg_fh);
-      unlockfile("$config{'home'}$config{'messages'}/$pnode.page");
-      writeline($RST,1);
-      last;
+  # Check DND for target
+  my $targetid = finduserid(lc($target_handle));
+  if ($targetid ne '') {
+    my $ufile = "$config{'home'}$config{'data'}/users/$targetid.dat";
+    my $dnd = 0;
+    eval {
+      open(my $ufh, '<', $ufile);
+      while (<$ufh>) { $dnd = 1 if /^dnd=1/; }
+      close($ufh);
+    };
+    if ($dnd) {
+      writeline($config{'datacolor'} . "$target_handle is in Do Not Disturb mode.", 1);
+      return;
     }
   }
-  if ($found ne "1") {
-    writeline($config{'datacolor'}.$pguser.$config{'datacolor'}." is not online",1);
+
+  my $pmsg = colorline($pmsg_raw);
+  my $whisper_msg = "\@USERCLR" . $info{'handle'} . "\@USERCLR whispers\@DATACLR: \@SYSTEMCLR" . $pmsg;
+
+  # Send via broker direct message to target's session
+  if ($_BBS_BROKER_SOCK && defined &broker_send_direct_message) {
+    eval {
+      broker_send_direct_message($_BBS_BROKER_SOCK, "user-$target_handle", $whisper_msg);
+    };
   }
+
+  writeline($config{'usercolor'} . "You whispered to $target_handle: " . $pmsg, 1);
+  writeline($RST, 1);
 }
 
 sub chanscan {
@@ -1481,18 +1568,7 @@ sub chanscan {
   unlockfile("$config{'home'}$config{'messages'}/teleconf/channels");
 
   writeline("",1);
-
-format chanscan =
-@<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<  .....  @<<<<<<<<<<< @<<<<< @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-$channelname,$chanstat,$chanusers,$chandesc
-.
-
-  $channelname="Channel .....";$chanstat="Status";$chanusers="Users";$chandesc="Description";
-  writeline($config{'themecolor'});
-  $~="chanscan";
-  write;
-  $~="stdout";
-  writeline($config{'datacolor'});
+  writeline($config{'themecolor'} . sprintf("%-48s %-12s %-6s %s", "Channel", "Status", "Users", "Description") . $RST, 1);
 
   foreach $chan(@channels) {
    $chanenc="";
@@ -1513,10 +1589,8 @@ $channelname,$chanstat,$chanusers,$chandesc
    @scanchanusr=<$config{'home'}$config{'messages'}/teleconf/$chanid/users/*>;
    $chanusers=scalar(@scanchanusr);
    $chandesc = $chan_desc{$chanid} // "";
-   writeline($config{'datacolor'});
-   $~="chanscan";
-   write;
-   $~="stdout";
+   writeline($config{'datacolor'} . sprintf("%-48s %-12s %-6s %s",
+     substr($channelname,0,48), substr($chanstat,0,12), $chanusers, substr($chandesc,0,38)) . $RST, 1);
   }
   writeline($RST,1);
 }
@@ -1536,33 +1610,27 @@ sub telescan {
   @whosonline=sort {$a <=> $b} @whosonline;
   writeline("\n");
 
-format telescan =
-@<<< @<<<<<<<<<<<<<<<  .....  @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-$whonode,$whouser,$whowhere
-.
-  writeline($config{'systemcolor'});
-  $whonode="Node"; $whouser="User-ID"; $whowhere="Channel";
-  $~="telescan";
-  write;
-  $~="stdout";
-  writeline($config{'datacolor'});
+  writeline($config{'systemcolor'} . sprintf("%-4s %-17s %s", "Node", "User-ID", "Channel") . $RST, 1);
+
+  # Load channels once for name lookup
+  lockfile("$config{'home'}$config{'messages'}/teleconf/channels");
+  my @all_channels;
+  if ( -e "$config{'home'}$config{'messages'}/teleconf/channels" ) {
+    open (my $chan_fh, '<', "$config{'home'}$config{'messages'}/teleconf/channels");
+    @all_channels=<$chan_fh>;
+    close($chan_fh);
+  }
+  unlockfile("$config{'home'}$config{'messages'}/teleconf/channels");
+
   foreach $node(@whosonline) {
     chomp ($node);
     ($whonode,$whouser,$whowhere)=split(/\|/,$node);
-    $whonode=sprintf("%03D",$whonode);
-    $~="telescan";
-    lockfile("$config{'home'}$config{'messages'}/teleconf/channels");
-    if ( -e "$config{'home'}$config{'messages'}/teleconf/channels" ) {
-      open (my $chan_fh, '<', "$config{'home'}$config{'messages'}/teleconf/channels");
-      @channels=<$chan_fh>;
-      close($chan_fh);
-    }
-    unlockfile("$config{'home'}$config{'messages'}/teleconf/channels");
+    $whonode=sprintf("%03d",$whonode);
 
     if (-e "$config{'home'}$config{'messages'}/teleconf/$whowhere/hidden") {
-      $whowhere="*******"
+      $whowhere="*******";
     } else {
-      foreach $channel(@channels) {
+      foreach $channel(@all_channels) {
         chomp ($channel);
         ($schanid,$schanowner,$schanname)=split(/\|/,$channel);
         if ($schanid eq $whowhere) {
@@ -1571,9 +1639,7 @@ $whonode,$whouser,$whowhere
         }
       }
     }
-    @channels=();
-    write;
-    $~="stdout";
+    writeline($config{'datacolor'} . sprintf("%-4s %-17s %s", $whonode, substr($whouser,0,17), $whowhere) . $RST, 1);
   }
   writeline($RST."\n");
 }
