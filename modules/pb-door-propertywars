@@ -584,17 +584,29 @@ sub _pw_game_loop {
       select(undef, undef, undef, 1.2);
     }
 
-    # Check for winner
+    # Check for winner or no humans left
     my @alive = grep { !$g->{players}[$_]{bankrupt} } 0 .. $#{$g->{players}};
-    if (@alive == 1) {
+    my @humans_alive = grep { $g->{players}[$_]{type} eq 'human' } @alive;
+
+    if (@alive == 1 || @humans_alive == 0) {
       $g->{over} = 1;
-      my $winner = $g->{players}[$alive[0]];
+
+      # Determine winner (richest remaining player)
+      my @sorted = sort { _pw_net_worth($g, $b) <=> _pw_net_worth($g, $a) } @alive;
+      my $winner = $g->{players}[$sorted[0]];
+      my $net = _pw_net_worth($g, $sorted[0]);
+
       door_clear();
       writeline("", 1);
-      writeline($config{'usercolor'} . " $winner->{name} WINS Property Wars!" . $RST, 1);
-      writeline("", 1);
-      my $net = _pw_net_worth($g, $alive[0]);
-      writeline($config{'datacolor'} . " Net worth: " . door_money($net) . $RST, 1);
+      if (@humans_alive == 0 && @alive > 1) {
+        # Human quit, only AIs remain
+        writeline($config{'systemcolor'} . " Game over - no human players remain." . $RST, 1);
+        writeline($config{'datacolor'} . " $winner->{name} was leading with " . door_money($net) . $RST, 1);
+      } else {
+        writeline($config{'usercolor'} . " $winner->{name} WINS Property Wars!" . $RST, 1);
+        writeline("", 1);
+        writeline($config{'datacolor'} . " Net worth: " . door_money($net) . $RST, 1);
+      }
       writeline("", 1);
       if ($winner->{type} eq 'human') {
         door_submit_score($DOOR_NAME, $net, { turns => $g->{turn_num} });
@@ -880,14 +892,54 @@ sub _pw_render_board {
   }
   push @lines, $top;
 
-  # Middle rows: left square | spaces | right square
+  # Middle rows: left square | center info | right square
   # Left side goes 39, 38, 37, 36, 35, 34, 33, 32, 31 (top to bottom)
   # Right side goes 11, 12, 13, 14, 15, 16, 17, 18, 19 (top to bottom)
+
+  # Center label: current player's square name (split to 2 lines if needed)
+  my $cidx = $g->{current};
+  my $cloc = $g->{players}[$cidx]{loc};
+  my $sq_name = $BOARD[$cloc][0];
+  my $cname = $g->{players}[$cidx]{name};
+  $cname = substr($cname, 0, 16) if length($cname) > 16;
+
+  # Split square name into up to 2 lines of max 16 chars each
+  my @center_text;
+  if (length($sq_name) <= 16) {
+    @center_text = ($sq_name);
+  } else {
+    # Split at last space within 16 chars
+    my $break = rindex(substr($sq_name, 0, 17), ' ');
+    $break = 16 if $break <= 0;
+    @center_text = (substr($sq_name, 0, $break), substr($sq_name, $break));
+    $center_text[1] =~ s/^\s+//;
+  }
+
   for my $row (0 .. 8) {
     my $left_sq  = 39 - $row;  # 39, 38, 37, ...
     my $right_sq = 11 + $row;  # 11, 12, 13, ...
     my $line = " " . _pw_sq_cell($g, $left_sq);
-    $line .= "                  "; # 18 spaces for 9 empty cells
+
+    # Center content on rows 3, 4, 5 (player name + square name)
+    my $center = " " x 18;
+    if ($row == 3) {
+      my $label = $TOKENS[$cidx] . " " . $cname;
+      my $pad = int((18 - length($label)) / 2);
+      $pad = 0 if $pad < 0;
+      $center = $config{'promptcolor'} . (" " x $pad) . $label . (" " x (18 - $pad - length($label))) . $RST;
+    } elsif ($row == 4) {
+      my $label = $center_text[0];
+      my $pad = int((18 - length($label)) / 2);
+      $pad = 0 if $pad < 0;
+      $center = $config{'usercolor'} . (" " x $pad) . $label . (" " x (18 - $pad - length($label))) . $RST;
+    } elsif ($row == 5 && @center_text > 1) {
+      my $label = $center_text[1];
+      my $pad = int((18 - length($label)) / 2);
+      $pad = 0 if $pad < 0;
+      $center = $config{'usercolor'} . (" " x $pad) . $label . (" " x (18 - $pad - length($label))) . $RST;
+    }
+
+    $line .= $center;
     $line .= _pw_sq_cell($g, $right_sq);
     push @lines, $line;
   }
