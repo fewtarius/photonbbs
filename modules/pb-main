@@ -1438,7 +1438,10 @@ sub teleconf {
       goto telemain;
     }
     if ($chatline =~/^[!xX]$/ || $chatline =~/^\/[Qq][Uu][Ii][Tt]$/ || $chatline =~/^[Ee][Xx][Ii][Tt]$/) {
-        unless (door_yesno("Leave chat?")) {
+        # In teleconf-primary mode, x/exit triggers logoff confirmation
+        if ($config{'start_in_teleconf'} eq "1") {
+          menu_exit(1);
+          # If we get here, user cancelled - stay in teleconf
           goto telemain;
         }
         writeline ($BWH."\nLeaving teleconference..",1);
