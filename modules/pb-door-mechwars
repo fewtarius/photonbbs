@@ -183,8 +183,12 @@ sub _mw_command_loop {
     elsif ($cmd eq 'N') { mw_deploy_mines($player); }
     elsif ($cmd eq 'B') { mw_fortress_menu($player); }
     elsif ($cmd eq 'R') {
-        door_show_scores($DOOR_NAME, "MechWars Rankings", "Kills");
-        door_pause();
+        mw_show_scoreboard();
+        if (door_yesno("View universe statistics?")) {
+            mw_universe_stats();
+        } else {
+            door_pause();
+        }
     }
     elsif ($cmd eq 'H') { door_chat_input($DOOR_NAME); }
     elsif ($cmd eq '?') { _mw_help(); }
