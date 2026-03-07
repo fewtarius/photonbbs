@@ -1,8 +1,11 @@
 version: '2'
 services:
   photonbbs:
-    build: ..
-    image: fewtarius/photonbbs
+    # Use pre-built image from GitHub Container Registry:
+    image: ghcr.io/fewtarius/photonbbs:latest
+    # Or build from source (uncomment next two lines, comment image above):
+    # build: ..
+    # image: fewtarius/photonbbs
     hostname: photonbbs
     network_mode: bridge
     devices:

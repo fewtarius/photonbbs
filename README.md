@@ -102,7 +102,23 @@ PhotonBBS also supports classic external BBS doors via drop files:
 
 ## Quick Start
 
-### Installation via Docker (Recommended)
+### Using Pre-Built Container (Fastest)
+
+```bash
+# Pull and run the latest image
+docker run -d --name photonbbs \
+  -p 23:23 \
+  --privileged \
+  -v photonbbs-data:/appdata \
+  ghcr.io/fewtarius/photonbbs:latest
+
+# Connect via telnet
+telnet localhost 23
+```
+
+Multi-architecture images (linux/amd64 and linux/arm64) are published automatically to [GitHub Container Registry](https://github.com/fewtarius/photonbbs/pkgs/container/photonbbs).
+
+### Building from Source
 
 ```bash
 # Clone the repository
@@ -245,6 +261,20 @@ make docker-logs
 # Access shell
 make docker-shell
 ```
+
+### Using Pre-Built Images
+
+Pre-built multi-architecture images are available from GitHub Container Registry:
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/fewtarius/photonbbs:latest
+
+# Or pull a specific version
+docker pull ghcr.io/fewtarius/photonbbs:20260307.1
+```
+
+See [GitHub Container Registry](https://github.com/fewtarius/photonbbs/pkgs/container/photonbbs) for all available tags.
 
 ### Makefile Targets
 
