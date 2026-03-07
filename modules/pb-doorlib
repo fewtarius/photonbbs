@@ -13,10 +13,126 @@
 #   - High score tracking
 #   - Turn/session management
 #   - Activity feed integration
+#   - Real-time in-game chat via PhotonBBS broker (optional)
 #
 
 use Storable qw(store retrieve lock_store lock_retrieve);
 use Fcntl qw(:flock);
+
+# Broker integration - optional, uses PhotonBBS broker if available
+our $_DOOR_BROKER_SOCK = undef;
+our $_DOOR_BROKER_ROOM = undef;
+our $_HAS_BROKER_CLIENT = 0;
+
+# Load broker client if available
+eval {
+  require_module("pb-broker-client") if defined &require_module;
+  $_HAS_BROKER_CLIENT = 1 if defined &broker_available;
+};
+
+# Connect door to broker, join a room (call at game start)
+sub door_broker_connect {
+  my ($doorname, $room_id) = @_;
+  return unless $_HAS_BROKER_CLIENT && broker_available();
+  my $player_id = "door-$doorname-" . ($info{'handle'} // 'anon');
+  $_DOOR_BROKER_SOCK = broker_connect($player_id);
+  return unless $_DOOR_BROKER_SOCK;
+  $room_id //= "door-$doorname";
+  $_DOOR_BROKER_ROOM = $room_id;
+  broker_join_room($_DOOR_BROKER_SOCK, $room_id);
+  logger("DOOR[$doorname]: Connected to broker, room=$room_id") if $config{'debug'};
+}
+
+# Move to a different room in the broker (e.g., entering a sector)
+sub door_broker_move {
+  my ($room_id) = @_;
+  return unless $_DOOR_BROKER_SOCK && $_HAS_BROKER_CLIENT;
+  $_DOOR_BROKER_ROOM = $room_id;
+  broker_join_room($_DOOR_BROKER_SOCK, $room_id);
+}
+
+# Disconnect door from broker (call at game end)
+sub door_broker_disconnect {
+  return unless $_DOOR_BROKER_SOCK && $_HAS_BROKER_CLIENT;
+  eval { broker_disconnect($_DOOR_BROKER_SOCK); };
+  $_DOOR_BROKER_SOCK = undef;
+  $_DOOR_BROKER_ROOM = undef;
+}
+
+# Keep BBS broker connections alive while in a door game
+# Sends heartbeat to user and teleconf sockets so broker doesn't expire them
+my $_DOOR_LAST_KEEPALIVE = 0;
+sub _door_broker_keepalive {
+  return unless $_HAS_BROKER_CLIENT && defined &broker_heartbeat;
+  my $now = time();
+  return if ($now - $_DOOR_LAST_KEEPALIVE) < 30;  # every 30s
+  $_DOOR_LAST_KEEPALIVE = $now;
+  eval { broker_heartbeat($_BBS_BROKER_SOCK) } if $_BBS_BROKER_SOCK;
+  eval { broker_heartbeat($_TC_BROKER_SOCK) }  if defined $_TC_BROKER_SOCK && $_TC_BROKER_SOCK;
+}
+
+# Send a chat message to the current door game room via broker
+sub door_chat_send {
+  my ($doorname, $message) = @_;
+  my $handle = $info{'handle'} // 'Unknown';
+  if ($_DOOR_BROKER_SOCK && $_DOOR_BROKER_ROOM && $_HAS_BROKER_CLIENT) {
+    broker_send_room_message($_DOOR_BROKER_SOCK, $_DOOR_BROKER_ROOM,
+      "[$doorname] <$handle> $message");
+  }
+}
+
+# Poll for new chat messages in current door room
+# Returns array of new message strings since last check
+sub door_chat_poll {
+  my ($doorname) = @_;
+  my @msgs;
+  if ($_DOOR_BROKER_SOCK && $_HAS_BROKER_CLIENT) {
+    eval {
+      my @broker_msgs = broker_poll($_DOOR_BROKER_SOCK);
+      for my $m (@broker_msgs) {
+        if ($m->{type} eq 'room_message' && $m->{message}) {
+          push @msgs, $m->{message};
+        } elsif ($m->{type} eq 'player_entered' && $m->{player}) {
+          push @msgs, "[$doorname] " . $m->{player} . " is now here.";
+        } elsif ($m->{type} eq 'player_left' && $m->{player}) {
+          push @msgs, "[$doorname] " . $m->{player} . " has left.";
+        }
+      }
+    };
+  }
+  return @msgs;
+}
+
+# Show chat prompt and send message (interactive)
+sub door_chat_input {
+  my ($doorname) = @_;
+  writeline($config{'promptcolor'} . " Chat> " . $RST);
+  my $msg = getline('text', 70, "", 1);
+  return unless $msg && $msg =~ /\S/;
+  my $handle = $info{'handle'} // 'Unknown';
+  writeline($config{'usercolor'} . "<$handle>" . $config{'systemcolor'} . " $msg" . $RST, 1);
+  door_chat_send($doorname, $msg);
+}
+
+# Display any pending chat messages (call during game loop)
+sub door_chat_display {
+  my ($doorname) = @_;
+
+  # Keep BBS broker connections alive while in a door game
+  _door_broker_keepalive();
+
+  my @msgs = door_chat_poll($doorname);
+  for my $m (@msgs) {
+    writeline($config{'linecolor'} . $m . $RST, 1);
+  }
+  return scalar @msgs;
+}
+
+# File-based chat fallback: write to shared chat file
+sub door_broker_room_players {
+  return () unless $_DOOR_BROKER_SOCK && $_DOOR_BROKER_ROOM && $_HAS_BROKER_CLIENT;
+  return eval { broker_get_room_players($_DOOR_BROKER_SOCK, $_DOOR_BROKER_ROOM) };
+}
 
 # ============================================================================
 # DOOR DATA PATHS
@@ -245,7 +361,6 @@ sub door_show_scores {
 
   writeline("", 1);
   writeline($config{'themecolor'} . " $title" . $RST, 1);
-  writeline($config{'linecolor'} . (" " . ("-" x 50)) . $RST, 1);
 
   if (@$scores == 0) {
     writeline($config{'systemcolor'} . "  No scores yet." . $RST, 1);
@@ -285,9 +400,10 @@ sub door_clear {
 # Standard door header
 sub door_header {
   my ($title) = @_;
+  _door_broker_keepalive();
   door_clear();
   writeline($config{'themecolor'} . " $title" . $RST, 1);
-  writeline($config{'linecolor'} . (" " . ("-" x 50)) . $RST, 1);
+  door_hrule(50);
   writeline("", 1);
 }
 
@@ -295,6 +411,7 @@ sub door_header {
 sub door_pause {
   my ($msg) = @_;
   $msg //= "Press any key to continue...";
+  _door_broker_keepalive();
   writeline($config{'systemcolor'} . " $msg" . $RST);
   waitkey("");
   writeline("", 1);
@@ -432,47 +549,43 @@ sub door_post_activity {
 sub door_broadcast {
   my ($doorname, $message) = @_;
   my $formatted = "\@DATACLR[\@USERCLR$doorname\@DATACLR] \@SYSTEMCLR$message";
-  eval {
-    # Use BBS pageall if available
-    if (defined &main::pageall) {
-      # Temporarily override handle for the broadcast source
-      my $saved = $info{'handle'};
-      $info{'handle'} = $doorname;
-      main::pageall($message);
-      $info{'handle'} = $saved;
-    } else {
-      # Fallback: write to all node page files directly
-      my @nodes = glob("$config{'home'}$config{'nodes'}/*");
-      for my $nf (@nodes) {
-        my $node = $nf;
-        $node =~ s/^.*\///;
-        my $pagefile = "$config{'home'}$config{'messages'}/$node.page";
-        eval {
-          lockfile($pagefile);
-          open(my $fh, '>>', $pagefile);
-          print $fh "\n\@DATACLR[\@USERCLR$doorname\@DATACLR] \@SYSTEMCLR$message\n";
-          close($fh);
-          unlockfile($pagefile);
-        };
-      }
-    }
-  };
+
+  # Send via global broker to all logged-in sessions
+  if ($_BBS_BROKER_SOCK && defined &broker_send_room_message) {
+    eval {
+      broker_send_room_message($_BBS_BROKER_SOCK, "bbs-global", $formatted);
+    };
+  } elsif (defined &main::pageall) {
+    # Last-resort: fall back to pageall
+    my $saved = $info{'handle'};
+    $info{'handle'} = $doorname;
+    main::pageall($message);
+    $info{'handle'} = $saved;
+  }
+
   door_log_activity($doorname, $message);
 }
 
 # Get list of currently online player handles
 sub door_get_online_players {
+  my ($doorname) = @_;
   my @players;
   my @nodefiles = glob("$config{'home'}$config{'nodes'}/*");
+  my $my_handle = $info{'handle'} // '';
   for my $nf (@nodefiles) {
     eval {
       open(my $fh, '<', $nf);
       my $line = <$fh>;
       close($fh);
       chomp $line if $line;
-      # Node files contain handle or handle info
       if ($line && $line =~ /\S/) {
-        push @players, $line;
+        # Node file format: ip|node|pid|timestamp|handle|proto|location
+        my @fields = split(/\|/, $line);
+        my $handle = $fields[4] // $line;
+        # Skip system entries and the current user
+        next if !$handle || $handle eq 'CONNECT' || $handle eq '*** HIDDEN ***';
+        next if $handle eq $my_handle;
+        push @players, $handle;
       }
     };
   }
@@ -517,6 +630,8 @@ sub door_save_player {
 # Send a message to a specific player (delivered on their next login/check)
 sub door_send_message {
   my ($doorname, $target_handle, $message) = @_;
+
+  # Persist message for offline/missed delivery
   my $dir = door_data_dir($doorname);
   my $msgfile = "$dir/messages.dat";
   my $messages = [];
@@ -534,6 +649,19 @@ sub door_send_message {
   # Keep only last 100 messages
   splice(@$messages, 0, @$messages - 100) if @$messages > 100;
   eval { lock_store($messages, $msgfile); };
+
+  # Also deliver immediately via broker direct message if target is online
+  my $dm = "\@DATACLR[$doorname\@DATACLR] \@USERCLR" . ($info{'handle'} // $doorname) .
+           "\@DATACLR: \@SYSTEMCLR$message";
+  if ($_BBS_BROKER_SOCK && defined &broker_send_direct_message) {
+    eval {
+      broker_send_direct_message($_BBS_BROKER_SOCK, "user-$target_handle", $dm);
+    };
+  } elsif ($_DOOR_BROKER_SOCK && defined &broker_send_direct_message) {
+    eval {
+      broker_send_direct_message($_DOOR_BROKER_SOCK, "user-$target_handle", $dm);
+    };
+  }
 }
 
 # Get unread messages for current player
@@ -571,7 +699,7 @@ sub door_show_messages {
   return unless @$msgs;
   writeline("", 1);
   writeline($config{'themecolor'} . " You have " . scalar(@$msgs) . " message(s):" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 50) . $RST, 1);
+  door_hrule(50);
   for my $m (@$msgs) {
     my $when = localtime($m->{timestamp});
     writeline($config{'usercolor'} . " From $m->{from}" . $config{'systemcolor'} . " ($when):" . $RST, 1);
@@ -582,6 +710,200 @@ sub door_show_messages {
 }
 
 # ============================================================================
+# UI HELPERS
+# ============================================================================
+
+# Draw a horizontal rule using box-drawing chars
+# door_hrule($width, $color)  -- defaults to 50 wide, linecolor
+sub door_hrule {
+  my ($width, $color) = @_;
+  $width //= 50;
+  $color //= $config{'linecolor'};
+  writeline($color . " " . (boxchar('horizontal') x $width) . $RST, 1);
+}
+
+# ============================================================================
+# CARD ART
+# ============================================================================
+#
+# Draws playing cards as box-art, side by side. Each card is 9 chars wide x 5 tall.
+#
+#  ┌───────┐
+#  │ A     │    row 1: rank top-left
+#  │   ♥   │    row 2: suit center
+#  │     A │    row 3: rank bottom-right
+#  └───────┘
+#
+# Usage: door_draw_cards(\@cards, $base_color, $label)
+#   @cards - card strings like "AH", "10D", "KS", or "?" for face-down
+
+my %_SUIT_SYMBOL = (
+  'H' => chr(3),   # CP437 heart
+  'D' => chr(4),   # CP437 diamond
+  'C' => chr(5),   # CP437 club
+  'S' => chr(6),   # CP437 spade
+  '?' => '?',
+);
+
+sub _door_parse_card {
+  my ($card) = @_;
+  return ('?', '?') if !defined($card) || $card eq '?';
+  if ($card =~ /^(10)([HDCS])$/) { return ($1, $2); }
+  if ($card =~ /^([2-9AJQK])([HDCS])$/) { return ($1, $2); }
+  return ('?', '?');
+}
+
+sub door_draw_cards {
+  my ($cards, $base_color, $label) = @_;
+  $base_color //= $config{'linecolor'};
+  my $n = scalar @$cards;
+  return unless $n > 0;
+
+  my $h  = boxchar('horizontal') x 7;
+  my $tl = boxchar('topleft');
+  my $tr = boxchar('topright');
+  my $bl = boxchar('bottomleft');
+  my $br = boxchar('bottomright');
+  my $vl = boxchar('vertical');
+
+  writeline($config{'systemcolor'} . " $label" . $RST, 1) if $label;
+
+  my @parsed;
+  for my $c (@$cards) {
+    my ($rank, $suit) = _door_parse_card($c);
+    my $sym  = $_SUIT_SYMBOL{$suit} // '?';
+    my $scol = ($suit eq 'H' || $suit eq 'D') ? $config{'errorcolor'} : $config{'datacolor'};
+    $scol    = $config{'linecolor'} if $suit eq '?';
+    push @parsed, { rank => $rank, suit => $suit, sym => $sym, scol => $scol };
+  }
+
+  for my $row (0 .. 4) {
+    my $line = " ";
+    for my $i (0 .. $n - 1) {
+      my $p = $parsed[$i];
+      my ($r, $s, $sc) = ($p->{rank}, $p->{sym}, $p->{scol});
+      my $hidden = ($p->{suit} eq '?');
+
+      if    ($row == 0) { $line .= $base_color . $tl . $h . $tr . $RST; }
+      elsif ($row == 1) { my $rl = $hidden ? "? " : sprintf("%-2s", $r);
+                          $line .= $base_color . $vl . $RST . $sc . " $rl    " . $base_color . $vl . $RST; }
+      elsif ($row == 2) { my $c2 = $hidden ? "  ?  " : "  $s  ";
+                          $line .= $base_color . $vl . $RST . $sc . " $c2 " . $base_color . $vl . $RST; }
+      elsif ($row == 3) { my $rr = $hidden ? " ? " : sprintf("%2s ", $r);
+                          $line .= $base_color . $vl . $RST . $sc . "    $rr" . $base_color . $vl . $RST; }
+      elsif ($row == 4) { $line .= $base_color . $bl . $h . $br . $RST; }
+
+      $line .= " " if $i < $n - 1;
+    }
+    writeline($line, 1);
+  }
+}
+
+# ============================================================================
+# DICE DISPLAY
+# ============================================================================
+#
+#  ┌─────┐  ┌─────┐  ┌─────┐
+#  │     │  │ o   │  │ o o │
+#  │  o  │  │  o  │  │     │
+#  │     │  │   o │  │ o o │
+#  └─────┘  └─────┘  └─────┘
+#
+# door_draw_dice(\@values, \@kept, $base_color)
+#   @values = array of 1-6
+#   @kept = array of 0/1 (1 = kept/locked)
+#   $base_color = box border color
+
+sub door_draw_dice {
+  my ($values, $kept, $base_color) = @_;
+  $base_color //= $config{'linecolor'};
+  $kept //= [];
+  my $n = scalar @$values;
+  return unless $n > 0;
+
+  my $h  = boxchar('horizontal') x 5;
+  my $tl = boxchar('topleft');
+  my $tr = boxchar('topright');
+  my $bl = boxchar('bottomleft');
+  my $br = boxchar('bottomright');
+  my $vl = boxchar('vertical');
+
+  # Dice face patterns: [top_row, mid_row, bot_row]
+  # o = pip, space = empty
+  my %faces = (
+    1 => ["     ", "  o  ", "     "],
+    2 => ["    o", "     ", "o    "],
+    3 => ["    o", "  o  ", "o    "],
+    4 => ["o   o", "     ", "o   o"],
+    5 => ["o   o", "  o  ", "o   o"],
+    6 => ["o   o", "o   o", "o   o"],
+  );
+
+  for my $row (0 .. 4) {
+    my $line = " ";
+    for my $i (0 .. $n - 1) {
+      my $v = $values->[$i] || 1;
+      $v = 1 if $v < 1; $v = 6 if $v > 6;
+      my $face = $faces{$v};
+      my $bc = ($kept->[$i]) ? $config{'usercolor'} : $base_color;
+      my $pc = ($kept->[$i]) ? $config{'usercolor'} : $config{'datacolor'};
+
+      if    ($row == 0) { $line .= $bc . $tl . $h . $tr . $RST; }
+      elsif ($row == 4) { $line .= $bc . $bl . $h . $br . $RST; }
+      else              { $line .= $bc . $vl . $RST . $pc . $face->[$row - 1] . $bc . $vl . $RST; }
+
+      $line .= " " if $i < $n - 1;
+    }
+    writeline($line, 1);
+  }
+
+  # Labels under dice: die number or "KEPT"
+  my $labels = " ";
+  for my $i (0 .. $n - 1) {
+    if ($kept->[$i]) {
+      $labels .= $config{'usercolor'} . " KEPT " . $RST;
+    } else {
+      $labels .= $config{'promptcolor'} . "  " . ($i + 1) . "   " . $RST;
+    }
+    $labels .= " " if $i < $n - 1;
+  }
+  writeline($labels, 1);
+}
+
+# ============================================================================
+# SLOT MACHINE DISPLAY
+# ============================================================================
+#
+#  ┌─────────┬─────────┬─────────┐
+#  │  Cherry  │  Bell   │   7    │
+#  └─────────┴─────────┴─────────┘
+#
+# door_draw_slots(\@reels, $winning)  -- @reels = 3 symbol strings
+
+sub door_draw_slots {
+  my ($reels, $winning) = @_;
+  $reels //= ['?', '?', '?'];
+
+  my $h9  = boxchar('horizontal') x 9;
+  my $vl  = boxchar('vertical');
+  my $tl  = boxchar('topleft');   my $tr = boxchar('topright');
+  my $bl  = boxchar('bottomleft');my $br = boxchar('bottomright');
+  my $td  = boxchar('tdown');     my $tu = boxchar('tup');
+
+  my $lc = $config{'linecolor'};
+  my $dc = $winning ? $config{'usercolor'} : $config{'datacolor'};
+
+  writeline(" " . $lc . $tl . $h9 . $td . $h9 . $td . $h9 . $tr . $RST, 1);
+  my $mid = " " . $lc . $vl . $RST;
+  for my $i (0 .. 2) {
+    my $sym = $reels->[$i] // '?';
+    $mid .= $dc . sprintf(" %-8s", substr($sym, 0, 8)) . $RST . $lc . $vl . $RST;
+  }
+  writeline($mid, 1);
+  writeline(" " . $lc . $bl . $h9 . $tu . $h9 . $tu . $h9 . $br . $RST, 1);
+}
+
+# ============================================================================
 # DEBUG
 # ============================================================================
 
@@ -589,5 +911,382 @@ sub door_debug {
   my ($doorname, $msg) = @_;
   logger("DOOR[$doorname]: $msg") if $config{'debug'};
 }
+
+# ============================================================================
+# MULTIPLAYER SESSION SYSTEM
+# ============================================================================
+#
+# File-based session management for real-time multiplayer door games.
+# Sessions are shared game state files that multiple players poll.
+#
+# Flow:
+#   1. Host calls door_session_create() - creates session, waits for joiners
+#   2. Joiner calls door_session_list() - sees open sessions
+#   3. Joiner calls door_session_join() - adds themselves to session
+#   4. Host sees joiner via door_session_poll() - starts game
+#   5. During game: door_session_update/read for shared state
+#   6. Game over: door_session_destroy()
+#
+# Session files: data/doors/<game>/sessions/<id>.dat
+#
+
+# Create a new multiplayer session. Returns session hashref.
+sub door_session_create {
+  my ($doorname, $opts) = @_;
+  $opts //= {};
+  my $max_players = $opts->{max_players} // 2;
+  my $session_id = _door_session_id();
+  my $dir = door_data_dir($doorname) . "/sessions";
+  mkdir $dir unless -d $dir;
+
+  my $session = {
+    id          => $session_id,
+    doorname    => $doorname,
+    host        => $info{'handle'},
+    host_node   => $info{'node'} // 0,
+    max_players => $max_players,
+    players     => [{
+      name => $info{'handle'},
+      node => $info{'node'} // 0,
+      type => 'human',
+    }],
+    status      => 'waiting',   # waiting, playing, done
+    created     => time(),
+    updated     => time(),
+    game_state  => $opts->{game_state} // {},
+  };
+
+  my $file = "$dir/$session_id.dat";
+  eval { lock_store($session, $file); };
+  if ($@) {
+    door_debug($doorname, "Session create failed: $@");
+    return undef;
+  }
+
+  # Announce via broker
+  my $need = $max_players - 1;
+  my $plr = $need == 1 ? "player" : "players";
+  door_broadcast($doorname, "$info{'handle'} started a $max_players-player $doorname game! Need $need more $plr.");
+
+  return $session;
+}
+
+# Generate a short session ID
+sub _door_session_id {
+  my @chars = ('A'..'Z', '0'..'9');
+  my $id = '';
+  $id .= $chars[int(rand(@chars))] for 1..6;
+  return $id;
+}
+
+# List open sessions for a game (status=waiting)
+sub door_session_list {
+  my ($doorname) = @_;
+  my $dir = door_data_dir($doorname) . "/sessions";
+  return [] unless -d $dir;
+
+  my @sessions;
+  if (opendir(my $dh, $dir)) {
+    for my $f (readdir($dh)) {
+      next unless $f =~ /^(.+)\.dat$/;
+      my $file = "$dir/$f";
+      my $session;
+      eval { $session = lock_retrieve($file); };
+      next if $@ || !$session;
+      # Clean up stale sessions (>5 min waiting, >30 min playing)
+      if ($session->{status} eq 'waiting' && time() - $session->{created} > 300) {
+        unlink $file;
+        next;
+      }
+      if ($session->{status} eq 'playing' && time() - $session->{updated} > 1800) {
+        unlink $file;
+        next;
+      }
+      push @sessions, $session if $session->{status} eq 'waiting';
+    }
+    closedir($dh);
+  }
+  return \@sessions;
+}
+
+# Join an existing session. Returns updated session or undef on failure.
+sub door_session_join {
+  my ($doorname, $session_id) = @_;
+  my $dir = door_data_dir($doorname) . "/sessions";
+  my $file = "$dir/$session_id.dat";
+  return undef unless -e $file;
+
+  my $session;
+  eval { $session = lock_retrieve($file); };
+  return undef if $@ || !$session;
+  return undef if $session->{status} ne 'waiting';
+  return undef if scalar @{$session->{players}} >= $session->{max_players};
+
+  # Check if already in session
+  for my $p (@{$session->{players}}) {
+    return $session if lc($p->{name}) eq lc($info{'handle'});
+  }
+
+  push @{$session->{players}}, {
+    name => $info{'handle'},
+    node => $info{'node'} // 0,
+    type => 'human',
+  };
+  $session->{updated} = time();
+
+  # Auto-start if full
+  if (scalar @{$session->{players}} >= $session->{max_players}) {
+    $session->{status} = 'playing';
+  }
+
+  eval { lock_store($session, $file); };
+  return $@ ? undef : $session;
+}
+
+# Poll a session for updates (check if new players joined, state changed)
+sub door_session_poll {
+  my ($doorname, $session_id) = @_;
+  my $dir = door_data_dir($doorname) . "/sessions";
+  my $file = "$dir/$session_id.dat";
+  return undef unless -e $file;
+  my $session;
+  eval { $session = lock_retrieve($file); };
+  return $@ ? undef : $session;
+}
+
+# Update session game state (called by the active player after their turn)
+sub door_session_update {
+  my ($doorname, $session_id, $updates) = @_;
+  my $dir = door_data_dir($doorname) . "/sessions";
+  my $file = "$dir/$session_id.dat";
+  return undef unless -e $file;
+
+  my $session;
+  eval { $session = lock_retrieve($file); };
+  return undef if $@ || !$session;
+
+  # Merge updates
+  for my $key (keys %$updates) {
+    $session->{$key} = $updates->{$key};
+  }
+  $session->{updated} = time();
+
+  eval { lock_store($session, $file); };
+  return $@ ? undef : $session;
+}
+
+# Destroy a session (game over)
+sub door_session_destroy {
+  my ($doorname, $session_id) = @_;
+  my $dir = door_data_dir($doorname) . "/sessions";
+  my $file = "$dir/$session_id.dat";
+  unlink $file if -e $file;
+}
+
+# Wait for players to join a session. Returns session when full or timed out.
+# Options: timeout (seconds per cycle, default 60), max_cycles (default 3)
+sub door_session_wait {
+  my ($doorname, $session_id, $opts) = @_;
+  $opts //= {};
+  my $timeout = $opts->{timeout} // 60;
+  my $max_cycles = $opts->{max_cycles} // 3;
+
+  for my $cycle (1 .. $max_cycles) {
+    my $deadline = time() + $timeout;
+    my $last_count = 0;
+
+    while (time() < $deadline) {
+      my $session = door_session_poll($doorname, $session_id);
+      return undef unless $session;
+
+      my $count = scalar @{$session->{players}};
+      if ($count != $last_count) {
+        # New player joined
+        my $newest = $session->{players}[$count - 1]{name};
+        writeline($config{'usercolor'} . " $newest joined!" . $RST, 1) if $count > 1;
+        $last_count = $count;
+      }
+
+      # Session full?
+      if ($count >= $session->{max_players}) {
+        $session->{status} = 'playing';
+        door_session_update($doorname, $session_id, { status => 'playing' });
+        return $session;
+      }
+
+      # Show countdown
+      my $remaining = $deadline - time();
+      my $need = $session->{max_players} - $count;
+      writeline("\r" . $config{'systemcolor'} . " Waiting for $need more... ${remaining}s " . $RST, 0);
+
+      # Brief sleep then check for input (allow early start/cancel)
+      my $key = "";
+      eval {
+        local $SIG{ALRM} = sub { die "timeout\n"; };
+        alarm(2);
+        $key = waitkey("", 2);
+        alarm(0);
+      };
+      alarm(0);
+
+      if ($key && uc($key) eq 'Q') {
+        writeline("", 1);
+        door_session_destroy($doorname, $session_id);
+        return undef;
+      }
+      if ($key && uc($key) eq 'A') {
+        # Fill with AI
+        writeline("", 1);
+        return $session;
+      }
+    }
+
+    writeline("", 1);
+    my $session = door_session_poll($doorname, $session_id);
+    return undef unless $session;
+    my $need = $session->{max_players} - scalar @{$session->{players}};
+
+    if ($need > 0) {
+      writeline($config{'systemcolor'} . " Still need $need player(s)." . $RST, 1);
+      my $choice = door_menu([
+        ['W', 'Keep waiting'],
+        ['A', 'Fill with AI'],
+        ['Q', 'Cancel game'],
+      ], "Action");
+
+      if ($choice eq 'Q') {
+        door_session_destroy($doorname, $session_id);
+        return undef;
+      }
+      if ($choice eq 'A') {
+        return $session;
+      }
+      # else keep waiting (next cycle)
+    }
+  }
+
+  # Max cycles exceeded - return what we have
+  return door_session_poll($doorname, $session_id);
+}
+
+# ============================================================================
+# MULTIPLAYER TURN SYNC (broker-based)
+# ============================================================================
+# These functions enable real-time multiplayer across separate telnet sessions.
+# Each player joins a game-specific broker room. The active player broadcasts
+# game state after each action. Waiting players poll for updates.
+#
+# Usage pattern:
+#   1. Host creates session, all players door_game_room_join()
+#   2. Active player takes turn, then calls door_game_state_send()
+#   3. Other players call door_game_state_recv() to get updates
+#   4. door_game_wait_turn() blocks until it's this player's turn
+
+# Join a game-specific broker room for multiplayer sync
+sub door_game_room_join {
+  my ($doorname, $session_id) = @_;
+  return unless $_DOOR_BROKER_SOCK && $_HAS_BROKER_CLIENT;
+  my $room = "door-$doorname-$session_id";
+  broker_join_room($_DOOR_BROKER_SOCK, $room);
+  $_DOOR_BROKER_ROOM = $room;
+}
+
+# Send game state to all players in the session room
+# state is a hashref that will be JSON-encoded in the message
+sub door_game_state_send {
+  my ($doorname, $state) = @_;
+  return unless $_DOOR_BROKER_SOCK && $_DOOR_BROKER_ROOM && $_HAS_BROKER_CLIENT;
+  my $json = eval { encode_json($state) };
+  return unless $json;
+  broker_send_room_message($_DOOR_BROKER_SOCK, $_DOOR_BROKER_ROOM,
+    "GAMESTATE:$json");
+}
+
+# Receive game state updates (non-blocking)
+# Returns arrayref of state hashrefs, plus any chat messages
+sub door_game_state_recv {
+  my ($doorname) = @_;
+  my @states;
+  my @chats;
+  if ($_DOOR_BROKER_SOCK && $_HAS_BROKER_CLIENT) {
+    eval {
+      my @msgs = broker_poll($_DOOR_BROKER_SOCK);
+      for my $m (@msgs) {
+        if ($m->{type} eq 'room_message' && $m->{message}) {
+          if ($m->{message} =~ /^GAMESTATE:(.+)$/) {
+            my $state = eval { decode_json($1) };
+            push @states, $state if $state;
+          } else {
+            push @chats, $m->{message};
+          }
+        } elsif ($m->{type} eq 'player_entered' && $m->{player}) {
+          push @chats, "[$doorname] $m->{player} joined.";
+        } elsif ($m->{type} eq 'player_left' && $m->{player}) {
+          push @chats, "[$doorname] $m->{player} left.";
+        }
+      }
+    };
+  }
+  return (\@states, \@chats);
+}
+
+# Wait for this player's turn, displaying board updates as they arrive.
+# Args:
+#   doorname    - door game name
+#   my_pidx     - this player's index in the game
+#   render_fn   - coderef called with ($game_state) to redraw the screen
+#   timeout     - max seconds to wait (default 120)
+# Returns: latest game state hashref, or undef on timeout/disconnect
+sub door_game_wait_turn {
+  my ($doorname, $my_pidx, $render_fn, $timeout) = @_;
+  $timeout //= 120;
+  my $deadline = time() + $timeout;
+  my $last_state;
+
+  while (time() < $deadline) {
+    my ($states, $chats) = door_game_state_recv($doorname);
+
+    # Process any state updates
+    for my $s (@$states) {
+      $last_state = $s;
+      # Render the updated board
+      if ($render_fn && ref $render_fn eq 'CODE') {
+        $render_fn->($s);
+      }
+    }
+
+    # Show chat messages
+    for my $c (@$chats) {
+      writeline($config{'linecolor'} . " $c" . $RST, 1);
+    }
+
+    # Is it our turn?
+    if ($last_state && defined $last_state->{current}) {
+      return $last_state if $last_state->{current} == $my_pidx;
+    }
+
+    # Check for game over
+    if ($last_state && $last_state->{over}) {
+      return $last_state;
+    }
+
+    # Brief sleep, check for chat input
+    my $key = "";
+    eval {
+      local $SIG{ALRM} = sub { die "timeout\n"; };
+      alarm(1);
+      $key = waitkey("", 1);
+      alarm(0);
+    };
+    alarm(0);
+
+    if ($key && lc($key) eq 'c') {
+      door_chat_input($doorname);
+    }
+  }
+
+  return $last_state;  # timeout
+}
+
 
 1;

@@ -1306,30 +1306,66 @@ sub main_loop {
                 # Verify destination room exists
                 my $dest_room = read_room_record($dest);
                 if ($dest_room && ($dest_room->{shortdesc} || $dest_room->{longdesc})) {
-                    my $prev_room = $player->{room};
-                    
-                    # Notify broker of room change
-                    if ($broker_sock && broker_connected($broker_sock)) {
-                        broker_leave_room($broker_sock);
-                        broker_join_room($broker_sock, $dest);
+
+                    # Check terrain traversal (mounts, boats, flying)
+                    my $terrain_ok = 1;
+                    my $dest_region = $dest_room->{region} // '';
+                    my $dest_feature = $dest_room->{feature} // '';
+
+                    if ($dest_region =~ /^(Lake|River|Ocean)$/ ||
+                        $dest_feature =~ /^(Lake|River|Water)$/) {
+                        # Water: need a boat
+                        unless ($player->{in_boat}) {
+                            writeline($config{'errorcolor'}.
+                                "You can't swim there. You need a boat.".$config{'themecolor'}, 1);
+                            $terrain_ok = 0;
+                        }
                     }
-                    
-                    # Leave current room
-                    photonmud_leave_room($player, $player->{room}, $dir);
-                    
-                    # Update player location
-                    $player->{room} = $dest;
-                    
-                    # Enter new room
-                    photonmud_enter_room($player, $dest, $prev_room, { 
-                        direction => $dir,
-                        room => $dest_room 
-                    });
-                    
-                    # Show the new room
-                    show_room_view($player, $dest_room);
-                    
-                    photonmud_debug("Player moved from room $prev_room to room $dest");
+                    elsif ($dest_region =~ /^Mountain$/ &&
+                           ($dest_feature // '') !~ /^(Pass|Path|Bridge|Road)$/) {
+                        # Mountains: need flying or climbing mount
+                        if ($player->{mounted}) {
+                            my $mount_type = $player->{mounted}{type} // '';
+                            my $specials = $player->{mounted}{capabilities}{special} // [];
+                            unless ($mount_type eq 'flying' ||
+                                    grep { $_ eq 'wall_climb' || $_ eq 'mountain_pass' } @$specials) {
+                                writeline($config{'errorcolor'}.
+                                    "The terrain is impassable. You need a flying mount.".$config{'themecolor'}, 1);
+                                $terrain_ok = 0;
+                            }
+                        } else {
+                            writeline($config{'errorcolor'}.
+                                "The mountains are impassable on foot.".$config{'themecolor'}, 1);
+                            $terrain_ok = 0;
+                        }
+                    }
+
+                    if ($terrain_ok) {
+                        my $prev_room = $player->{room};
+
+                        # Notify broker of room change
+                        if ($broker_sock && broker_connected($broker_sock)) {
+                            broker_leave_room($broker_sock);
+                            broker_join_room($broker_sock, $dest);
+                        }
+
+                        # Leave current room
+                        photonmud_leave_room($player, $player->{room}, $dir);
+
+                        # Update player location
+                        $player->{room} = $dest;
+
+                        # Enter new room
+                        photonmud_enter_room($player, $dest, $prev_room, { 
+                            direction => $dir,
+                            room => $dest_room 
+                        });
+
+                        # Show the new room
+                        show_room_view($player, $dest_room);
+
+                        photonmud_debug("Player moved from room $prev_room to room $dest");
+                    }
                 } else {
                     writeline($config{'errorcolor'}."That exit leads to an invalid location.".$config{'themecolor'}, 1);
                 }

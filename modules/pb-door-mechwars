@@ -1,0 +1,305 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: MechWars - Infinite Frontiers
+# A massively multiplayer mech combat and trading game
+# Spiritual successor to MechWars v1.9 Beta (1991)
+#
+# Navigate a 125x125 sector universe in one of 12 mech classes.
+# Battle AI drones, trade resources, colonize planets, build fortresses,
+# form guilds, and compete for galactic dominance.
+#
+# Modules loaded: mw-universe, mw-player, mw-bases, mw-drones,
+#                 mw-planets, mw-fortresses, mw-teams, mw-movement,
+#                 mw-combat, mw-economy, mw-entities, mw-ui
+#
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+use constant {
+    TURNS_PER_DAY   => 500,
+    START_STARVACS  => 5000,
+    DOOR_NAME       => 'mechwars',
+};
+
+my $DOOR_NAME = 'mechwars';
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+sub mechwars_main {
+    iamat($info{'handle'}, "Playing MechWars");
+
+    # Load all sub-modules
+    _mw_require_modules();
+
+    # Initialize shared world (loads from disk or creates fresh)
+    mw_world_init();
+
+    # Load or create player
+    my $player = mw_player_load($info{'handle'});
+    unless ($player) {
+        $player = mw_player_create($info{'handle'});
+        unless ($player) {
+            # User quit at mech selection
+            iamat($info{'handle'}, "At the main menu");
+            return;
+        }
+    }
+
+    # Daily turn reset
+    my $today = get_current_date();
+    if (($player->{last_play} // '') ne $today) {
+        $player->{turns} = TURNS_PER_DAY;
+        $player->{last_play} = $today;
+        # Restore shields/energy partially on new day
+        $player->{shields} = int($player->{max_shields} * 0.5)
+            if ($player->{shields} < int($player->{max_shields} * 0.5));
+        $player->{energy} = int($player->{max_energy} * 0.5)
+            if ($player->{energy} < int($player->{max_energy} * 0.5));
+    }
+
+    unless ($player->{turns} > 0) {
+        door_header("MechWars - Infinite Frontiers");
+        writeline($config{'errorcolor'} . " No turns remaining today, " .
+                  $config{'usercolor'} . $player->{handle} . $RST, 1);
+        writeline($config{'systemcolor'} . " Come back tomorrow for " . TURNS_PER_DAY . " fresh turns." . $RST, 1);
+        door_pause();
+        mw_player_save($player);
+        iamat($info{'handle'}, "At the main menu");
+        return;
+    }
+
+    # Connect to broker - start in global mechwars room, move to sector room on play
+    door_broker_connect($DOOR_NAME, "door-$DOOR_NAME");
+
+    # Show any pending messages
+    door_show_messages($DOOR_NAME);
+
+    # Update sector presence
+    mw_sector_enter($player);
+
+    # Show welcome screen
+    _mw_welcome($player);
+
+    # Main game loop
+    my $playing = 1;
+    while ($playing && $player->{turns} > 0) {
+        $playing = _mw_command_loop($player);
+
+        mw_player_save($player);
+    }
+
+    if ($player->{turns} <= 0) {
+        writeline("", 1);
+        writeline($config{'errorcolor'} . " No turns remaining." . $RST, 1);
+        writeline($config{'systemcolor'} . " Come back tomorrow for more turns!" . $RST, 1);
+        door_pause();
+    }
+
+    # Leave sector broker room
+    mw_sector_leave($player);
+    door_broker_disconnect();
+    mw_player_save($player);
+
+    door_log_activity($DOOR_NAME,
+        "$info{'handle'} signed off MechWars (L$player->{level} $player->{mech_type})");
+
+    iamat($info{'handle'}, "At the main menu");
+}
+
+# ============================================================================
+# WELCOME SCREEN
+# ============================================================================
+
+sub _mw_welcome {
+    my ($player) = @_;
+    door_clear();
+    writeline("", 1);
+    writeline($config{'themecolor'} .
+              "          M E C H W A R S  -  I N F I N I T E  F R O N T I E R S" . $RST, 1);
+    door_hrule(70);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . "  Welcome back, Commander " .
+              $config{'usercolor'} . $player->{handle} . $RST, 1);
+    writeline($config{'systemcolor'} . "  Mech:     " .
+              $config{'datacolor'} . $player->{mech_type} .
+              " (Level " . $player->{level} . ")" . $RST, 1);
+    writeline($config{'systemcolor'} . "  Shields:  " .
+              $config{'datacolor'} . "$player->{shields}/$player->{max_shields}" . $RST, 1);
+    writeline($config{'systemcolor'} . "  Energy:   " .
+              $config{'datacolor'} . "$player->{energy}/$player->{max_energy}" . $RST, 1);
+    writeline($config{'systemcolor'} . "  StarVacs: " .
+              $config{'datacolor'} . $player->{starvacs} . $RST, 1);
+    writeline($config{'systemcolor'} . "  Location: " .
+              $config{'datacolor'} . "Sector [$player->{x}, $player->{y}]" . $RST, 1);
+    writeline($config{'systemcolor'} . "  Turns:    " .
+              $config{'datacolor'} . $player->{turns} . $RST, 1);
+
+    if ($player->{guild}) {
+        writeline($config{'systemcolor'} . "  Guild:    " .
+                  $config{'datacolor'} . $player->{guild_name} . $RST, 1);
+    }
+    writeline("", 1);
+
+    # Show online players
+    my @online = door_get_online_players($DOOR_NAME);
+    if (@online) {
+        writeline($config{'themecolor'} . "  Pilots in the sector grid:" . $RST, 1);
+        writeline($config{'datacolor'} . "  " . join(", ", @online) . $RST, 1);
+        writeline("", 1);
+    }
+
+    door_pause();
+}
+
+# ============================================================================
+# MAIN COMMAND LOOP
+# ============================================================================
+
+sub _mw_command_loop {
+    my ($player) = @_;
+
+    mw_display_sector($player);
+    mw_draw_menu_bar($player);
+
+    # Show any incoming chat/broker messages
+    door_chat_display($DOOR_NAME);
+
+    writeline($config{'promptcolor'} . "  Command: " . $RST);
+    my $cmd = uc(waitkey(""));
+    writeline("", 1);
+
+    if    ($cmd eq 'M') { _mw_movement_prompt($player); }
+    elsif ($cmd eq 'A') { mw_attack_menu($player); }
+    elsif ($cmd eq 'P') { mw_port_menu($player); }
+    elsif ($cmd eq 'L') { mw_planet_menu($player); }
+    elsif ($cmd eq 'F') { mw_fold_menu($player); }
+    elsif ($cmd eq 'S') { mw_show_scanner($player); door_pause(); }
+    elsif ($cmd eq 'G') { mw_guild_menu($player); }
+    elsif ($cmd eq 'I') { mw_show_player_stats($player); door_pause(); }
+    elsif ($cmd eq 'N') { mw_deploy_mines($player); }
+    elsif ($cmd eq 'B') { mw_fortress_menu($player); }
+    elsif ($cmd eq 'R') {
+        door_show_scores($DOOR_NAME, "MechWars Rankings", "Kills");
+        door_pause();
+    }
+    elsif ($cmd eq 'H') { door_chat_input($DOOR_NAME); }
+    elsif ($cmd eq '?') { _mw_help(); }
+    elsif ($cmd eq 'Q') {
+        if (door_noyes("Leave MechWars?")) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+# ============================================================================
+# MOVEMENT PROMPT
+# ============================================================================
+
+sub _mw_movement_prompt {
+    my ($player) = @_;
+    door_clear();
+    mw_draw_mini_map($player);
+    writeline("", 1);
+    writeline($config{'themecolor'} . "  Movement Directions:" . $RST, 1);
+    writeline($config{'datacolor'} . "  7=NW  8=N  9=NE" . $RST, 1);
+    writeline($config{'datacolor'} . "  4=W        6=E" . $RST, 1);
+    writeline($config{'datacolor'} . "  1=SW  2=S  3=SE" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'promptcolor'} . "  Direction (1-9, Q=cancel): " . $RST);
+    my $dir = waitkey("");
+    writeline("", 1);
+    return if $dir =~ /^[qQ]$/;
+    mw_move_player($player, uc($dir));
+}
+
+# ============================================================================
+# HELP SCREEN
+# ============================================================================
+
+sub _mw_help {
+    door_header("MechWars Commands");
+    writeline("  " . $config{'promptcolor'} . "M" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Move (8 directions)", 1);
+    writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Attack (drones or players)", 1);
+    writeline("  " . $config{'promptcolor'} . "P" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Port (dock at trading base)", 1);
+    writeline("  " . $config{'promptcolor'} . "L" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Land (colonize/use planet)", 1);
+    writeline("  " . $config{'promptcolor'} . "F" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Fold (hyperspace jump)", 1);
+    writeline("  " . $config{'promptcolor'} . "S" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Scan (long range scanner)", 1);
+    writeline("  " . $config{'promptcolor'} . "G" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Guild (create/manage guild)", 1);
+    writeline("  " . $config{'promptcolor'} . "I" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Info (player statistics)", 1);
+    writeline("  " . $config{'promptcolor'} . "N" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "miNes (deploy sector mines)", 1);
+    writeline("  " . $config{'promptcolor'} . "B" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Build (fortress construction)", 1);
+    writeline("  " . $config{'promptcolor'} . "R" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Rankings (scoreboard)", 1);
+    writeline("  " . $config{'promptcolor'} . "H" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "cHat (send in-game message)", 1);
+    writeline("  " . $config{'promptcolor'} . "?" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Help (this screen)", 1);
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} .
+              " ... " . $config{'usercolor'} . "Quit (save and exit)", 1);
+    writeline("", 1);
+    writeline($config{'themecolor'} . " Movement Keys:" . $RST, 1);
+    writeline("  " . $config{'datacolor'} . "Numpad: 7(NW) 8(N) 9(NE) / 4(W) 6(E) / 1(SW) 2(S) 3(SE)", 1);
+    writeline("  " . $config{'datacolor'} . "QWERTY:  Q    W    E   /  A    D  /  Z    X    C", 1);
+    writeline("", 1);
+    door_pause();
+}
+
+# ============================================================================
+# WORLD INITIALIZATION (calls sub-module loaders)
+# ============================================================================
+
+sub mw_world_init {
+    mw_universe_load();
+    mw_bases_load();
+    mw_drones_load();
+    mw_planets_load();
+    mw_fortresses_load();
+    mw_teams_load();
+}
+
+# ============================================================================
+# MODULE LOADER
+# ============================================================================
+
+sub _mw_require_modules {
+    my $home = $config{'home'} // '/opt/photonbbs';
+    my @modules = qw(
+        mw-universe
+        mw-player
+        mw-bases
+        mw-drones
+        mw-combat
+        mw-movement
+        mw-economy
+        mw-planets
+        mw-fortresses
+        mw-teams
+        mw-entities
+        mw-ui
+    );
+
+    for my $mod (@modules) {
+        eval { require_module($mod); };
+        if ($@) {
+            writeline($config{'errorcolor'} . " Failed to load $mod: $@" . $RST, 1);
+        }
+    }
+}
+
+1;

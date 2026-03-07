@@ -1,0 +1,79 @@
+#!/usr/bin/perl
+#
+# MechWars Daily Maintenance Script
+# Run from cron or daily.d/ hook
+#
+# Tasks:
+#   1. Repopulate drones to target count
+#   2. Update all trading base prices
+#   3. Planet daily resource yield
+#   4. Clean up orphaned sector references
+#
+# Usage: photonbbs-client --run-maintenance mechwars-daily
+#        or: perl -I/opt/photonbbs/modules mechwars-daily.pl
+#
+
+use strict;
+use warnings;
+
+# PhotonBBS environment setup
+my $PHOTON_HOME = $ENV{PHOTON_HOME} // '/opt/photonbbs';
+
+# This script is meant to be run via the PhotonBBS maintenance framework.
+# It requires that pb-doorlib functions are available.
+
+sub mechwars_daily {
+    my $start = time();
+    print "[mechwars] Daily maintenance starting...\n";
+
+    # Load required modules using PhotonBBS require_module
+    eval { require_module('pb-doorlib'); };
+    if ($@) {
+        # Standalone: try to load directly
+        eval { require "$PHOTON_HOME/modules/pb-doorlib"; };
+        die "Cannot load pb-doorlib: $@\n" if $@;
+    }
+
+    # Load MechWars modules
+    for my $mod (qw(mw-universe mw-player mw-bases mw-drones mw-planets mw-fortresses mw-teams)) {
+        eval { require_module($mod); };
+        if ($@) {
+            eval { require "$PHOTON_HOME/modules/$mod"; };
+            warn "[mechwars] Warning: could not load $mod: $@\n" if $@;
+        }
+    }
+
+    # Initialize world
+    mw_universe_load();
+    mw_bases_load();
+    mw_drones_load();
+    mw_planets_load();
+
+    # 1. Repopulate drones
+    my $spawned = mw_spawn_drones(2000);  # MW_MAX_DRONES
+    print "[mechwars] Drone repop: spawned $spawned drones.\n";
+
+    # 2. Update base prices
+    mw_update_base_prices();
+    print "[mechwars] Trading base prices updated.\n";
+
+    # 3. Planet daily yield
+    mw_planet_daily_yield();
+    print "[mechwars] Planet resource yield processed.\n";
+
+    # 4. Move drones a little
+    my $moved = mw_update_drone_positions();
+    print "[mechwars] Drone movement: moved $moved drones.\n";
+
+    # Save everything
+    mw_universe_save();
+    mw_drones_save();
+
+    my $elapsed = time() - $start;
+    print "[mechwars] Daily maintenance complete in ${elapsed}s.\n";
+}
+
+# Run if called directly
+mechwars_daily() unless caller();
+
+1;

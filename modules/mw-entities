@@ -1,0 +1,65 @@
+#!/usr/bin/perl
+#
+# mw-entities - MechWars Entity Management and Scoreboard
+# Drone spawn maintenance, all-player scoreboard
+#
+# No package declaration - runs in main:: namespace
+
+# ============================================================================
+# SCOREBOARD
+# ============================================================================
+
+sub mw_show_scoreboard {
+    door_show_scores('mechwars', "MechWars Hall of Fame", "Kills");
+}
+
+# ============================================================================
+# UNIVERSE STATISTICS
+# ============================================================================
+
+sub mw_universe_stats {
+    door_header("MechWars Universe Statistics");
+
+    # Count entities in universe
+    my $uni     = mw_universe_ref();
+    my $drones  = mw_drones_ref();
+
+    my $total_bases   = 0;
+    my $total_planets = 0;
+    my $total_forts   = 0;
+    my $total_mines   = 0;
+    my $owned_planets = 0;
+    my $owned_forts   = 0;
+
+    for my $key (keys %$uni) {
+        my $s = $uni->{$key};
+        $total_bases++   if $s->{base_id};
+        $total_planets++ if $s->{planet_id};
+        $total_forts++   if $s->{fort_id};
+        $total_mines     += ($s->{mines} // 0);
+    }
+
+    my $total_drones  = scalar(keys %$drones);
+    my $total_players = scalar(door_get_all_players('mechwars'));
+
+    writeline("  " . $config{'themecolor'} . "Universe size:   " .
+              $config{'datacolor'} . MW_UNIVERSE_SIZE . "x" . MW_UNIVERSE_SIZE .
+              " (" . (MW_UNIVERSE_SIZE * MW_UNIVERSE_SIZE) . " sectors)" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Trading bases:   " .
+              $config{'datacolor'} . $total_bases . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Planets:         " .
+              $config{'datacolor'} . $total_planets . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Fortresses:      " .
+              $config{'datacolor'} . $total_forts . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Active drones:   " .
+              $config{'datacolor'} . $total_drones . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Active mines:    " .
+              $config{'datacolor'} . $total_mines . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Total pilots:    " .
+              $config{'datacolor'} . $total_players . $RST, 1);
+    writeline("", 1);
+
+    door_pause();
+}
+
+1;

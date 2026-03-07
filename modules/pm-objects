@@ -52,12 +52,17 @@ sub read_object_record {
     return $cached if defined $cached;
     
     my $file = "$config{'home'}/$config{'data'}/objects.dat";
+    # Detect actual record length from file size
+    my $fsize = -s $file or return {};
     my $reclen = 256;
+    for my $rl (270, 260, 256, 264, 280) {
+        if ($fsize % $rl == 0) { $reclen = $rl; last; }
+    }
 
     open(my $fh, "<:raw", $file) or return {};
     flock($fh, LOCK_SH);
 
-    seek($fh, ($objnum - 1) * ($reclen + 4), SEEK_SET);
+    seek($fh, ($objnum - 1) * $reclen, SEEK_SET);
     read($fh, my $buf, $reclen);
     flock($fh, LOCK_UN);
     close($fh);

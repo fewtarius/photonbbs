@@ -124,13 +124,19 @@ sub load_data_file {
 sub read_object_record {
     my ($objnum) = @_;
     my $file = "$config{'home'}/$config{'data'}/objects.dat";
+
+    # Detect actual record length from file size
+    my $fsize = -s $file or return {};
     my $reclen = 256;
+    for my $rl (270, 260, 256, 264, 280) {
+        if ($fsize % $rl == 0) { $reclen = $rl; last; }
+    }
 
     open(my $fh, "<:raw", $file) or do {
         return {};
     };
 
-    seek($fh, ($objnum - 1) * ($reclen + 4), SEEK_SET);
+    seek($fh, ($objnum - 1) * $reclen, SEEK_SET);
     read($fh, my $buf, $reclen);
     close($fh);
 
@@ -5915,6 +5921,107 @@ for my $key (sort { $rooms{$a}->{idx} <=> $rooms{$b}->{idx} } keys %rooms) {
 my $boss_persistence = "$config{'home'}/$config{'data'}/boss_persistence.dat";
 if (-e $boss_persistence) {
     unlink $boss_persistence or warn "Could not delete $boss_persistence: $!";
+}
+
+# ===========================================================================
+# TRANSPORTATION: Shore-to-water exits, boat spawning, mount spawning
+# ===========================================================================
+# Add exits from shore rooms INTO adjacent Lake/River rooms (for boat travel).
+# These are added AFTER the "remove impassable exits" pass so they survive.
+# The movement handler checks boat status before allowing these exits.
+
+{
+  my %reverse_dir_tr = (N=>'S',S=>'N',E=>'W',W=>'E',NE=>'SW',NW=>'SE',SE=>'NW',SW=>'NE');
+  my %dir_delta_tr = (
+    N=>[0,-1], S=>[0,1], E=>[1,0], W=>[-1,0],
+    NE=>[1,-1], SE=>[1,1], SW=>[-1,1], NW=>[-1,-1],
+  );
+
+  my $water_exits_added = 0;
+  my $boats_placed = 0;
+  my $horses_placed = 0;
+
+  # Build idx->room lookup
+  my %idx2room_tr = map { $rooms{$_}->{idx} => $rooms{$_} } @room_keys;
+
+  # 1. Shore rooms -> water rooms: add bidirectional exits for boating
+  for my $key (@room_keys) {
+    my $room = $rooms{$key};
+    next if $room->{impassable};
+    my $region = $room->{region} // '';
+
+    # Look for adjacent water rooms
+    my ($x, $y, $z) = ($room->{x}, $room->{y}, $room->{z});
+    my $has_water_neighbor = 0;
+
+    for my $dir (sort keys %dir_delta_tr) {
+      my ($dx, $dy) = @{$dir_delta_tr{$dir}};
+      my $nkey = ($x+$dx).",".($y+$dy).",$z";
+      next unless exists $rooms{$nkey};
+      my $neighbor = $rooms{$nkey};
+      my $nregion = $neighbor->{region} // '';
+      next unless $nregion =~ /^(Lake|River)$/;
+
+      # Add exit from shore -> water
+      unless (exists $room->{exits}{$dir}) {
+        $room->{exits}{$dir} = $neighbor->{idx};
+        $water_exits_added++;
+      }
+      # Add exit from water -> shore (so you can sail back)
+      my $rev = $reverse_dir_tr{$dir};
+      unless (exists $neighbor->{exits}{$rev}) {
+        $neighbor->{exits}{$rev} = $room->{idx};
+      }
+      $has_water_neighbor = 1;
+    }
+
+    # Spawn boat at shore rooms adjacent to water (one per shore room, not already occupied)
+    if ($has_water_neighbor && exists $object_by_name{"Boat"} &&
+        ($room->{object} // '') !~ /\S/) {
+      add_object_to_room($room, "Boat", 0);
+      $boats_placed++;
+    }
+  }
+
+  # 2. Water rooms can sail to adjacent water rooms
+  for my $key (@room_keys) {
+    my $room = $rooms{$key};
+    my $region = $room->{region} // '';
+    next unless $region =~ /^(Lake|River)$/;
+
+    my ($x, $y, $z) = ($room->{x}, $room->{y}, $room->{z});
+    for my $dir (sort keys %dir_delta_tr) {
+      my ($dx, $dy) = @{$dir_delta_tr{$dir}};
+      my $nkey = ($x+$dx).",".($y+$dy).",$z";
+      next unless exists $rooms{$nkey};
+      my $neighbor = $rooms{$nkey};
+      my $nregion = $neighbor->{region} // '';
+      next unless $nregion =~ /^(Lake|River)$/;
+      unless (exists $room->{exits}{$dir}) {
+        $room->{exits}{$dir} = $neighbor->{idx};
+        $water_exits_added++;
+      }
+    }
+  }
+
+  # 3. Spawn horses near town stables (Stable or Livery feature, or in Town region)
+  if (exists $object_by_name{"Horse"}) {
+    for my $key (@room_keys) {
+      my $room = $rooms{$key};
+      next if $room->{impassable};
+      my $feature = $room->{feature} // '';
+      my $region  = $room->{region}  // '';
+      if ($feature =~ /Stable|Livery|Barn/i ||
+          ($region eq 'Town' && $feature =~ /Inn|Market/i && int(rand(5)) == 0)) {
+        if (($room->{object} // '') !~ /\S/) {
+          add_object_to_room($room, "Horse", 0);
+          $horses_placed++;
+        }
+      }
+    }
+  }
+
+  print "[generator] Transportation: $water_exits_added water exits, $boats_placed boats, $horses_placed horses placed\n";
 }
 
 my $rooms_dat_path = "$config{'home'}$config{'data'}/rooms.dat";

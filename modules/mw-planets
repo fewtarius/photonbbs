@@ -1,0 +1,446 @@
+#!/usr/bin/perl
+#
+# mw-planets - MechWars Planet System
+# Planet colonization, resource extraction, territory control
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# Shared planets state
+my %_MW_PLANETS;
+my $_MW_PLANETS_LOADED = 0;
+
+# Planet count target
+use constant MW_PLANET_COUNT => 200;
+
+# Planet name parts for generation
+my @_MW_PLANET_PREFIXES = qw(Alpha Beta Gamma Delta Epsilon Zeta Nova Terra
+                               Kepler Tau Vega Rigel Sol Proxima Altair);
+my @_MW_PLANET_SUFFIXES = qw(Prime Major Minor III IV V VI VII VIII IX X
+                               Colony Haven World Sphere Globe Orb);
+
+# Resource types planets produce
+my %_MW_PLANET_RESOURCES = (
+    lithium  => { name => 'Lithium',  base_rate => 10 },
+    titanium => { name => 'Titanium', base_rate => 7  },
+    alloyis  => { name => 'Alloyis',  base_rate => 5  },
+);
+
+# ============================================================================
+# LOAD / SAVE
+# ============================================================================
+
+sub mw_planets_load {
+    return if $_MW_PLANETS_LOADED;
+    my $data = door_load_shared('mechwars', 'planets.dat');
+    if ($data && ref($data) eq 'HASH' && scalar(keys %$data) > 0) {
+        %_MW_PLANETS = %$data;
+        $_MW_PLANETS_LOADED = 1;
+        return;
+    }
+    _mw_planets_init();
+    $_MW_PLANETS_LOADED = 1;
+}
+
+sub mw_planets_save {
+    door_save_shared('mechwars', 'planets.dat', \%_MW_PLANETS);
+}
+
+sub _mw_planets_init {
+    writeline($config{'systemcolor'} . " Generating planets..." . $RST, 1);
+    %_MW_PLANETS = ();
+
+    my $universe = mw_universe_ref();
+    my %placed;
+
+    for my $id (1 .. MW_PLANET_COUNT) {
+        my ($x, $y) = mw_random_empty_sector();
+        my $key = "$x,$y";
+        my $tries = 0;
+        while ($placed{$key} && $tries < 100) {
+            ($x, $y) = mw_random_empty_sector();
+            $key = "$x,$y";
+            $tries++;
+        }
+        $placed{$key} = 1;
+
+        my $name = _mw_gen_planet_name($id);
+        my $type = _mw_random_planet_type();
+
+        $_MW_PLANETS{$id} = {
+            id        => $id,
+            name      => $name,
+            x         => $x,
+            y         => $y,
+            type      => $type,
+            owner     => '',
+            guild     => '',
+            defense   => 0,
+            max_def   => 500,
+            ore       => int(rand(500)) + 200,      # Lithium stockpile
+            metals    => int(rand(400)) + 100,      # Titanium stockpile
+            alloy     => int(rand(300)) + 50,       # Alloyis stockpile
+            pop       => 0,
+            taxrate   => 10,
+            last_yield => time(),
+        };
+
+        my $sec = $universe->{"$x,$y"};
+        $sec->{planet_id} = $id if $sec;
+    }
+
+    writeline($config{'datacolor'} . " Generated " . MW_PLANET_COUNT . " planets." . $RST, 1);
+    mw_planets_save();
+    mw_universe_save();
+}
+
+sub _mw_gen_planet_name {
+    my ($id) = @_;
+    my $prefix = $_MW_PLANET_PREFIXES[$id % scalar(@_MW_PLANET_PREFIXES)];
+    my $suffix = $_MW_PLANET_SUFFIXES[int(rand(scalar(@_MW_PLANET_SUFFIXES)))];
+    return "$prefix $suffix";
+}
+
+sub _mw_random_planet_type {
+    my @types = ('Terran', 'Desert', 'Ice', 'Jungle', 'Ocean', 'Volcanic', 'Gas Giant', 'Barren');
+    return $types[int(rand(scalar(@types)))];
+}
+
+# ============================================================================
+# PLANET ACCESS
+# ============================================================================
+
+sub mw_get_planet {
+    my ($id) = @_;
+    return $_MW_PLANETS{$id};
+}
+
+# ============================================================================
+# PLANET MENU (from main game when in sector with a planet)
+# ============================================================================
+
+sub mw_planet_menu {
+    my ($player) = @_;
+
+    my $sector = mw_get_sector($player->{x}, $player->{y});
+    unless ($sector && $sector->{planet_id}) {
+        writeline($config{'errorcolor'} . " No planet in this sector." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my $planet = mw_get_planet($sector->{planet_id});
+    unless ($planet) {
+        writeline($config{'errorcolor'} . " Planet data unavailable." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    while (1) {
+        door_clear();
+        writeline($config{'usercolor'} . " " . $planet->{name} .
+                  $config{'themecolor'} . " (" . $planet->{type} . ")" . $RST, 1);
+        door_hrule(50);
+        writeline("", 1);
+
+        my $owner_str = $planet->{owner} ? $planet->{owner} : "Unclaimed";
+        my $guild_str = $planet->{guild} ? " [" . $planet->{guild} . "]" : "";
+        writeline("  " . $config{'themecolor'} . "Owner:     " .
+                  $config{'datacolor'} . $owner_str . $guild_str . $RST, 1);
+        writeline("  " . $config{'themecolor'} . "Defense:   " .
+                  $config{'datacolor'} . "$planet->{defense}/$planet->{max_def}" . $RST, 1);
+        writeline("  " . $config{'themecolor'} . "Resources: " .
+                  $config{'datacolor'} . "Lithium:" . ($planet->{ore} // 0) .
+                  " Titanium:" . ($planet->{metals} // 0) .
+                  " Alloyis:" . ($planet->{alloy} // 0) . $RST, 1);
+        writeline("", 1);
+
+        my $is_owner = ($planet->{owner} // '') eq $player->{handle};
+        my $is_guild = ($planet->{guild} // '') && ($player->{guild} // '') &&
+                       $planet->{guild} eq $player->{guild};
+
+        if (!$planet->{owner}) {
+            # Unclaimed - can colonize
+            writeline("  " . $config{'promptcolor'} . "C" .
+                      $config{'themecolor'} . " ... Colonize (5000 SV)", 1);
+        } elsif ($is_owner || $is_guild) {
+            # Owner/guild actions
+            writeline("  " . $config{'promptcolor'} . "H" .
+                      $config{'themecolor'} . " ... Harvest Resources", 1);
+            writeline("  " . $config{'promptcolor'} . "D" .
+                      $config{'themecolor'} . " ... Build Defenses (1000 SV / 50 pts)", 1);
+            if ($is_owner) {
+                writeline("  " . $config{'promptcolor'} . "G" .
+                          $config{'themecolor'} . " ... Set Guild Ownership", 1);
+                writeline("  " . $config{'promptcolor'} . "A" .
+                          $config{'themecolor'} . " ... Abandon Planet", 1);
+            }
+        } else {
+            # Enemy planet - can attack
+            writeline("  " . $config{'promptcolor'} . "X" .
+                      $config{'themecolor'} . " ... Attack Planet Defenses", 1);
+        }
+
+        writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... Leave", 1);
+        writeline("", 1);
+        writeline($config{'promptcolor'} . "  Command: " . $RST);
+        my $cmd = uc(waitkey(""));
+        writeline("", 1);
+
+        if ($cmd eq 'Q') { last; }
+        elsif ($cmd eq 'C' && !$planet->{owner}) {
+            _mw_colonize_planet($player, $planet);
+        }
+        elsif ($cmd eq 'H' && ($is_owner || $is_guild)) {
+            _mw_harvest_planet($player, $planet);
+        }
+        elsif ($cmd eq 'D' && ($is_owner || $is_guild)) {
+            _mw_build_defenses($player, $planet);
+        }
+        elsif ($cmd eq 'G' && $is_owner) {
+            _mw_set_planet_guild($player, $planet);
+        }
+        elsif ($cmd eq 'A' && $is_owner) {
+            if (door_noyes("Abandon " . $planet->{name} . "?")) {
+                $planet->{owner} = '';
+                $planet->{guild} = '';
+                $planet->{defense} = 0;
+                mw_planets_save();
+                writeline($config{'systemcolor'} . " Planet abandoned." . $RST, 1);
+                door_pause();
+                last;
+            }
+        }
+        elsif ($cmd eq 'X' && !$is_owner && !$is_guild && $planet->{owner}) {
+            _mw_attack_planet($player, $planet);
+        }
+
+        mw_planets_save();
+    }
+}
+
+sub _mw_colonize_planet {
+    my ($player, $planet) = @_;
+    my $cost = 5000;
+
+    if ($player->{starvacs} < $cost) {
+        writeline($config{'errorcolor'} . " Need $cost SV to colonize." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    $player->{starvacs} -= $cost;
+    $planet->{owner}  = $player->{handle};
+    $planet->{defense} = 50;   # Starter defenses
+
+    writeline($config{'systemcolor'} . " " . $planet->{name} .
+              " colonized! You are now its governor." . $RST, 1);
+    door_broadcast('mechwars',
+        $player->{handle} . " colonized " . $planet->{name} . "!");
+    door_log_activity('mechwars',
+        $player->{handle} . " colonized planet " . $planet->{name});
+    door_pause();
+}
+
+sub _mw_harvest_planet {
+    my ($player, $planet) = @_;
+
+    my $ore     = $planet->{ore}    // 0;
+    my $metals  = $planet->{metals} // 0;
+    my $alloy   = $planet->{alloy}  // 0;
+    my $avail   = $ore + $metals + $alloy;
+
+    if ($avail <= 0) {
+        writeline($config{'systemcolor'} . " No resources ready to harvest." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my $space = $player->{cargo_max} - _mw_cargo_used($player);
+
+    writeline($config{'datacolor'} . " Available - Lithium:$ore Titanium:$metals Alloyis:$alloy" . $RST, 1);
+    writeline($config{'datacolor'} . " Cargo space: $space" . $RST, 1);
+    writeline("", 1);
+
+    # Harvest as much as cargo allows (lithium first, then titanium, then alloyis)
+    my $taken_ore = 0;
+    if ($ore > 0 && $space > 0) {
+        $taken_ore = $ore > $space ? $space : $ore;
+        $planet->{ore} -= $taken_ore;
+        $player->{cargo}{lithium} = ($player->{cargo}{lithium} // 0) + $taken_ore;
+        $space -= $taken_ore;
+    }
+    my $taken_met = 0;
+    if ($metals > 0 && $space >= 2) {
+        $taken_met = int($space / 2);
+        $taken_met = $metals if $taken_met > $metals;
+        $planet->{metals} -= $taken_met;
+        $player->{cargo}{titanium} = ($player->{cargo}{titanium} // 0) + $taken_met;
+        $space -= $taken_met * 2;
+    }
+    my $taken_alloy = 0;
+    if ($alloy > 0 && $space >= 3) {
+        $taken_alloy = int($space / 3);
+        $taken_alloy = $alloy if $taken_alloy > $alloy;
+        $planet->{alloy} -= $taken_alloy;
+        $player->{cargo}{alloyis} = ($player->{cargo}{alloyis} // 0) + $taken_alloy;
+    }
+
+    writeline($config{'systemcolor'} . " Harvested: Lithium:$taken_ore " .
+              "Titanium:$taken_met Alloyis:$taken_alloy" . $RST, 1);
+    door_pause();
+}
+
+sub _mw_build_defenses {
+    my ($player, $planet) = @_;
+
+    my $slots_avail = $planet->{max_def} - ($planet->{defense} // 0);
+    my $cost_each   = 1000;   # 1000 SV per 50 defense points
+    my $pts_per_buy = 50;
+
+    if ($slots_avail <= 0) {
+        writeline($config{'systemcolor'} . " Defense at maximum." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    writeline($config{'datacolor'} . " Current defense: " . $planet->{defense} .
+              "/" . $planet->{max_def} . $RST, 1);
+    writeline($config{'datacolor'} . " Cost: $cost_each SV per $pts_per_buy points" . $RST, 1);
+    writeline($config{'systemcolor'} . " Batches to buy (max " .
+              int($slots_avail / $pts_per_buy) . "): " . $RST);
+    my $batches = int(getline('text', 4, '', 1) // 0);
+    return if $batches <= 0;
+
+    my $total_cost = $batches * $cost_each;
+    my $total_pts  = $batches * $pts_per_buy;
+
+    if ($total_pts > $slots_avail) {
+        writeline($config{'errorcolor'} . " Only $slots_avail points of space available." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    if ($player->{starvacs} < $total_cost) {
+        writeline($config{'errorcolor'} . " Need $total_cost SV, have $player->{starvacs}." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    $player->{starvacs} -= $total_cost;
+    $planet->{defense}  += $total_pts;
+    writeline($config{'systemcolor'} . " Added $total_pts defense points for $total_cost SV." . $RST, 1);
+    door_pause();
+}
+
+sub _mw_set_planet_guild {
+    my ($player, $planet) = @_;
+
+    if (!$player->{guild}) {
+        writeline($config{'errorcolor'} . " You are not in a guild." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    $planet->{guild} = $player->{guild};
+    writeline($config{'systemcolor'} . " Planet ownership transferred to guild: " .
+              $player->{guild} . $RST, 1);
+    door_pause();
+}
+
+sub _mw_attack_planet {
+    my ($player, $planet) = @_;
+
+    my $defense = $planet->{defense} // 0;
+
+    door_clear();
+    writeline($config{'errorcolor'} . " Attacking " . $planet->{name} . $RST, 1);
+    door_hrule(50);
+    writeline($config{'datacolor'} . " Defense: $defense" . $RST, 1);
+    writeline("", 1);
+
+    # Bombardment: player fires volleys
+    my $rounds = 5;
+    my $dmg_total = 0;
+    my $mech = mw_get_mech($player->{mech_type}) // {};
+
+    for my $r (1 .. $rounds) {
+        last if $player->{energy} < MW_ENERGY_PER_SHOT || $defense <= 0;
+        $player->{energy} -= MW_ENERGY_PER_SHOT;
+        $player->{turns}   = ($player->{turns} // 1) - 1;
+
+        my $dmg = int(($mech->{shot_damage} // 20) * (0.8 + rand(0.4)));
+        # Havoc double damage to planets
+        $dmg *= 2 if ($player->{mech_type} // '') eq 'HAVOC';
+
+        $defense -= $dmg;
+        $defense  = 0 if $defense < 0;
+        $dmg_total += $dmg;
+        writeline($config{'datacolor'} . " Volley $r: $dmg damage. Defense: $defense" . $RST, 1);
+
+        # Return fire
+        if ($defense > 0) {
+            my $retaliates = int($planet->{defense} * 0.05);  # 5% of original defense
+            $player->{shields} -= $retaliates;
+            $player->{shields}  = 0 if $player->{shields} < 0;
+            writeline($config{'errorcolor'} . " Defense turrets fire: $retaliates damage." . $RST, 1);
+        }
+    }
+
+    $planet->{defense} = $defense;
+
+    if ($defense <= 0) {
+        # Planet taken!
+        writeline("", 1);
+        writeline($config{'usercolor'} . " PLANET CAPTURED!" . $RST, 1);
+        my $old_owner = $planet->{owner};
+        $planet->{owner}  = $player->{handle};
+        $planet->{guild}  = $player->{guild} // '';
+        $planet->{defense} = 10;  # Minimal starting defense
+
+        $player->{xp} = ($player->{xp} // 0) + 500;
+        $player->{kills} = ($player->{kills} // 0) + 1;
+
+        door_broadcast('mechwars',
+            $player->{handle} . " captured " . $planet->{name} .
+            " from " . $old_owner . "!");
+        door_log_activity('mechwars',
+            $player->{handle} . " captured planet " . $planet->{name});
+    } else {
+        writeline("", 1);
+        writeline($config{'systemcolor'} . " Total damage: $dmg_total. Defense remaining: $defense." . $RST, 1);
+    }
+
+    if ($player->{shields} <= 0) {
+        mw_player_death($player, $planet->{name} . " defense turrets");
+    }
+
+    mw_planets_save();
+    door_pause();
+}
+
+# ============================================================================
+# DAILY PLANET YIELD (called by maintenance script)
+# ============================================================================
+
+sub mw_planet_daily_yield {
+    for my $id (keys %_MW_PLANETS) {
+        my $planet = $_MW_PLANETS{$id};
+        next unless $planet->{owner};  # Only owned planets produce
+
+        # Base resource generation per day
+        $planet->{ore}    = ($planet->{ore}    // 0) + int(rand(30)) + 10;
+        $planet->{metals} = ($planet->{metals} // 0) + int(rand(20)) + 7;
+        $planet->{alloy}  = ($planet->{alloy}  // 0) + int(rand(15)) + 5;
+
+        # Cap stockpiles
+        $planet->{ore}    = 9999 if ($planet->{ore}    // 0) > 9999;
+        $planet->{metals} = 9999 if ($planet->{metals} // 0) > 9999;
+        $planet->{alloy}  = 9999 if ($planet->{alloy}  // 0) > 9999;
+
+        $planet->{last_yield} = time();
+    }
+    mw_planets_save();
+}
+
+1;

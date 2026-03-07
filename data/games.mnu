@@ -5,19 +5,27 @@
 ########################################################################
 # KEY|DESCRIPTION|SCRIPT_OR_SUB|SECLEVEL|HIDDEN|TYPE|CONCURRENCY
 ########################################################################
-A|Enter PhotonMUD (Multi-User Dungeon)|photonmud|10|0|external|0
-B|Legend of the Red Dragon|lord.sh|10|0|external|0
-C|Red Dragon (Native RPG)|reddragon_main|10|0|internal|0
-D|Star Trader (Space Trading)|startrader_main|10|0|internal|0
-E|Casino (Card and Dice Games)|casino_main|10|0|internal|0
-F|Drug Lord (Street Empire)|druglord_main|10|0|internal|0
-G|Sea Battle (Naval Combat)|seabattle_main|10|0|internal|0
-H|Star Trek (Space Exploration)|startrek_main|10|0|internal|0
-I|Big Catch (Fishing)|bigcatch_main|10|0|internal|0
-J|Atlantis (Underwater Adventure)|atlantis_main|10|0|internal|0
-K|1000 Miles (Racing Card Game)|onek_miles_main|10|0|internal|0
-L|Lunatix|luna.sh|10|0|external|0
-M|Barren Realms Elite|bre.sh|10|0|external|0
-N|Operation Overkill II (Combat)|ooii.sh|10|0|external|0
-O|Simpsons Door|simp.sh|10|0|external|0
-P|Darkness|darkness.sh|10|0|external|0
+#--- Multiplayer / Online ---
+A|PhotonMUD (Multi-User Dungeon)|photonmud|10|0|external|0
+B|MechWars (Space Combat/Trading)|mechwars_main|10|0|internal|0
+C|Sea Battle (Naval Combat)|seabattle_main|10|0|internal|0
+#--- Strategy / Card / Board ---
+D|1000 Miles (Racing Card Game)|onek_miles_main|10|0|internal|0
+E|Property Wars (Board Game)|propertywars_main|10|0|internal|0
+F|Dice Shake (Dice Game)|diceshake_main|10|0|internal|0
+G|Casino (Card and Dice Games)|casino_main|10|0|internal|0
+#--- RPG / Adventure ---
+H|Red Dragon (Fantasy RPG)|reddragon_main|10|0|internal|0
+I|Atlantis (Underwater Adventure)|atlantis_main|10|0|internal|0
+J|Star Trek (Space Exploration)|startrek_main|10|0|internal|0
+#--- Trading / Simulation ---
+K|Star Trader (Space Trading)|startrader_main|10|0|internal|0
+L|Drug Lord (Street Empire)|druglord_main|10|0|internal|0
+M|Big Catch (Fishing)|bigcatch_main|10|0|internal|0
+#--- DOS Door Games ---
+N|Legend of the Red Dragon|lord.sh|10|0|external|0
+O|Lunatix|luna.sh|10|0|external|0
+P|Barren Realms Elite|bre.sh|10|0|external|0
+Q|Operation Overkill II (Combat)|ooii.sh|10|0|external|0
+R|Simpsons Door|simp.sh|10|0|external|0
+S|Darkness|darkness.sh|10|0|external|0

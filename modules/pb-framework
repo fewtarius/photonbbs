@@ -46,6 +46,10 @@ eval {
 # SECURITY: Global hash to track active lock filehandles
 our %GLOBAL_LOCK_FH;
 
+# Global broker socket for this BBS session (pages, broadcasts, whispers)
+our $_BBS_BROKER_SOCK = undef;
+our $_BBS_BROKER_PENDING = [];  # Undelivered messages from background rooms
+
 # ============================================================================
 # DATE/TIME HELPERS - Use Perl instead of forking to `date` command
 # ============================================================================
@@ -80,6 +84,49 @@ sub doevents {
       getpages();
     }
   }
+}
+
+# Connect this session to the broker and join the global room for pages/broadcasts
+sub broker_session_connect {
+  return unless defined &broker_available && broker_available();
+  return if $_BBS_BROKER_SOCK;  # Already connected
+
+  my $player_id = "user-" . ($info{'handle'} // 'anon');
+  eval {
+    $_BBS_BROKER_SOCK = broker_connect($player_id);
+    if ($_BBS_BROKER_SOCK) {
+      broker_join_room($_BBS_BROKER_SOCK, "bbs-global");
+      logger("BROKER: Session connected, player_id=$player_id") if $config{'debug'};
+    }
+  };
+  if ($@) {
+    $_BBS_BROKER_SOCK = undef;
+    logger("BROKER: Session connect failed: $@") if $config{'debug'};
+  }
+}
+
+# Disconnect session from broker
+sub broker_session_disconnect {
+  return unless $_BBS_BROKER_SOCK;
+  eval { broker_disconnect($_BBS_BROKER_SOCK); };
+  $_BBS_BROKER_SOCK = undef;
+}
+
+# Poll the session broker socket for pending messages (called from getpages)
+# Returns array of message strings ready to display
+sub broker_session_poll {
+  return () unless $_BBS_BROKER_SOCK && defined &broker_poll;
+  my @ready;
+  eval {
+    my @msgs = broker_poll($_BBS_BROKER_SOCK);
+    for my $m (@msgs) {
+      push @ready, $m->{message}
+        if $m->{type} eq 'room_message' && $m->{message};
+      push @ready, $m->{message}
+        if $m->{type} eq 'direct_message' && $m->{message};
+    }
+  };
+  return @ready;
 }
 
 sub section_header {
@@ -164,40 +211,25 @@ sub whosonline {
   # Sort by node number
   @whosonline = sort { $a->{node} <=> $b->{node} } @whosonline;
 
-  # Width-aware display format
-  my $width = $config{'terminal_width'} || 80;
-  
-  if ($width == 40) {
-    # 40-column format: Node(4) User(10) Via(7) Loc(16) = 37 chars
-    writeline($config{'systemcolor'} . sprintf("%-4s %-10s %-7s %-16s", "Node", "User", "Via", "Location"), 1);
-    
-    foreach my $entry (@whosonline) {
-      my $node      = $entry->{node};
-      my $user      = substr($entry->{user}, 0, 10);
-      my $proto     = substr($entry->{proto}, 0, 7);
-      my $location  = substr($entry->{location}, 0, 16);
-      printf "%-4s %-10s %-7s %-16s\n",
-        $node, $user, $proto, $location;
-    }
-  } else {
-    # 80-column format: original spacing
-    writeline($config{'systemcolor'} . sprintf("%-4s %-10s %-7s %-32s %-5s %-10s", "Node", "User", "Via", "Location", "Idle", "Status"), 1);
-    
-    foreach my $entry (@whosonline) {
-      my $node      = $entry->{node};
-      my $user      = substr($entry->{user}, 0, 10);
-      my $proto     = substr($entry->{proto}, 0, 7);
-      my $location  = substr($entry->{location}, 0, 32);
-      my $idle_time = substr($entry->{idle_time}, 0, 5);
-      my $status    = substr($entry->{status}, 0, 10);
-      printf "%-4s %-10s %-7s %-32s %-5s %-10s\n",
-        $node, $user, $proto, $location, $idle_time, $status;
-    }
-  }
-
   # If no users are online, display a message
-  if (scalar(@whosonline) == 0) {
+  if (@whosonline == 0) {
     writeline($config{'systemcolor'}."No users are currently online.", 1);
+  } else {
+    my $width = $config{'terminal_width'} || 80;
+    if ($width == 40) {
+      writeline($config{'systemcolor'} . sprintf("%-4s %-10s %-7s %-16s", "Node", "User", "Via", "Location") . $RST, 1);
+      for my $e (@whosonline) {
+        writeline($config{'datacolor'} . sprintf("%-4s %-10s %-7s %-16s",
+          $e->{node}, substr($e->{user},0,10), substr($e->{proto},0,7), substr($e->{location},0,16)) . $RST, 1);
+      }
+    } else {
+      writeline($config{'systemcolor'} . sprintf("%-4s %-10s %-7s %-32s %-5s %-10s", "Node", "User", "Via", "Location", "Idle", "Status") . $RST, 1);
+      for my $e (@whosonline) {
+        writeline($config{'datacolor'} . sprintf("%-4s %-10s %-7s %-32s %-5s %-10s",
+          $e->{node}, substr($e->{user},0,10), substr($e->{proto},0,7),
+          substr($e->{location},0,32), substr($e->{idle_time},0,5), substr($e->{status},0,10)) . $RST, 1);
+      }
+    }
   }
 
   writeline($RST."\n");
@@ -319,6 +351,9 @@ sub bye {
     unlink("$config{'home'}$config{'data'}/iplist");
     rename("$config{'home'}$config{'data'}/iplist_", "$config{'home'}$config{'data'}/iplist");
   }
+
+  # Disconnect from broker on logout
+  broker_session_disconnect() if defined &broker_session_disconnect;
 
   kill getppid;
   exit(0);
@@ -776,13 +811,35 @@ sub waitkey {
 sub _substitute_color_codes {
   my $text = $_[0];
   my %color_map = (
-    '@RST' => $RST, '@BLK' => $BLK, '@RED' => $RED, '@GRN' => $GRN,
-    '@YLW' => $YLW, '@BLU' => $BLU, '@MAG' => $MAG, '@WHT' => $WHT,
-    '@CYN' => $CYN, '@BBK' => $BBK, '@BRD' => $BRD, '@BGN' => $BGN,
-    '@BYL' => $BYL, '@BBL' => $BBL, '@BMG' => $BMG, '@BCN' => $BCN,
-    '@BWH' => $BWH,
+    # Reset
+    '@RST'    => $RST,
+    # Standard foreground colors
+    '@BLK'    => $BLK, '@RED' => $RED, '@GRN' => $GRN,
+    '@YLW'    => $YLW, '@BLU' => $BLU, '@MAG' => $MAG,
+    '@WHT'    => $WHT, '@CYN' => $CYN,
+    # Bright foreground colors
+    '@BBK'    => $BBK, '@BRD' => $BRD, '@BGN' => $BGN,
+    '@BYL'    => $BYL, '@BBL' => $BBL, '@BMG' => $BMG,
+    '@BCN'    => $BCN, '@BWH' => $BWH,
+    # Text attributes (ANSI only - no-op for non-ANSI terminals)
+    '@BOLD'   => ($info{'ansi'} eq '1' ? "\e[1m"  : ''),
+    '@DIM'    => ($info{'ansi'} eq '1' ? "\e[2m"  : ''),
+    '@ITALIC' => ($info{'ansi'} eq '1' ? "\e[3m"  : ''),
+    '@UND'    => ($info{'ansi'} eq '1' ? "\e[4m"  : ''),  # underline
+    '@BLINK'  => ($info{'ansi'} eq '1' ? "\e[5m"  : ''),
+    '@REV'    => ($info{'ansi'} eq '1' ? "\e[7m"  : ''),  # reverse video
+    '@STRIKE' => ($info{'ansi'} eq '1' ? "\e[9m"  : ''),
+    # Background colors (ANSI only)
+    '@BGBLK'  => ($info{'ansi'} eq '1' ? "\e[40m" : ''),
+    '@BGRED'  => ($info{'ansi'} eq '1' ? "\e[41m" : ''),
+    '@BGGRN'  => ($info{'ansi'} eq '1' ? "\e[42m" : ''),
+    '@BGYLW'  => ($info{'ansi'} eq '1' ? "\e[43m" : ''),
+    '@BGBLU'  => ($info{'ansi'} eq '1' ? "\e[44m" : ''),
+    '@BGMAG'  => ($info{'ansi'} eq '1' ? "\e[45m" : ''),
+    '@BGCYN'  => ($info{'ansi'} eq '1' ? "\e[46m" : ''),
+    '@BGWHT'  => ($info{'ansi'} eq '1' ? "\e[47m" : ''),
   );
-  $text =~ s/(\@(?:RST|BLK|RED|GRN|YLW|BLU|MAG|WHT|CYN|BBK|BRD|BGN|BYL|BBL|BMG|BCN|BWH))/$color_map{$1} \/\/ ''/eg;
+  $text =~ s/(\@(?:RST|BLK|RED|GRN|YLW|BLU|MAG|WHT|CYN|BBK|BRD|BGN|BYL|BBL|BMG|BCN|BWH|BOLD|DIM|ITALIC|UND|BLINK|REV|STRIKE|BG(?:BLK|RED|GRN|YLW|BLU|MAG|CYN|WHT)))/$color_map{$1} \/\/ ''/eg;
   return $text;
 }
 
@@ -801,6 +858,34 @@ sub _substitute_theme_codes {
 sub _substitute_box_codes {
   my $text = $_[0];
   $text =~ s/\@(D?BOX(?:HORIZ|VERT|TOPLEFT|TOPRIGHT|BOTLEFT|BOTRIGHT|TDOWN|TUP|TLEFT|TRIGHT))\@/_boxcode_lookup($1)/eg;
+  return $text;
+}
+
+# Find the best available text file variant for the given basename.
+# Priority order:
+#   1. basename.ext   (e.g., welcome.ans - user's ANSI/PETSCII preference)
+#   2. basename.md    (Markdown - ANSI users only, rendered by readfile())
+#   3. basename.txt   (Plain text - universal fallback)
+# Returns the filename to pass to readfile(), or undef if nothing found.
+sub find_textfile {
+  my ($basename) = @_;
+  my $textdir = $config{'home'} . $config{'text'} . "/";
+  my @ext_order = ($info{'ext'});
+  push @ext_order, 'md' if $info{'ansi'} eq '1' && ($config{'render_markdown'} // '1') ne '0';
+  push @ext_order, 'txt';
+  for my $ext (@ext_order) {
+    my $candidate = "$basename.$ext";
+    return $candidate if -e $textdir . $candidate && -r $textdir . $candidate;
+  }
+  return undef;
+}
+
+# Remove ANSI escape sequences from a string
+sub strip_ansi {
+  my $text = $_[0];
+  $text =~ s/\e\[[0-9;]*[A-Za-z]//g;  # CSI sequences (colors, cursor)
+  $text =~ s/\e\][^\e]*\e\\//g;        # OSC sequences (hyperlinks)
+  $text =~ s/\e[^\[\\]//g;             # Other ESC sequences
   return $text;
 }
 
@@ -1102,6 +1187,35 @@ sub readfile {
   my $menu=lc($menuname);
   my $ctime = get_current_time();
   my $cdate = get_current_date();
+
+  # Markdown files: read entire file, render, then output line by line
+  if ($filename =~ /\.md$/i && $info{'ansi'} eq '1' && ($config{'render_markdown'} // '1') ne '0' && defined &render_markdown) {
+    my $content = do { local $/; <$file_fh> };
+    close($file_fh);
+    unlockfile("$filename");
+    $content = render_markdown($content);
+    # Apply @-code substitutions to rendered output
+    $content = _substitute_theme_codes($content);
+    $content = _substitute_color_codes($content);
+    for (split /\n/, $content) {
+      $_ .= "\n";
+      unless ($inteleconf eq 1) {
+        print $_;
+      } else {
+        chomp $_;
+        unless ($_ eq "") {
+          my $width = $config{'terminal_width'} || 80;
+          print "\e[${width}D\e[2K".$_."\n";
+          $gotapage="1";
+        }
+      }
+    }
+    if ($pause eq "1") {
+      waitkey();
+    }
+    return;
+  }
+
   while (<$file_fh>) {
     # Apply centralized theme, box, and color code substitutions
     $_ = _substitute_theme_codes($_);
@@ -1453,12 +1567,9 @@ sub bullmenu {
     ###
 
     $readit=0;
-    if (-e "$config{'home'}$config{'text'}/bulletins.$info{'ext'}") {
-      readfile("welcome.$info{'ext'}");
-      $readit=1;
-    }
-    if (-e "$config{'home'}$config{'text'}/bulletins.txt" && $readit ne "1") {
-      readfile("welcome.txt");
+    my $bullmenu_file = find_textfile('bulletins');
+    if ($bullmenu_file) {
+      readfile($bullmenu_file);
       $readit=1;
     }
 

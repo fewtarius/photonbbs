@@ -1,0 +1,393 @@
+#!/usr/bin/perl
+#
+#  PhotonBBS Renderer - pb-render
+#  Markdown-to-ANSI and table rendering for a modern BBS
+#  (C) 2026 Fewtarius
+#
+#  Adapted from CLIO::UI::Markdown and CLIO::UI::ANSI (GPL-3.0)
+#  Uses PhotonBBS @-code system, %config theme colors, and boxchar() for CP437 borders.
+#
+#  Functions:
+#    render_markdown($text)              - Markdown -> ANSI string
+#    render_markdown_inline($text)       - Inline markdown only (for oneliners)
+#    render_table(@rows, %opts)          - Formatted table with CP437 borders
+#    render_table_from_rows(@lines)      - Parse | table | markdown and render
+#    render_header($text, $level)        - Section header
+#    render_rule()                       - Horizontal rule
+#    render_hyperlink($url, $text)       - OSC 8 clickable link
+#    visual_length($text)               - String length for wide chars
+#
+#  render_table() options (pass as trailing key => value pairs):
+#    style   => 'square' | 'double'   (default: square)
+#    header  => 1 | 0   (default: 1 - first row is header with separator)
+#    compact => 1 | 0   (default: 0 - compact removes outer borders)
+
+
+# ============================================================================
+# BOX DRAWING CHARACTER SETS
+# ============================================================================
+
+# CP437 box drawing (telnet / ANSI BBS compatible - single bytes, no encoding issues)
+my %BOX_CP437 = (
+  square => {
+    h => chr(196), v => chr(179), tl => chr(218), tr => chr(191),
+    bl => chr(192), br => chr(217), td => chr(194), tu => chr(193),
+    tr2 => chr(195), tl2 => chr(180), x => chr(197),
+  },
+  double => {
+    h => chr(205), v => chr(186), tl => chr(201), tr => chr(187),
+    bl => chr(200), br => chr(188), td => chr(203), tu => chr(202),
+    tr2 => chr(204), tl2 => chr(185), x => chr(206),
+  },
+);
+
+# UTF-8 box drawing (SSH / modern terminal compatible)
+my %BOX_UTF8 = (
+  square => {
+    h => "\xe2\x94\x80", v => "\xe2\x94\x82",
+    tl => "\xe2\x94\x8c", tr => "\xe2\x94\x90",
+    bl => "\xe2\x94\x94", br => "\xe2\x94\x98",
+    td => "\xe2\x94\xac", tu => "\xe2\x94\xb4",
+    tr2 => "\xe2\x94\x9c", tl2 => "\xe2\x94\xa4",
+    x => "\xe2\x94\xbc",
+  },
+  double => {
+    h => "\xe2\x95\x90", v => "\xe2\x95\x91",
+    tl => "\xe2\x95\x94", tr => "\xe2\x95\x97",
+    bl => "\xe2\x95\x9a", br => "\xe2\x95\x9d",
+    td => "\xe2\x95\xa6", tu => "\xe2\x95\xa9",
+    tr2 => "\xe2\x95\xa0", tl2 => "\xe2\x95\xa3",
+    x => "\xe2\x95\xac",
+  },
+);
+
+sub _box {
+  my ($style, $char) = @_;
+  my $width = $config{'terminal_width'} || 80;
+  if ($width == 40) {
+    my %petscii_map = (
+      h => 'horizontal', v => 'vertical', tl => 'topleft', tr => 'topright',
+      bl => 'bottomleft', br => 'bottomright', td => 'tdown', tu => 'tup',
+      tr2 => 'tright', tl2 => 'tleft', x => 'horizontal',
+    );
+    return boxchar($petscii_map{$char} // 'horizontal');
+  }
+  # Use UTF-8 box chars for SSH connections; CP437 for telnet
+  my $use_utf8 = ($info{'proto'} && $info{'proto'} eq 'SSH') ? 1 : 0;
+  my $charset  = $use_utf8 ? \%BOX_UTF8 : \%BOX_CP437;
+  my $s = $charset->{$style} // $charset->{square};
+  return $s->{$char} // ' ';
+}
+
+# ============================================================================
+# INLINE-ONLY MARKDOWN
+# ============================================================================
+
+sub render_markdown_inline {
+  my ($text) = @_;
+  return $text unless defined $text && $info{'ansi'} eq '1';
+  return _md_inline($text, 1);
+}
+
+# ============================================================================
+# MARKDOWN RENDERER
+# ============================================================================
+
+sub render_markdown {
+  my ($text) = @_;
+  return '' unless defined $text;
+  my $ansi = ($info{'ansi'} eq '1');
+  my @lines = split /\n/, $text, -1;
+  my @out;
+  my $in_code = 0;
+  my $in_table = 0;
+  my @tbl_rows;
+
+  for my $i (0 .. $#lines) {
+    my $line = $lines[$i];
+
+    if ($line =~ /^```(.*)$/) {
+      if ($in_table) { push @out, render_table_from_rows(@tbl_rows); @tbl_rows = (); $in_table = 0; }
+      if ($in_code) {
+        $in_code = 0; push @out, '' if $ansi;
+      } else {
+        $in_code = 1;
+        my $lang = $1 || '';
+        push @out, $ansi ? ($config{'datacolor'} . 'Code' . ($lang ? " ($lang)" : '') . ':' . $RST)
+                         : 'Code' . ($lang ? " ($lang)" : '') . ':';
+      }
+      next;
+    }
+    if ($in_code) {
+      push @out, $ansi ? ($config{'linecolor'} . '  ' . $line . $RST) : "  $line";
+      next;
+    }
+
+    (my $trimmed = $line) =~ s/\s+$//;
+    if ($trimmed =~ /^\|.+\|$/) {
+      $in_table = 1;
+      push @tbl_rows, $trimmed;
+      my $ni = $i + 1;
+      $ni++ while $ni <= $#lines && $lines[$ni] =~ /^\s*$/;
+      my $next_is_table = ($ni <= $#lines && do { (my $t = $lines[$ni]) =~ s/\s+$//; $t =~ /^\|.+\|$/ });
+      unless ($next_is_table) { push @out, render_table_from_rows(@tbl_rows); @tbl_rows = (); $in_table = 0; }
+      next;
+    } elsif ($in_table && $line =~ /^\s*$/) { next; }
+    elsif ($in_table) { push @out, render_table_from_rows(@tbl_rows); @tbl_rows = (); $in_table = 0; }
+
+    if ($line =~ /^(#{1,6})\s+(.+)$/) { push @out, _md_header(length($1), $2, $ansi); next; }
+    if ($line =~ /^(?:---+|\*\*\*+|___+)\s*$/) { push @out, render_rule(); next; }
+    if ($line =~ /^>\s+(.+)$/) {
+      my $q = _md_inline($1, $ansi);
+      push @out, $ansi ? ($config{'linecolor'} . _box('square','v') . ' ' . $RST . $q) : "| $q";
+      next;
+    }
+    if ($line =~ /^(\s*)([-*+])\s+(.+)$/) {
+      my ($ind, undef, $txt) = ($1, $2, $3);
+      push @out, $ansi ? ("$ind" . $config{'promptcolor'} . _box('square','tr2') . ' ' . $RST . _md_inline($txt,$ansi))
+                       : "$ind* " . _md_inline($txt, 0);
+      next;
+    }
+    if ($line =~ /^(\s*)(\d+)\.\s+(.+)$/) {
+      my ($ind, $num, $txt) = ($1, $2, $3);
+      push @out, $ansi ? ("$ind" . $config{'promptcolor'} . "$num." . $RST . ' ' . _md_inline($txt,$ansi))
+                       : "$ind$num. " . _md_inline($txt, 0);
+      next;
+    }
+    push @out, _md_inline($line, $ansi);
+  }
+
+  if ($in_table && @tbl_rows) { push @out, render_table_from_rows(@tbl_rows); }
+  return join("\n", @out);
+}
+
+# ============================================================================
+# INLINE FORMATTING
+# ============================================================================
+
+sub _md_inline {
+  my ($text, $ansi) = @_;
+  return $text unless $ansi;
+
+  $text =~ s{`([^`]+)`}{
+    my $c = $1; $c =~ s/\@/\x01/g;
+    $config{'datacolor'} . $c . $RST
+  }ge;
+
+  $text =~ s/\*\*([^*]+)\*\*/${\("\e[1m")}$1$RST/g;
+  $text =~ s/__([^_]+)__/${\("\e[1m")}$1$RST/g;
+  $text =~ s/(?<!\*)\*([^*]+)\*(?!\*)/${\("\e[3m")}$1$RST/g;
+  $text =~ s/(^|[\s\(])_([^_]+)_(?=[\s\)\.,!?:;]|$)/$1${\("\e[3m")}$2$RST/g;
+  $text =~ s/\x01/\@/g;
+  return $text;
+}
+
+sub _md_header {
+  my ($level, $text, $ansi) = @_;
+  return $text unless $ansi;
+  my $width = $config{'terminal_width'} || 80;
+  my $color = ($level == 1) ? $config{'themecolor'}
+            : ($level == 2) ? $config{'usercolor'}
+            : $config{'systemcolor'};
+  if ($level == 1) {
+    my $border = _box('double','h') x $width;
+    return $color . $border . $RST . "\n" . $color . " $text" . $RST . "\n" . $color . $border . $RST;
+  } elsif ($level == 2) {
+    # Use text length (ASCII chars) for padding math, not byte length
+    my $H    = _box('square','h');
+    my $tlen = length($text);  # ASCII text - bytes == chars
+    my $pad  = int(($width - $tlen - 4) / 2);
+    $pad = 2 if $pad < 2;
+    my $right_cols = $width - $pad - $tlen - 4;
+    $right_cols = 0 if $right_cols < 0;
+    return $color . ($H x $pad) . _box('square','tl2') . " $text " . _box('square','tr2') . ($H x $right_cols) . $RST;
+  }
+  return $color . $text . $RST;
+}
+
+# ============================================================================
+# HORIZONTAL RULE
+# ============================================================================
+
+sub render_rule {
+  my $width = $config{'terminal_width'} || 80;
+  return ($info{'ansi'} eq '1')
+    ? $config{'linecolor'} . (_box('square','h') x $width) . $RST
+    : '-' x $width;
+}
+
+# ============================================================================
+# TABLE RENDERER
+# ============================================================================
+
+sub render_table_from_rows {
+  my @lines = @_;
+  return '' unless @lines;
+
+  # Extract trailing opts (key => value pairs)
+  my %opts;
+  while (@lines >= 2 && !ref($lines[-2]) && $lines[-2] =~ /^(?:style|header|compact)$/) {
+    my $v = pop @lines; my $k = pop @lines; $opts{$k} = $v;
+  }
+
+  # Respect render_tables config
+  return _render_table_plain_from_lines(@lines) if ($config{'render_tables'} // '1') eq '0';
+
+  my @rows;
+  my $is_header = 1;
+  for my $row (@lines) {
+    next if $row =~ /^\|[\s\-:|]+\|$/;
+    my @cells = split /\|/, $row;
+    shift @cells if @cells && $cells[0] =~ /^\s*$/;
+    pop   @cells if @cells && $cells[-1] =~ /^\s*$/;
+    @cells = map { s/^\s+|\s+$//gr } @cells;
+    push @rows, { cells => \@cells, header => $is_header };
+    $is_header = 0;
+  }
+  return render_table(@rows, %opts);
+}
+
+# Plain fallback for render_table_from_rows when tables are disabled
+sub _render_table_plain_from_lines {
+  my @lines = @_;
+  my @out;
+  for my $row (@lines) {
+    next if $row =~ /^\|[\s\-:|]+\|$/;
+    my @cells = split /\|/, $row;
+    shift @cells if @cells && $cells[0] =~ /^\s*$/;
+    pop   @cells if @cells && $cells[-1] =~ /^\s*$/;
+    push @out, join("  ", map { s/^\s+|\s+$//gr } @cells);
+  }
+  return join("\n", @out);
+}
+
+# render_table(@rows_or_arrayrefs, %opts)
+# Options: style=>'square'|'rounded'|'double', header=>0|1, compact=>0|1
+sub render_table {
+  my @args = @_;
+  my %opts;
+  while (@args >= 2 && !ref($args[-2]) && $args[-2] =~ /^(?:style|header|compact)$/) {
+    my $v = pop @args; my $k = pop @args; $opts{$k} = $v;
+  }
+  my @rows = @args;
+  return '' unless @rows;
+
+  # Respect render_tables config - fall back to plain if disabled
+  return _render_table_plain(@rows) if ($config{'render_tables'} // '1') eq '0';
+
+  # Use config default style if not overridden by caller
+  my $style    = $opts{style}   // $config{'render_style'} // 'rounded';
+  my $show_hdr = exists $opts{header} ? $opts{header} : 1;
+  my $compact  = $opts{compact} // 0;
+  my $ansi     = ($info{'ansi'} eq '1');
+
+  # Normalize arrayrefs -> hashrefs
+  my $first = 1;
+  for my $r (@rows) {
+    if (ref($r) eq 'ARRAY') {
+      $r = { cells => $r, header => ($first && $show_hdr ? 1 : 0) };
+      $first = 0;
+    }
+  }
+
+  # Compute column widths
+  my @col_widths;
+  for my $row (@rows) {
+    for my $i (0 .. $#{$row->{cells}}) {
+      my $len = visual_length(strip_ansi($row->{cells}[$i] // ''));
+      $col_widths[$i] = $len if !defined $col_widths[$i] || $len > $col_widths[$i];
+    }
+  }
+
+  return _render_table_plain(@rows) unless $ansi;
+
+  my $H   = _box($style,'h');   my $V   = _box($style,'v');
+  my $TL  = _box($style,'tl');  my $TR  = _box($style,'tr');
+  my $BL  = _box($style,'bl');  my $BR  = _box($style,'br');
+  my $TD  = _box($style,'td');  my $TU  = _box($style,'tu');
+  my $TLt = _box($style,'tr2'); my $TLf = _box($style,'tl2');
+  my $X   = _box($style,'x');
+  my $bc  = $config{'linecolor'};
+  my $hc  = $config{'themecolor'};
+  my $dc  = $config{'datacolor'};
+  my @out;
+
+  push @out, $bc . $TL . join($TD, map { $H x ($_ + 2) } @col_widths) . $TR . $RST unless $compact;
+
+  for my $ri (0 .. $#rows) {
+    my $row  = $rows[$ri];
+    my $line = $compact ? '' : ($bc . $V . $RST);
+    for my $ci (0 .. $#col_widths) {
+      my $cell = $row->{cells}[$ci] // '';
+      my $pad  = $col_widths[$ci] - visual_length(strip_ansi($cell));
+      $pad = 0 if $pad < 0;
+      my $rendered = ($row->{header} && $show_hdr)
+        ? ($hc . "\e[1m" . $cell . $RST)
+        : ($dc . _md_inline($cell, $ansi) . $RST);
+      $line .= ' ' . $rendered . (' ' x $pad) . ' ' . ($compact ? '  ' : $bc . $V . $RST);
+    }
+    push @out, $line;
+    if ($row->{header} && $show_hdr && $ri < $#rows) {
+      push @out, $bc . $TLt . join($X, map { $H x ($_ + 2) } @col_widths) . $TLf . $RST;
+    }
+  }
+
+  push @out, $bc . $BL . join($TU, map { $H x ($_ + 2) } @col_widths) . $BR . $RST unless $compact;
+  return join("\n", @out);
+}
+
+sub _render_table_plain {
+  my @rows = @_;
+  my @col_widths;
+  for my $row (@rows) {
+    for my $i (0 .. $#{$row->{cells}}) {
+      my $len = length($row->{cells}[$i] // '');
+      $col_widths[$i] = $len if !defined $col_widths[$i] || $len > $col_widths[$i];
+    }
+  }
+  my $sep = '+' . join('+', map { '-' x ($_ + 2) } @col_widths) . '+';
+  my @out = ($sep);
+  for my $row (@rows) {
+    my $line = '|';
+    for my $ci (0 .. $#col_widths) {
+      my $cell = $row->{cells}[$ci] // '';
+      $line .= ' ' . $cell . (' ' x ($col_widths[$ci] - length($cell))) . ' |';
+    }
+    push @out, $line;
+    push @out, $sep if $row->{header};
+  }
+  push @out, $sep;
+  return join("\n", @out);
+}
+
+# ============================================================================
+# OSC 8 HYPERLINKS
+# ============================================================================
+
+sub render_hyperlink {
+  my ($url, $text) = @_;
+  return $text unless $info{'ansi'} eq '1' && defined $url && $url ne '';
+  return "\e]8;;$url\e\\$text\e]8;;\e\\";
+}
+
+# ============================================================================
+# VISUAL WIDTH
+# ============================================================================
+
+sub visual_length {
+  my ($text) = @_;
+  my $width = 0;
+  for my $char (split //, $text) {
+    my $ord = ord($char);
+    if    ($ord >= 0x1F300 && $ord <= 0x1FAFF) { $width += 2; }
+    elsif ($ord >= 0x3000  && $ord <= 0x9FFF)  { $width += 2; }
+    elsif ($ord >= 0xAC00  && $ord <= 0xD7AF)  { $width += 2; }
+    elsif ($ord >= 0xFF00  && $ord <= 0xFFEF)  { $width += 2; }
+    elsif ($ord >= 0x20000 && $ord <= 0x2FFFF) { $width += 2; }
+    elsif ($ord < 0x20 || $ord == 0x7F)        { }
+    else                                        { $width += 1; }
+  }
+  return $width;
+}
+
+1;

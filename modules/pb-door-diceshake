@@ -1,0 +1,1037 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: Dice Shake
+# A multiplayer dice game (2-4 players)
+#
+# Roll 5 dice up to 3 times per turn, keeping any between rolls.
+# Score in 13 categories over 13 rounds. Highest total wins.
+# Supports live multiplayer via broker sessions.
+#
+
+my $DOOR_NAME = "diceshake";
+
+# ============================================================================
+# SCORING CATEGORIES
+# ============================================================================
+
+my $CAT_ACES    = 0;
+my $CAT_TWOS    = 1;
+my $CAT_THREES  = 2;
+my $CAT_FOURS   = 3;
+my $CAT_FIVES   = 4;
+my $CAT_SIXES   = 5;
+my $CAT_3KIND   = 6;
+my $CAT_4KIND   = 7;
+my $CAT_FULL    = 8;
+my $CAT_SM_STR  = 9;
+my $CAT_LG_STR  = 10;
+my $CAT_SHAKE   = 11;  # 5 of a kind (50 pts)
+my $CAT_CHANCE  = 12;
+
+my @CAT_NAMES = (
+  "Aces", "Twos", "Threes", "Fours", "Fives", "Sixes",
+  "3 of a Kind", "4 of a Kind", "Full House",
+  "Sm Straight", "Lg Straight", "DICE SHAKE", "Chance",
+);
+
+my @CAT_KEYS = ('1','2','3','4','5','6','A','B','F','S','L','D','C');
+
+my $UPPER_BONUS_THRESHOLD = 63;
+my $UPPER_BONUS_VALUE = 35;
+my $SHAKE_SCORE = 50;
+my $SHAKE_BONUS = 100;
+
+my @AI_NAMES = ('Roller', 'Lucky', 'Bones', 'Snake Eyes', 'Tumbler');
+
+# ============================================================================
+# SCORE CALCULATIONS
+# ============================================================================
+
+sub _ds_count_dice {
+  my (@dice) = @_;
+  my @counts = (0) x 7;  # index 0 unused, 1-6
+  $counts[$_]++ for @dice;
+  return @counts;
+}
+
+sub _ds_sum_dice { my $s = 0; $s += $_ for @_; return $s; }
+
+sub _ds_calc_score {
+  my ($cat, @dice) = @_;
+  my @c = _ds_count_dice(@dice);
+  my $sum = _ds_sum_dice(@dice);
+
+  # Upper section: sum of matching face value
+  if ($cat >= $CAT_ACES && $cat <= $CAT_SIXES) {
+    my $face = $cat + 1;
+    return $c[$face] * $face;
+  }
+
+  # 3 of a kind: sum of all dice if at least 3 match
+  if ($cat == $CAT_3KIND) {
+    for my $v (1..6) { return $sum if $c[$v] >= 3; }
+    return 0;
+  }
+
+  # 4 of a kind: sum of all dice if at least 4 match
+  if ($cat == $CAT_4KIND) {
+    for my $v (1..6) { return $sum if $c[$v] >= 4; }
+    return 0;
+  }
+
+  # Full house: 3+2, score 25
+  if ($cat == $CAT_FULL) {
+    my ($has3, $has2) = (0, 0);
+    for my $v (1..6) {
+      $has3 = 1 if $c[$v] == 3;
+      $has2 = 1 if $c[$v] == 2;
+    }
+    # Also allow 5 of a kind as full house
+    for my $v (1..6) { $has3 = $has2 = 1 if $c[$v] >= 5; }
+    return ($has3 && $has2) ? 25 : 0;
+  }
+
+  # Small straight: 4 in sequence, score 30
+  if ($cat == $CAT_SM_STR) {
+    my @u = sort { $a <=> $b } grep { $c[$_] > 0 } 1..6;
+    return 30 if _ds_has_run(\@u, 4);
+    return 0;
+  }
+
+  # Large straight: 5 in sequence, score 40
+  if ($cat == $CAT_LG_STR) {
+    my @u = sort { $a <=> $b } grep { $c[$_] > 0 } 1..6;
+    return 40 if _ds_has_run(\@u, 5);
+    return 0;
+  }
+
+  # DICE SHAKE: 5 of a kind, score 50
+  if ($cat == $CAT_SHAKE) {
+    for my $v (1..6) { return $SHAKE_SCORE if $c[$v] >= 5; }
+    return 0;
+  }
+
+  # Chance: sum of all dice
+  if ($cat == $CAT_CHANCE) {
+    return $sum;
+  }
+
+  return 0;
+}
+
+sub _ds_has_run {
+  my ($vals, $need) = @_;
+  return 0 unless @$vals >= $need;
+  my $run = 1;
+  for my $i (1 .. $#$vals) {
+    if ($vals->[$i] == $vals->[$i-1] + 1) {
+      $run++;
+      return 1 if $run >= $need;
+    } else {
+      $run = 1;
+    }
+  }
+  return 0;
+}
+
+sub _ds_upper_total {
+  my ($scores) = @_;
+  my $t = 0;
+  for my $c ($CAT_ACES .. $CAT_SIXES) {
+    $t += $scores->[$c] if defined $scores->[$c];
+  }
+  return $t;
+}
+
+sub _ds_upper_bonus {
+  my ($scores) = @_;
+  return (_ds_upper_total($scores) >= $UPPER_BONUS_THRESHOLD) ? $UPPER_BONUS_VALUE : 0;
+}
+
+sub _ds_lower_total {
+  my ($scores) = @_;
+  my $t = 0;
+  for my $c ($CAT_3KIND .. $CAT_CHANCE) {
+    $t += $scores->[$c] if defined $scores->[$c];
+  }
+  return $t;
+}
+
+sub _ds_shake_bonus {
+  my ($scores) = @_;
+  # Bonus shakes: if SHAKE category already scored with 50, each additional
+  # 5-of-a-kind used in another category gets +100 bonus
+  return $scores->[13] // 0;  # shake_bonus_count * 100
+}
+
+sub _ds_grand_total {
+  my ($scores) = @_;
+  return _ds_upper_total($scores) + _ds_upper_bonus($scores) +
+         _ds_lower_total($scores) + _ds_shake_bonus($scores);
+}
+
+# ============================================================================
+# DISPLAY
+# ============================================================================
+
+sub _ds_draw_scorecard {
+  my ($g, $viewer, $dice, $kept, $rolls_left) = @_;
+  # Split layout: scorecard left, dice + commands right
+  # Left column: ~38 chars visible (key + name + up to 4 player columns)
+  # Right column: dice art + commands
+
+  door_clear();
+
+  my $h  = boxchar('horizontal');
+  my $vl = $config{'linecolor'} . boxchar('vertical') . $RST;
+  my @players = @{$g->{players}};
+  my $np = scalar @players;
+
+  # Build left column (scorecard) and right column (dice/commands)
+  my @left;
+  my @right;
+
+  # Column layout: 16 chars for category, 6 chars per player column
+  # Category = " K Name          " = space(1) + key(1) + space(1) + name(13) = 16
+  # Header padding and labels must match this width
+
+  # Left: header row
+  my $hdr = "                ";  # 16 chars padding
+  for my $i (0 .. $np - 1) {
+    my $nc = ($i == $viewer) ? $config{'usercolor'} : $config{'datacolor'};
+    my $marker = ($i == $g->{current}) ? ">" : " ";
+    my $pname = $marker . substr($players[$i]{name}, 0, 5);
+    $hdr .= sprintf("%s%-6s", $nc, $pname);
+  }
+  push @left, $hdr . $RST;
+
+  # Left: upper section label (pad to full row width)
+  my $row_width = 16 + ($np * 6);
+  push @left, sprintf("%s%-${row_width}s%s", $config{'themecolor'}, "  UPPER", $RST);
+  for my $c ($CAT_ACES .. $CAT_SIXES) {
+    push @left, _ds_score_row_str($g, $c, $viewer);
+  }
+  # Upper total + bonus
+  my $utl = sprintf("    %-12s", "Total");
+  for my $i (0 .. $np - 1) {
+    $utl .= sprintf("%s%-6d", $config{'systemcolor'}, _ds_upper_total($players[$i]{scores}));
+  }
+  push @left, $utl . $RST;
+  my $bl = sprintf("    %-12s", "Bonus");
+  for my $i (0 .. $np - 1) {
+    my $b = _ds_upper_bonus($players[$i]{scores});
+    $bl .= sprintf("%s%-6s", $b > 0 ? $config{'usercolor'} : $config{'linecolor'}, $b > 0 ? "+$b" : "-");
+  }
+  push @left, $bl . $RST;
+
+  # Left: lower section label (pad to full row width)
+  push @left, sprintf("%s%-${row_width}s%s", $config{'themecolor'}, "  LOWER", $RST);
+  for my $c ($CAT_3KIND .. $CAT_CHANCE) {
+    push @left, _ds_score_row_str($g, $c, $viewer);
+  }
+  # Grand total
+  my $gtl = sprintf("    %-12s", "TOTAL");
+  for my $i (0 .. $np - 1) {
+    my $gc = ($i == $viewer) ? $config{'usercolor'} : $config{'datacolor'};
+    $gtl .= sprintf("%s%-6d", $gc, _ds_grand_total($players[$i]{scores}));
+  }
+  push @left, $gtl . $RST;
+
+  # Right: dice display (if we have dice)
+  if ($dice && @$dice) {
+    $kept //= [(0) x 5];
+    # Build dice ASCII art lines (top 3 dice, bottom 2)
+    my @top3 = @{$dice}[0..2];
+    my @top3k = @{$kept}[0..2];
+    my @bot2 = @{$dice}[3..4];
+    my @bot2k = @{$kept}[3..4];
+    my @top_lines = _ds_dice_lines(\@top3, \@top3k, 0);
+    my @bot_lines = _ds_dice_lines(\@bot2, \@bot2k, 3);
+    push @right, @top_lines;
+    push @right, "";
+    push @right, @bot_lines;
+    push @right, "";
+    if (defined $rolls_left && $rolls_left > 0) {
+      push @right, $config{'systemcolor'} . "Rolls: " .
+        $config{'datacolor'} . $rolls_left .
+        $config{'systemcolor'} . " left" . $RST;
+      push @right, $config{'promptcolor'} . "[1-5]" .
+        $config{'systemcolor'} . " Keep " .
+        $config{'promptcolor'} . "[R]" .
+        $config{'systemcolor'} . "oll" . $RST;
+    } else {
+      push @right, $config{'systemcolor'} . "No rolls left" . $RST;
+    }
+    push @right, $config{'promptcolor'} . "[key]" .
+      $config{'systemcolor'} . " Score " .
+      $config{'promptcolor'} . "[Q]" .
+      $config{'systemcolor'} . "uit" . $RST;
+  } else {
+    # No dice yet (between turns or AI display)
+    my @log = @{$g->{action_log} // []};
+    my @recent = @log > 8 ? @log[-8..-1] : @log;
+    for my $entry (@recent) {
+      my $display = length($entry) > 28 ? substr($entry, 0, 25) . "..." : $entry;
+      push @right, $config{'linecolor'} . $display . $RST;
+    }
+  }
+
+  # Render title
+  my $cp = $g->{players}[$viewer];
+  writeline($config{'themecolor'} . " Dice Shake" .
+    $config{'systemcolor'} . "  Round " .
+    $config{'datacolor'} . $g->{round} . "/13" .
+    $config{'systemcolor'} . "  " .
+    $config{'datacolor'} . _ds_grand_total($cp->{scores}) . " pts" . $RST, 1);
+  door_hrule(60);
+
+  # Combine left and right columns (no extra leading space - rows handle their own)
+  my $max = @left > @right ? scalar @left : scalar @right;
+  for my $i (0 .. $max - 1) {
+    my $lpart = $left[$i] // "";
+    my $rpart = $right[$i] // "";
+    writeline($lpart . " " . $vl . " " . $rpart, 1);
+  }
+
+  writeline("", 1);
+}
+
+sub _ds_score_row_str {
+  my ($g, $cat, $viewer) = @_;
+  my @players = @{$g->{players}};
+  my $key = $CAT_KEYS[$cat];
+  # Format: "  K Name          score score score"
+  # 2 spaces + Key(1) + space(1) + name(12) = 16 chars, then 6-char columns per player
+  my $name = $CAT_NAMES[$cat];
+  my $line = sprintf("  %s%s%s %-12s",
+    $config{'promptcolor'}, $key, $config{'themecolor'}, $name);
+
+  for my $i (0 .. $#players) {
+    my $s = $players[$i]{scores}[$cat];
+    if (defined $s) {
+      $line .= sprintf("%s%-6d", $config{'datacolor'}, $s);
+    } else {
+      if ($i == $viewer && $i == $g->{current} && $g->{dice}) {
+        my $potential = _ds_calc_score($cat, @{$g->{dice}});
+        if ($potential > 0) {
+          $line .= sprintf("%s%-6s", $config{'systemcolor'}, "($potential)");
+        } else {
+          $line .= sprintf("%s%-6s", $config{'linecolor'}, "(0)");
+        }
+      } else {
+        $line .= sprintf("%s%-6s", $config{'linecolor'}, "-");
+      }
+    }
+  }
+  return $line . $RST;
+}
+
+# Generate ASCII dice art lines (for side display)
+sub _ds_dice_lines {
+  my ($values, $kept, $offset) = @_;
+  $offset //= 0;  # starting die number (0-based)
+  my @lines;
+  my $n = scalar @$values;
+
+  my $h  = boxchar('horizontal') x 5;
+  my $tl = boxchar('topleft');
+  my $tr = boxchar('topright');
+  my $bl = boxchar('bottomleft');
+  my $br = boxchar('bottomright');
+  my $vl = boxchar('vertical');
+
+  my %faces = (
+    1 => ["     ", "  o  ", "     "],
+    2 => ["    o", "     ", "o    "],
+    3 => ["    o", "  o  ", "o    "],
+    4 => ["o   o", "     ", "o   o"],
+    5 => ["o   o", "  o  ", "o   o"],
+    6 => ["o   o", "o   o", "o   o"],
+  );
+
+  for my $row (0 .. 4) {
+    my $line = "";
+    for my $i (0 .. $n - 1) {
+      my $v = $values->[$i] || 1;
+      $v = 1 if $v < 1; $v = 6 if $v > 6;
+      my $face = $faces{$v};
+      my $bc = $kept->[$i] ? $config{'usercolor'} : $config{'linecolor'};
+      my $pc = $kept->[$i] ? $config{'usercolor'} : $config{'datacolor'};
+
+      if    ($row == 0) { $line .= $bc . $tl . $h . $tr . $RST; }
+      elsif ($row == 4) { $line .= $bc . $bl . $h . $br . $RST; }
+      else              { $line .= $bc . $vl . $RST . $pc . $face->[$row - 1] . $bc . $vl . $RST; }
+      $line .= " " if $i < $n - 1;
+    }
+    push @lines, $line;
+  }
+
+  # Labels
+  my $labels = "";
+  for my $i (0 .. $n - 1) {
+    if ($kept->[$i]) {
+      $labels .= $config{'usercolor'} . " KEPT " . $RST;
+    } else {
+      $labels .= $config{'promptcolor'} . "  " . ($offset + $i + 1) . "   " . $RST;
+    }
+    $labels .= " " if $i < $n - 1;
+  }
+  push @lines, $labels;
+
+  return @lines;
+}
+
+# ============================================================================
+# GAME SETUP
+# ============================================================================
+
+sub diceshake_main {
+  iamat($info{'handle'}, "Playing Dice Shake");
+  door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-lobby");
+
+  # Init color codes after config loaded
+  my $playing = 1;
+  while ($playing) {
+    door_clear();
+    writeline("", 1);
+    writeline($config{'themecolor'} . "           D I C E   S H A K E" . $RST, 1);
+    writeline($config{'linecolor'}  . "       =============================" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . "  Roll 5 dice, score in 13 categories." . $RST, 1);
+    writeline($config{'systemcolor'} . "  Get 5 of a kind for a DICE SHAKE!" . $RST, 1);
+    writeline("", 1);
+
+    # Show saved stats
+    my $save = door_load($DOOR_NAME);
+    if ($save && $save->{games_played}) {
+      writeline($config{'systemcolor'} . "  Record: " .
+        $config{'datacolor'} . "$save->{wins} wins" .
+        $config{'systemcolor'} . " in " .
+        $config{'datacolor'} . "$save->{games_played} games" .
+        $config{'systemcolor'} . " (best: " .
+        $config{'datacolor'} . ($save->{best_score} // 0) . ")" . $RST, 1);
+      writeline("", 1);
+    }
+
+    # Check for waiting sessions
+    my $sessions = door_session_list($DOOR_NAME);
+    my @joinable = grep { lc($_->{host}) ne lc($info{'handle'}) } @$sessions;
+    if (@joinable) {
+      for my $s (@joinable) {
+        my $need = $s->{max_players} - scalar @{$s->{players}};
+        writeline($config{'usercolor'} . "  ** " . $s->{host} .
+          " needs $need more for Dice Shake! **" . $RST, 1);
+      }
+      writeline("", 1);
+    }
+
+    writeline("  " . $config{'promptcolor'} . "N" . $config{'themecolor'} .
+      " ... " . $config{'usercolor'} . "New game" . $RST, 1);
+    if (@joinable) {
+      writeline("  " . $config{'promptcolor'} . "J" . $config{'themecolor'} .
+        " ... " . $config{'usercolor'} . "Join game" . $RST, 1);
+    }
+    writeline("  " . $config{'promptcolor'} . "H" . $config{'themecolor'} .
+      " ... " . $config{'usercolor'} . "High scores" . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} .
+      " ... " . $config{'usercolor'} . "Quit" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'promptcolor'} . " > " . $RST);
+    my $ch = uc(waitkey(""));
+    writeline("", 1);
+
+    if ($ch eq 'Q') { $playing = 0; }
+    elsif ($ch eq 'H') { door_show_scores($DOOR_NAME, "Dice Shake High Scores", "Score"); }
+    elsif ($ch eq 'J' && @joinable) { _ds_join_game(); }
+    elsif ($ch eq 'N') { _ds_new_game(); }
+  }
+
+  door_broker_disconnect();
+  iamat($info{'handle'}, "Finished Dice Shake");
+}
+
+sub _ds_new_game {
+  writeline("", 1);
+  writeline($config{'themecolor'} . " How many players? (2-4)" . $RST, 1);
+  my $num = door_getnum("Players:", 4);
+  $num = 2 if $num < 2;
+  $num = 4 if $num > 4;
+
+  writeline("", 1);
+  writeline($config{'themecolor'} . " How many humans?" . $RST, 1);
+  my $num_humans = door_getnum("Humans (1-$num):", $num);
+  $num_humans = 1 if $num_humans < 1;
+  $num_humans = $num if $num_humans > $num;
+
+  # Game state
+  my %game;
+  $game{num_players} = $num;
+  $game{current}     = 0;
+  $game{round}       = 1;
+  $game{over}        = 0;
+  $game{dice}        = undef;
+  $game{action_log}  = [];
+  $game{session_id}  = undef;
+
+  # Players
+  $game{players} = [];
+  $game{players}[0] = {
+    name     => $info{'handle'},
+    type     => 'human',
+    scores   => [(undef) x 14],  # 13 cats + shake_bonus in [13]
+  };
+
+  # Multiplayer lobby
+  if ($num_humans > 1) {
+    my $session = door_session_create($DOOR_NAME, {
+      max_players => $num_humans,
+      game_state  => { game_size => $num },
+    });
+    unless ($session) {
+      writeline($config{'errorcolor'} . " Could not create session." . $RST, 1);
+      door_pause();
+      return;
+    }
+    $game{session_id} = $session->{id};
+
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " Waiting for " . ($num_humans - 1) .
+      " player(s)..." . $RST, 1);
+    writeline($config{'datacolor'} . " Press A to fill with AI, Q to cancel." . $RST, 1);
+
+    my $result = door_session_wait($DOOR_NAME, $session->{id}, {
+      timeout => 120, fill_key => 'A', cancel_key => 'Q',
+    });
+
+    if (!$result || $result->{cancelled}) {
+      door_session_destroy($DOOR_NAME, $session->{id});
+      return;
+    }
+
+    # Add joined humans
+    my @joined = @{$result->{players} // []};
+    for my $i (1 .. $#joined) {
+      $game{players}[$i] = {
+        name   => $joined[$i]{name},
+        type   => 'human',
+        scores => [(undef) x 14],
+      };
+    }
+    $num_humans = scalar @joined;
+  }
+
+  # Fill remaining with AI
+  my @ai_names = @AI_NAMES;
+  my $ai_idx = 0;
+  for my $i (scalar @{$game{players}} .. $num - 1) {
+    $game{players}[$i] = {
+      name   => $ai_names[$ai_idx++ % scalar @ai_names],
+      type   => 'ai',
+      scores => [(undef) x 14],
+    };
+  }
+
+  $game{human_pidx} = 0;
+  $game{num_humans} = $num_humans;
+
+  # Join broker room for multiplayer
+  if ($game{session_id} && $num_humans > 1) {
+    door_game_room_join($DOOR_NAME, $game{session_id});
+    _ds_broadcast_state(\%game);
+  }
+
+  # Play
+  _ds_game_loop(\%game);
+
+  if ($game{session_id}) {
+    door_session_destroy($DOOR_NAME, $game{session_id});
+  }
+}
+
+sub _ds_join_game {
+  my $sessions = door_session_list($DOOR_NAME);
+  if (!$sessions || !@$sessions) {
+    writeline($config{'systemcolor'} . " No open games." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my @joinable = grep { lc($_->{host}) ne lc($info{'handle'}) } @$sessions;
+  unless (@joinable) {
+    writeline($config{'systemcolor'} . " No open games." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my $target = $joinable[0];
+  my $session = door_session_join($DOOR_NAME, $target->{id});
+  unless ($session) {
+    writeline($config{'errorcolor'} . " Couldn't join." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline($config{'usercolor'} . " Joined $target->{host}'s game!" . $RST, 1);
+  writeline($config{'systemcolor'} . " Waiting for game to start..." . $RST, 1);
+
+  door_game_room_join($DOOR_NAME, $session->{id});
+
+  # Wait for host's initial state
+  my $game_state;
+  my $deadline = time() + 180;
+  while (time() < $deadline) {
+    my ($states, $chats) = door_game_state_recv($DOOR_NAME);
+    if (@$states) { $game_state = $states->[-1]; last; }
+    my $s = door_session_poll($DOOR_NAME, $session->{id});
+    if ($s && $s->{status} eq 'playing' && $s->{game_state} && $s->{game_state}{players}) {
+      $game_state = $s->{game_state};
+      last;
+    }
+    select(undef, undef, undef, 1);
+  }
+
+  unless ($game_state) {
+    writeline($config{'errorcolor'} . " Game didn't start." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  # Build local game from state
+  my %game;
+  $game{session_id} = $session->{id};
+  $game{over} = 0;
+
+  my $my_name = lc($info{'handle'});
+  my $my_pidx = 0;
+  for my $i (0 .. $#{$game_state->{players}}) {
+    if (lc($game_state->{players}[$i]{name}) eq $my_name) {
+      $my_pidx = $i;
+      last;
+    }
+  }
+  $game{human_pidx} = $my_pidx;
+  $game{num_humans} = scalar grep { $_->{type} eq 'human' } @{$game_state->{players}};
+
+  $game{players} = [];
+  for my $sp (@{$game_state->{players}}) {
+    push @{$game{players}}, {
+      name   => $sp->{name},
+      type   => $sp->{type},
+      scores => $sp->{scores} // [(undef) x 14],
+    };
+  }
+
+  $game{num_players} = scalar @{$game{players}};
+  $game{current}     = $game_state->{current} // 0;
+  $game{round}       = $game_state->{round} // 1;
+  $game{dice}        = $game_state->{dice};
+  $game{action_log}  = $game_state->{action_log} // [];
+
+  _ds_game_loop(\%game);
+}
+
+# ============================================================================
+# GAME LOOP
+# ============================================================================
+
+sub _ds_game_loop {
+  my ($g) = @_;
+  my $is_mp = $g->{session_id} && ($g->{num_humans} // 1) > 1;
+  my $my_pidx = $g->{human_pidx} // 0;
+  my $np = scalar @{$g->{players}};
+
+  while (!$g->{over}) {
+    for my $pidx (0 .. $np - 1) {
+      $g->{current} = $pidx;
+      my $p = $g->{players}[$pidx];
+
+      if ($p->{type} eq 'human') {
+        if ($is_mp && $pidx != $my_pidx) {
+          # Another human's turn
+          _ds_draw_scorecard($g, $my_pidx);
+          writeline($config{'systemcolor'} . " Waiting for " . $p->{name} . "..." . $RST, 1);
+          my $updated = _ds_wait_for_state($g);
+          _ds_merge_state($g, $updated) if $updated;
+        } else {
+          my $result = _ds_human_turn($g, $pidx);
+          if ($result && $result eq 'quit') {
+            $g->{over} = 1;
+            last;
+          }
+          _ds_broadcast_state($g) if $is_mp;
+        }
+      } else {
+        if (!$is_mp || $my_pidx == 0) {
+          _ds_ai_turn($g, $pidx);
+          _ds_broadcast_state($g) if $is_mp;
+        } else {
+          my $updated = _ds_wait_for_state($g);
+          _ds_merge_state($g, $updated) if $updated;
+        }
+        # Show AI result with player name
+        _ds_draw_scorecard($g, $my_pidx);
+        my @log = @{$g->{action_log} // []};
+        if (@log) {
+          writeline($config{'systemcolor'} . " " . $log[-1] . $RST, 1);
+        }
+        select(undef, undef, undef, 1.2);
+      }
+    }
+
+    $g->{round}++;
+    if ($g->{round} > 13) {
+      $g->{over} = 1;
+    }
+  }
+
+  # Game over - show results
+  _ds_show_results($g, $my_pidx);
+}
+
+sub _ds_show_results {
+  my ($g, $my_pidx) = @_;
+  _ds_draw_scorecard($g, $my_pidx);
+  writeline("", 1);
+
+  my $my_score = _ds_grand_total($g->{players}[$my_pidx]{scores});
+
+  if ($g->{round} <= 13) {
+    # Early quit
+    writeline($config{'systemcolor'} . " Game forfeited after round " .
+      $config{'datacolor'} . ($g->{round} - 1) .
+      $config{'systemcolor'} . "." . $RST, 1);
+  } else {
+    # Normal end - find winner
+    my $best = -1;
+    my $winner = 0;
+    for my $i (0 .. $#{$g->{players}}) {
+      my $gt = _ds_grand_total($g->{players}[$i]{scores});
+      if ($gt > $best) { $best = $gt; $winner = $i; }
+    }
+
+    my $wp = $g->{players}[$winner];
+    writeline($config{'usercolor'} . " $wp->{name} wins with $best points!" . $RST, 1);
+
+    if ($winner == $my_pidx) {
+      door_log_activity($DOOR_NAME, "$info{'handle'} won Dice Shake with $best points!");
+      door_broadcast($DOOR_NAME, "$info{'handle'} won Dice Shake with $best points!");
+    }
+  }
+  writeline("", 1);
+
+  # Save stats
+  my $save = door_load($DOOR_NAME) // { wins => 0, games_played => 0, best_score => 0 };
+  $save->{games_played}++;
+  if ($g->{round} > 13) {
+    my $best = -1; my $winner = 0;
+    for my $i (0 .. $#{$g->{players}}) {
+      my $gt = _ds_grand_total($g->{players}[$i]{scores});
+      if ($gt > $best) { $best = $gt; $winner = $i; }
+    }
+    $save->{wins}++ if $winner == $my_pidx;
+  }
+  $save->{best_score} = $my_score if $my_score > ($save->{best_score} // 0);
+  door_save($DOOR_NAME, $save);
+
+  door_submit_score($DOOR_NAME, $my_score, { rounds => $g->{round} - 1 });
+  door_pause();
+}
+
+# ============================================================================
+# HUMAN TURN
+# ============================================================================
+
+sub _ds_human_turn {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+
+  # Roll 5 dice
+  my @dice = map { int(rand(6)) + 1 } 1..5;
+  my @kept = (0) x 5;
+  my $rolls_left = 2;  # Already used first roll
+
+  $g->{dice} = \@dice;
+
+  while (1) {
+    _ds_draw_scorecard($g, $pidx, \@dice, \@kept, $rolls_left);
+
+    writeline($config{'promptcolor'} . " > " . $RST);
+    my $cmd = uc(waitkey(""));
+    writeline("", 1);
+
+    # Toggle keep
+    if ($cmd ge '1' && $cmd le '5' && $rolls_left > 0) {
+      my $di = int($cmd) - 1;
+      $kept[$di] = $kept[$di] ? 0 : 1;
+      next;
+    }
+
+    # Roll
+    if ($cmd eq 'R' && $rolls_left > 0) {
+      for my $i (0..4) {
+        $dice[$i] = int(rand(6)) + 1 unless $kept[$i];
+      }
+      $rolls_left--;
+      next;
+    }
+
+    # Score in category
+    my $cat = _ds_key_to_cat($cmd);
+    if (defined $cat) {
+      if (defined $p->{scores}[$cat]) {
+        writeline($config{'errorcolor'} . " Already scored in $CAT_NAMES[$cat]!" . $RST, 1);
+        door_pause();
+        next;
+      }
+      my $score = _ds_calc_score($cat, @dice);
+
+      # Shake bonus: if already scored a shake, and this is another 5-of-a-kind
+      my @c = _ds_count_dice(@dice);
+      my $is_shake = 0;
+      for my $v (1..6) { $is_shake = 1 if $c[$v] >= 5; }
+      if ($is_shake && defined $p->{scores}[$CAT_SHAKE] && $p->{scores}[$CAT_SHAKE] == $SHAKE_SCORE) {
+        $p->{scores}[13] = ($p->{scores}[13] // 0) + $SHAKE_BONUS;
+        push @{$g->{action_log}}, "$p->{name} scored BONUS SHAKE! (+$SHAKE_BONUS)";
+      }
+
+      $p->{scores}[$cat] = $score;
+      push @{$g->{action_log}}, "$p->{name} scored $score in $CAT_NAMES[$cat]";
+      $g->{dice} = undef;
+      return;
+    }
+
+    # Quit
+    if ($cmd eq 'Q') {
+      if (door_yesno("Quit this game?")) {
+        $g->{dice} = undef;
+        return 'quit';
+      }
+      next;
+    }
+
+    # Chat
+    if ($cmd eq 'T') {
+      door_chat_input($DOOR_NAME);
+      next;
+    }
+  }
+}
+
+sub _ds_key_to_cat {
+  my ($key) = @_;
+  for my $i (0 .. $#CAT_KEYS) {
+    return $i if $CAT_KEYS[$i] eq $key;
+  }
+  return undef;
+}
+
+# ============================================================================
+# AI TURN
+# ============================================================================
+
+sub _ds_ai_turn {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+
+  my @dice = map { int(rand(6)) + 1 } 1..5;
+  my @kept = (0) x 5;
+  $g->{dice} = \@dice;
+
+  # AI gets 2 re-rolls
+  for my $roll (1..2) {
+    my ($best_cat, $best_score) = _ds_ai_best_category($p, @dice);
+    last if $best_score >= 25;  # Good enough, don't re-roll
+
+    # Decide what to keep
+    @kept = _ds_ai_keep_strategy($p, @dice);
+    # Re-roll unkept
+    for my $i (0..4) {
+      $dice[$i] = int(rand(6)) + 1 unless $kept[$i];
+    }
+  }
+
+  # Pick best available category
+  my ($cat, $score) = _ds_ai_best_category($p, @dice);
+
+  # Shake bonus
+  my @c = _ds_count_dice(@dice);
+  my $is_shake = 0;
+  for my $v (1..6) { $is_shake = 1 if $c[$v] >= 5; }
+  if ($is_shake && defined $p->{scores}[$CAT_SHAKE] && $p->{scores}[$CAT_SHAKE] == $SHAKE_SCORE) {
+    $p->{scores}[13] = ($p->{scores}[13] // 0) + $SHAKE_BONUS;
+    push @{$g->{action_log}}, "$p->{name} scored BONUS SHAKE! (+$SHAKE_BONUS)";
+  }
+
+  $p->{scores}[$cat] = $score;
+  push @{$g->{action_log}}, "$p->{name} scored $score in $CAT_NAMES[$cat]";
+  $g->{dice} = undef;
+}
+
+sub _ds_ai_best_category {
+  my ($p, @dice) = @_;
+  my $best_cat = -1;
+  my $best_score = -1;
+
+  for my $c (0..12) {
+    next if defined $p->{scores}[$c];
+    my $s = _ds_calc_score($c, @dice);
+    # Weight upper section categories to encourage bonus
+    my $weight = $s;
+    if ($c >= $CAT_ACES && $c <= $CAT_SIXES) {
+      my $face = $c + 1;
+      my $target = $face * 3;  # Need avg 3 of each for bonus
+      $weight += 5 if $s >= $target;
+    }
+    $weight += 10 if $c == $CAT_SHAKE && $s > 0;
+    if ($weight > $best_score) {
+      $best_score = $weight;
+      $best_cat = $c;
+    }
+  }
+
+  # If nothing good, sacrifice worst category with 0
+  if ($best_cat < 0 || $best_score <= 0) {
+    for my $c (reverse 0..12) {
+      next if defined $p->{scores}[$c];
+      $best_cat = $c;
+      $best_score = _ds_calc_score($c, @dice);
+      last;
+    }
+  }
+
+  return ($best_cat, $best_score < 0 ? 0 : $best_score);
+}
+
+sub _ds_ai_keep_strategy {
+  my ($p, @dice) = @_;
+  my @kept = (0) x 5;
+  my @c = _ds_count_dice(@dice);
+
+  # Keep matching groups (pairs, trips, etc.)
+  my $best_v = 0;
+  my $best_c = 0;
+  for my $v (1..6) {
+    if ($c[$v] > $best_c || ($c[$v] == $best_c && $v > $best_v)) {
+      $best_c = $c[$v];
+      $best_v = $v;
+    }
+  }
+
+  # If we have 3+ of a kind, keep them
+  if ($best_c >= 3) {
+    for my $i (0..4) {
+      $kept[$i] = 1 if $dice[$i] == $best_v;
+    }
+    return @kept;
+  }
+
+  # If we have a pair, keep high-value pairs
+  if ($best_c >= 2 && $best_v >= 3) {
+    for my $i (0..4) {
+      $kept[$i] = 1 if $dice[$i] == $best_v;
+    }
+    return @kept;
+  }
+
+  # Check for straight potential
+  my @sorted = sort { $a <=> $b } @dice;
+  my @unique = do { my %s; grep { !$s{$_}++ } @sorted };
+  if (@unique >= 3) {
+    # Keep the run
+    my %in_run;
+    for my $v (@unique) { $in_run{$v} = 1; }
+    for my $i (0..4) {
+      if ($in_run{$dice[$i]}) {
+        $kept[$i] = 1;
+        delete $in_run{$dice[$i]};  # Only keep one of each
+      }
+    }
+    return @kept;
+  }
+
+  # Keep high dice (5s and 6s)
+  for my $i (0..4) {
+    $kept[$i] = 1 if $dice[$i] >= 5;
+  }
+
+  return @kept;
+}
+
+# ============================================================================
+# MULTIPLAYER STATE SYNC
+# ============================================================================
+
+sub _ds_serialize_state {
+  my ($g) = @_;
+  return {
+    current    => $g->{current},
+    round      => $g->{round},
+    over       => $g->{over},
+    dice       => $g->{dice},
+    action_log => $g->{action_log},
+    players    => [map {{
+      name   => $_->{name},
+      type   => $_->{type},
+      scores => $_->{scores},
+    }} @{$g->{players}}],
+  };
+}
+
+sub _ds_broadcast_state {
+  my ($g) = @_;
+  return unless $g->{session_id};
+  my $state = _ds_serialize_state($g);
+  door_game_state_send($DOOR_NAME, $state);
+  door_session_update($DOOR_NAME, $g->{session_id}, { game_state => $state });
+}
+
+sub _ds_wait_for_state {
+  my ($g) = @_;
+  my $deadline = time() + 120;
+  my $last_round = $g->{round};
+  my $last_current = $g->{current};
+
+  while (time() < $deadline) {
+    my ($states, $chats) = door_game_state_recv($DOOR_NAME);
+    for my $c (@$chats) {
+      writeline($config{'linecolor'} . " $c" . $RST, 1);
+    }
+    for my $s (@$states) {
+      if (($s->{current} != $last_current) || ($s->{round} != $last_round) || $s->{over}) {
+        return $s;
+      }
+    }
+    my $key = "";
+    eval {
+      local $SIG{ALRM} = sub { die "timeout\n"; };
+      alarm(1);
+      $key = waitkey("", 1);
+      alarm(0);
+    };
+    alarm(0);
+    if ($key && lc($key) eq 't') {
+      door_chat_input($DOOR_NAME);
+    }
+  }
+  return undef;
+}
+
+sub _ds_merge_state {
+  my ($g, $state) = @_;
+  return unless $state;
+  $g->{current}    = $state->{current}    if defined $state->{current};
+  $g->{round}      = $state->{round}      if defined $state->{round};
+  $g->{over}       = $state->{over}       if defined $state->{over};
+  $g->{dice}       = $state->{dice}       if exists $state->{dice};
+  $g->{action_log} = $state->{action_log} if $state->{action_log};
+  if ($state->{players}) {
+    for my $i (0 .. $#{$state->{players}}) {
+      my $sp = $state->{players}[$i];
+      my $gp = $g->{players}[$i];
+      next unless $sp && $gp;
+      $gp->{scores} = $sp->{scores} if $sp->{scores};
+    }
+  }
+}
+
+1;

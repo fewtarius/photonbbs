@@ -6,16 +6,18 @@ sub lastcallers{
     $ctime = get_current_time();
     $cdate = get_current_date();
     if (-e "$config{'home'}$config{'text'}/lastcallers") {
-      if (-e "$config{'home'}$config{'text'}/lastcalltop.$info{'ext'}") {
-	writeline("\n");
-        readfile("lastcalltop.$info{'ext'}");
+      my $top_file = find_textfile('lastcalltop');
+      if ($top_file) {
+        writeline("\n");
+        readfile($top_file);
       } else {
         writeline($theme{'lastcalltopa'},1);
         writeline($theme{'lastcalltopb'},1);
       }
       readfile("lastcallers");
-      if (-e "$config{'home'}$config{'text'}/lastcallbot.$info{'ext'}") {
-        readfile("lastcallbot.$info{'ext'}");
+      my $bot_file = find_textfile('lastcallbot');
+      if ($bot_file) {
+        readfile($bot_file);
       } else {
         writeline($theme{'lastcallbot'});
       }

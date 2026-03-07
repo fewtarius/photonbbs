@@ -1,0 +1,476 @@
+#!/usr/bin/perl
+# PhotonBBS Message Broker Service
+# Central real-time messaging and coordination for PhotonBBS
+#
+# Provides:
+# - Player registry (online status, room/channel tracking)
+# - Room messaging (pub/sub for teleconference, door games, etc.)
+# - Direct messaging (player-to-player pages)
+# - Who's online queries
+#
+# Socket: /dev/shm/photonbbs/broker.sock
+
+use strict;
+use warnings;
+use IO::Socket::UNIX;
+use IO::Select;
+use JSON::PP;
+use Time::HiRes qw(time sleep);
+use POSIX qw(strftime);
+use Fcntl qw(:flock);
+use File::Path qw(make_path);
+
+$| = 1;
+
+# Configuration
+my $SOCKET_PATH       = "/dev/shm/photonbbs/broker.sock";
+my $TRANSIENT_DIR     = "/dev/shm/photonbbs";
+my $MAX_CLIENTS       = 200;
+my $BUFFER_SIZE       = 65536;
+my $HEARTBEAT_INTERVAL = 30;
+my $CLIENT_TIMEOUT    = 120;
+
+# State tracking
+my %clients;         # fd -> { type, id, player, room, last_activity, buffer }
+my %players_online;  # player_name -> fd
+my %rooms;           # room_id -> { players => [player_names] }
+
+# ============================================================================
+# INITIALIZATION
+# ============================================================================
+
+sub init {
+    log_info("PhotonBBS Message Broker starting...");
+
+    unless (-d $TRANSIENT_DIR) {
+        make_path($TRANSIENT_DIR, { mode => 0777 });
+    }
+    chmod 0777, $TRANSIENT_DIR;
+
+    # Clean up stale socket
+    unlink $SOCKET_PATH if -e $SOCKET_PATH;
+
+    my $server = IO::Socket::UNIX->new(
+        Type   => SOCK_STREAM,
+        Local  => $SOCKET_PATH,
+        Listen => $MAX_CLIENTS,
+    ) or die "Cannot create socket at $SOCKET_PATH: $!";
+
+    chmod 0777, $SOCKET_PATH;
+
+    log_info("Broker listening on $SOCKET_PATH");
+    return $server;
+}
+
+# ============================================================================
+# MAIN EVENT LOOP
+# ============================================================================
+
+sub run {
+    my $server = init();
+    my $select = IO::Select->new($server);
+    my $last_maintenance = time();
+
+    while (1) {
+        my @ready = $select->can_read(1);
+
+        for my $fh (@ready) {
+            if ($fh == $server) {
+                my $client = $server->accept();
+                if ($client) {
+                    $client->blocking(0);
+                    $select->add($client);
+                    my $fd = fileno($client);
+                    $clients{$fd} = {
+                        socket        => $client,
+                        type          => undef,
+                        id            => undef,
+                        player        => undef,
+                        room          => undef,
+                        last_activity => time(),
+                        buffer        => '',
+                    };
+                    log_debug("New connection: fd=$fd");
+                }
+            }
+            else {
+                handle_client_data($fh, $select);
+            }
+        }
+
+        if (time() - $last_maintenance > 10) {
+            do_maintenance($select);
+            $last_maintenance = time();
+        }
+    }
+}
+
+# ============================================================================
+# CLIENT DATA HANDLING
+# ============================================================================
+
+sub handle_client_data {
+    my ($client, $select) = @_;
+    my $fd = fileno($client);
+
+    return unless exists $clients{$fd};
+
+    my $data;
+    my $bytes = $client->sysread($data, $BUFFER_SIZE);
+
+    if (!defined $bytes || $bytes == 0) {
+        handle_disconnect($fd, $select);
+        return;
+    }
+
+    $clients{$fd}{buffer} .= $data;
+    $clients{$fd}{last_activity} = time();
+
+    # Process complete newline-delimited JSON messages
+    while ($clients{$fd}{buffer} =~ s/^(.+?)\n//) {
+        my $line = $1;
+        eval {
+            my $msg = decode_json($line);
+            handle_message($fd, $msg, $select);
+        };
+        if ($@) {
+            log_warn("Invalid JSON from fd=$fd: $@");
+            send_error($fd, "Invalid JSON");
+        }
+    }
+}
+
+sub handle_disconnect {
+    my ($fd, $select) = @_;
+
+    return unless exists $clients{$fd};
+
+    my $info = $clients{$fd};
+
+    if ($info->{player}) {
+        my $player = $info->{player};
+        delete $players_online{$player};
+
+        if ($info->{room}) {
+            leave_room($player, $info->{room});
+        }
+
+        log_info("Player disconnected: $player");
+    }
+
+    $select->remove($info->{socket});
+    $info->{socket}->close();
+    delete $clients{$fd};
+}
+
+# ============================================================================
+# MESSAGE DISPATCH
+# ============================================================================
+
+sub handle_message {
+    my ($fd, $msg, $select) = @_;
+
+    my $type = $msg->{type} || 'unknown';
+
+    if    ($type eq 'register')          { handle_register($fd, $msg); }
+    elsif ($type eq 'room_join')         { handle_room_join($fd, $msg); }
+    elsif ($type eq 'room_leave')        { handle_room_leave($fd, $msg); }
+    elsif ($type eq 'room_message')      { handle_room_message($fd, $msg); }
+    elsif ($type eq 'direct_message')    { handle_direct_message($fd, $msg); }
+    elsif ($type eq 'heartbeat')         { handle_heartbeat($fd); }
+    elsif ($type eq 'get_room_players')  { handle_get_room_players($fd, $msg); }
+    elsif ($type eq 'get_online_players'){ handle_get_online_players($fd); }
+    else  { send_error($fd, "Unknown message type: $type"); }
+}
+
+# ============================================================================
+# MESSAGE HANDLERS
+# ============================================================================
+
+sub handle_register {
+    my ($fd, $msg) = @_;
+
+    my $id = $msg->{id};
+    unless ($id) {
+        send_error($fd, "register requires 'id'");
+        return;
+    }
+
+    $clients{$fd}{type}   = $msg->{client_type} || 'player';
+    $clients{$fd}{id}     = $id;
+    $clients{$fd}{player} = $id;
+    $players_online{$id}  = $fd;
+
+    log_info("Client registered: $id (fd=$fd, type=$clients{$fd}{type})");
+
+    send_message($fd, {
+        type         => 'ack',
+        request_type => 'register',
+        success      => JSON::PP::true,
+    });
+}
+
+sub handle_room_join {
+    my ($fd, $msg) = @_;
+
+    my $player = $clients{$fd}{player};
+    unless ($player) {
+        send_error($fd, "Not registered");
+        return;
+    }
+
+    my $room_id = $msg->{room_id};
+    unless (defined $room_id) {
+        send_error($fd, "room_join requires 'room_id'");
+        return;
+    }
+
+    # Leave old room if any
+    if ($clients{$fd}{room}) {
+        leave_room($player, $clients{$fd}{room});
+    }
+
+    # Join new room
+    $clients{$fd}{room} = $room_id;
+    $rooms{$room_id} //= { players => [] };
+    push @{$rooms{$room_id}{players}}, $player;
+
+    log_debug("$player joined room $room_id");
+
+    # Notify others in room
+    broadcast_to_room($room_id, $player, {
+        type    => 'player_entered',
+        player  => $player,
+        room_id => $room_id,
+    });
+
+    send_message($fd, {
+        type         => 'ack',
+        request_type => 'room_join',
+        room_id      => $room_id,
+        players      => $rooms{$room_id}{players},
+    });
+}
+
+sub handle_room_leave {
+    my ($fd, $msg) = @_;
+
+    my $player  = $clients{$fd}{player};
+    my $room_id = $clients{$fd}{room};
+
+    if ($player && $room_id) {
+        leave_room($player, $room_id);
+        $clients{$fd}{room} = undef;
+    }
+
+    send_message($fd, {
+        type         => 'ack',
+        request_type => 'room_leave',
+    });
+}
+
+sub handle_room_message {
+    my ($fd, $msg) = @_;
+
+    my $room_id = $msg->{room_id} || $clients{$fd}{room};
+    my $message = $msg->{message};
+    my $exclude = $msg->{exclude};
+
+    unless ($room_id && $message) {
+        send_error($fd, "room_message requires 'room_id' and 'message'");
+        return;
+    }
+
+    broadcast_to_room($room_id, $exclude, {
+        type    => 'room_message',
+        room_id => $room_id,
+        message => $message,
+        from    => $clients{$fd}{player},
+    });
+
+    send_message($fd, {
+        type         => 'ack',
+        request_type => 'room_message',
+    });
+}
+
+sub handle_direct_message {
+    my ($fd, $msg) = @_;
+
+    my $target  = $msg->{target};
+    my $message = $msg->{message};
+
+    unless ($target && $message) {
+        send_error($fd, "direct_message requires 'target' and 'message'");
+        return;
+    }
+
+    my $target_fd = $players_online{$target};
+    unless ($target_fd && exists $clients{$target_fd}) {
+        send_error($fd, "Player '$target' not online");
+        return;
+    }
+
+    send_message($target_fd, {
+        type    => 'direct_message',
+        from    => $clients{$fd}{player} || 'system',
+        message => $message,
+    });
+
+    send_message($fd, {
+        type         => 'ack',
+        request_type => 'direct_message',
+        target       => $target,
+    });
+}
+
+sub handle_heartbeat {
+    my ($fd) = @_;
+    $clients{$fd}{last_activity} = time();
+    send_message($fd, { type => 'heartbeat_ack' });
+}
+
+sub handle_get_room_players {
+    my ($fd, $msg) = @_;
+
+    my $room_id = $msg->{room_id};
+    unless (defined $room_id) {
+        send_error($fd, "get_room_players requires 'room_id'");
+        return;
+    }
+
+    my @players = ();
+    if (exists $rooms{$room_id}) {
+        @players = @{$rooms{$room_id}{players}};
+    }
+
+    send_message($fd, {
+        type    => 'room_players',
+        room_id => $room_id,
+        players => \@players,
+    });
+}
+
+sub handle_get_online_players {
+    my ($fd) = @_;
+
+    my @players = keys %players_online;
+
+    send_message($fd, {
+        type    => 'online_players',
+        players => \@players,
+    });
+}
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+sub leave_room {
+    my ($player, $room_id) = @_;
+
+    return unless exists $rooms{$room_id};
+
+    $rooms{$room_id}{players} = [
+        grep { $_ ne $player } @{$rooms{$room_id}{players}}
+    ];
+
+    # Notify remaining players
+    broadcast_to_room($room_id, $player, {
+        type    => 'player_left',
+        player  => $player,
+        room_id => $room_id,
+    });
+
+    # Clean up empty rooms
+    if (!@{$rooms{$room_id}{players}}) {
+        delete $rooms{$room_id};
+    }
+}
+
+sub broadcast_to_room {
+    my ($room_id, $exclude, $msg) = @_;
+
+    return unless exists $rooms{$room_id};
+
+    for my $p (@{$rooms{$room_id}{players}}) {
+        next if defined $exclude && $p eq $exclude;
+        my $fd = $players_online{$p};
+        next unless defined $fd && exists $clients{$fd};
+        send_message($fd, $msg);
+    }
+}
+
+sub send_message {
+    my ($fd, $msg) = @_;
+
+    return unless defined $fd && exists $clients{$fd};
+
+    my $json = eval { encode_json($msg) };
+    return unless $json;
+
+    eval { $clients{$fd}{socket}->syswrite($json . "\n"); };
+}
+
+sub send_error {
+    my ($fd, $error_msg) = @_;
+    send_message($fd, {
+        type    => 'error',
+        message => $error_msg,
+    });
+}
+
+# ============================================================================
+# MAINTENANCE
+# ============================================================================
+
+sub do_maintenance {
+    my ($select) = @_;
+    my $now = time();
+
+    # Expire idle connections
+    for my $fd (keys %clients) {
+        my $last = $clients{$fd}{last_activity} // $now;
+        if ($now - $last > $CLIENT_TIMEOUT) {
+            log_info("Expiring idle connection fd=$fd (player=$clients{$fd}{player})");
+            handle_disconnect($fd, $select);
+        }
+    }
+
+    # Clean up empty rooms
+    for my $room_id (keys %rooms) {
+        delete $rooms{$room_id} unless @{$rooms{$room_id}{players} // []};
+    }
+
+    log_debug(sprintf("Status: %d clients, %d rooms, %d players online",
+        scalar(keys %clients), scalar(keys %rooms), scalar(keys %players_online)));
+}
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+sub log_info {
+    my ($msg) = @_;
+    my $ts = strftime('%Y-%m-%d %H:%M:%S', localtime);
+    print "[INFO  $ts] $msg\n";
+}
+
+sub log_warn {
+    my ($msg) = @_;
+    my $ts = strftime('%Y-%m-%d %H:%M:%S', localtime);
+    print "[WARN  $ts] $msg\n";
+}
+
+sub log_debug {
+    my ($msg) = @_;
+    return unless $ENV{PHOTONBBS_BROKER_DEBUG};
+    my $ts = strftime('%Y-%m-%d %H:%M:%S', localtime);
+    print "[DEBUG $ts] $msg\n";
+}
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
+
+run();

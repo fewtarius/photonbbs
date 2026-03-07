@@ -43,12 +43,17 @@ my @QUADRANT_NAMES = (
   "Aldebaran", "Regulus",   "Arcturus",  "Spica",
 );
 
+my $DOOR_NAME = "startrek";
+
 # ============================================================================
 # MAIN ENTRY POINT
 # ============================================================================
 
 sub startrek_main {
   iamat($info{'handle'}, "Playing Star Trek");
+
+  door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-bridge");
+  door_show_messages($DOOR_NAME);
 
   _st_intro();
 
@@ -60,6 +65,7 @@ sub startrek_main {
   }
 
   _st_end_game(\%game);
+  door_broker_disconnect();
   iamat($info{'handle'}, "Finished Star Trek");
 }
 
@@ -242,30 +248,24 @@ sub _st_quadrant_name {
 sub _st_command_loop {
   my ($g) = @_;
 
-  _st_short_range_scan($g);
+  # Draw the combined SRS + status + command bar (fits 24 lines)
+  _st_draw_hud($g);
 
-  my @opts = (
-    ['N', 'Navigate (warp)'],
-    ['S', 'Short range scan'],
-    ['L', 'Long range scan'],
-    ['P', 'Fire phasers'],
-    ['T', 'Fire torpedoes'],
-    ['H', 'Raise shields'],
-    ['D', 'Damage report'],
-    ['C', 'Star chart'],
-    ['Q', 'Resign commission'],
-  );
-
-  my $cmd = door_menu(\@opts, "Captain");
+  # Single-key command input
+  writeline($config{'promptcolor'} . " Captain> " . $RST);
+  my $cmd = uc(waitkey(""));
+  writeline("", 1);
 
   if ($cmd eq 'N')    { _st_navigate($g); }
-  elsif ($cmd eq 'S') { _st_short_range_scan($g); door_pause(); }
+  elsif ($cmd eq 'S') { } # Rescan - just redraw on next loop
   elsif ($cmd eq 'L') { _st_long_range_scan($g); door_pause(); }
   elsif ($cmd eq 'P') { _st_phasers($g); }
   elsif ($cmd eq 'T') { _st_torpedoes($g); }
   elsif ($cmd eq 'H') { _st_shields($g); }
   elsif ($cmd eq 'D') { _st_damage_report($g); door_pause(); }
   elsif ($cmd eq 'C') { _st_star_chart($g); door_pause(); }
+  elsif ($cmd eq 'F') { _st_communiques_full($g); }
+  elsif ($cmd eq 'B') { door_chat_input($DOOR_NAME); }
   elsif ($cmd eq 'Q') {
     if (door_noyes("Resign your commission?")) {
       $g->{game_over} = 1;
@@ -287,49 +287,177 @@ sub _st_command_loop {
   }
 }
 
+# Show brief communiques at top of each turn
+sub _st_show_communiques {
+  my ($g) = @_;
+  my $tracker = door_load_shared($DOOR_NAME, "federation.dat") //
+    { total_kills => 0, campaigns => 0, communiques => [] };
+  my @coms = @{$tracker->{communiques} // []};
+  return unless @coms;
+  # Show only last 2, brief
+  my @recent = reverse @coms[-2..-1];
+  for my $c (@recent) {
+    next unless defined $c;
+    writeline($config{'datacolor'} . " STARFLEET: " . $c . $RST, 1);
+  }
+  writeline("", 1) if @coms;
+}
+
+# Full communiques screen
+sub _st_communiques_full {
+  my ($g) = @_;
+  door_clear();
+  writeline($config{'themecolor'} . " Starfleet Communiques" . $RST, 1);
+  door_hrule(45);
+  writeline("", 1);
+
+  my $tracker = door_load_shared($DOOR_NAME, "federation.dat") //
+    { total_kills => 0, campaigns => 0, communiques => [] };
+
+  my @coms = @{$tracker->{communiques} // []};
+  if (@coms) {
+    for my $c (reverse @coms[-12..-1]) {
+      next unless defined $c;
+      writeline($config{'datacolor'} . "  " . $c . $RST, 1);
+    }
+  } else {
+    writeline($config{'systemcolor'} . "  No recent communiques." . $RST, 1);
+  }
+
+  writeline("", 1);
+  my @online = door_get_online_players($DOOR_NAME);
+  if (@online) {
+    writeline($config{'systemcolor'} . " Active captains: " .
+      join(", ", map { $config{'usercolor'} . $_ . $RST } @online), 1);
+  }
+  writeline($config{'systemcolor'} . " Total Klingons destroyed by all captains: " .
+    $config{'datacolor'} . ($tracker->{total_kills} // 0) . $RST, 1);
+  writeline("", 1);
+  door_pause();
+}
+
+# Post a starfleet communique
+sub _st_post_communique {
+  my ($msg) = @_;
+  my $tracker = door_load_shared($DOOR_NAME, "federation.dat") //
+    { total_kills => 0, campaigns => 0, communiques => [] };
+  $tracker->{communiques} //= [];
+  push @{$tracker->{communiques}}, $msg;
+  if (scalar @{$tracker->{communiques}} > 20) {
+    splice @{$tracker->{communiques}}, 0, scalar(@{$tracker->{communiques}}) - 20;
+  }
+  door_save_shared($DOOR_NAME, "federation.dat", $tracker);
+}
+
 # ============================================================================
 # SHORT RANGE SCAN
 # ============================================================================
 
-sub _st_short_range_scan {
+sub _st_draw_hud {
   my ($g) = @_;
 
   door_clear();
 
+  # Line 1: Title + quadrant
+  my $qname = _st_quadrant_name($g->{quad_y}, $g->{quad_x});
+  writeline($config{'themecolor'} . " " . $qname .
+    $config{'systemcolor'} . " [" . ($g->{quad_y}+1) . "," . ($g->{quad_x}+1) . "]" .
+    ($g->{docked} ? $config{'usercolor'} . " DOCKED" : "") . $RST, 1);
+
+  # Line 2: Status bar (compressed to one line)
+  my $time_left = 2100 + $g->{time_limit} - $g->{stardate};
+  writeline(sprintf(" %sE:%s%-5d %sSh:%s%-5d %sT:%s%-2d %sK:%s%-3d %sB:%s%-2d %sSD:%s%d %sT:%s%d",
+    $config{'systemcolor'}, $config{'datacolor'}, $g->{energy},
+    $config{'systemcolor'}, $config{'datacolor'}, $g->{shields},
+    $config{'systemcolor'}, $config{'datacolor'}, $g->{torps},
+    $config{'systemcolor'}, $config{'errorcolor'}, $g->{klingons_left},
+    $config{'systemcolor'}, $config{'datacolor'}, $g->{bases_left},
+    $config{'systemcolor'}, $config{'datacolor'}, $g->{stardate},
+    $config{'systemcolor'}, $config{'datacolor'}, $time_left,
+  ) . $RST, 1);
+
+  # Line 3: Separator
+  door_hrule(60);
+
+  # Lines 4-11: Sector grid (8 rows) with damage indicators on right
   if ($g->{damage}[$D_SRS] < 0) {
     writeline($config{'errorcolor'} . " Short range sensors are damaged." . $RST, 1);
-    return;
-  }
-
-  writeline($config{'themecolor'} . " Short Range Scan - " .
-    _st_quadrant_name($g->{quad_y}, $g->{quad_x}) . $RST, 1);
-  writeline("", 1);
-
-  # Sector grid
-  writeline($config{'systemcolor'} . "     1 2 3 4 5 6 7 8" . $RST, 1);
-  for my $y (0 .. $SECTOR_SIZE - 1) {
-    my $line = sprintf(" %s%d%s  ", $config{'systemcolor'}, $y + 1, $RST);
-    for my $x (0 .. $SECTOR_SIZE - 1) {
-      my $cell = $g->{sector}[$y][$x];
-      if ($cell eq $S_SHIP)    { $line .= $config{'usercolor'} . "E " . $RST; }
-      elsif ($cell eq $S_KLINGON) { $line .= $config{'errorcolor'} . "K " . $RST; }
-      elsif ($cell eq $S_BASE) { $line .= $config{'promptcolor'} . "B " . $RST; }
-      elsif ($cell eq $S_STAR) { $line .= $config{'datacolor'} . "* " . $RST; }
-      else { $line .= $config{'linecolor'} . ". " . $RST; }
+    for (1..7) { writeline("", 1); }
+  } else {
+    writeline($config{'systemcolor'} . "     1 2 3 4 5 6 7 8" . $RST, 1);
+    for my $y (0 .. $SECTOR_SIZE - 1) {
+      my $line = sprintf(" %s%d%s  ", $config{'systemcolor'}, $y + 1, $RST);
+      for my $x (0 .. $SECTOR_SIZE - 1) {
+        my $cell = $g->{sector}[$y][$x];
+        if ($cell eq $S_SHIP)       { $line .= $config{'usercolor'} . "E " . $RST; }
+        elsif ($cell eq $S_KLINGON) { $line .= $config{'errorcolor'} . "K " . $RST; }
+        elsif ($cell eq $S_BASE)    { $line .= $config{'promptcolor'} . "B " . $RST; }
+        elsif ($cell eq $S_STAR)    { $line .= $config{'datacolor'} . "* " . $RST; }
+        else { $line .= $config{'linecolor'} . ". " . $RST; }
+      }
+      # Damage indicators on right side (compact)
+      if ($y < 8) {
+        my $dmg = $g->{damage}[$y];
+        if ($dmg < 0) {
+          my $short = substr($DEVICES[$y], 0, 12);
+          $line .= " " . $config{'errorcolor'} . "$short DMG" . $RST;
+        }
+      }
+      writeline($line, 1);
     }
-    # Status on right side
-    if ($y == 0) { $line .= "  " . $config{'systemcolor'} . "Stardate: " . $config{'datacolor'} . $g->{stardate}; }
-    if ($y == 1) { $line .= "  " . $config{'systemcolor'} . "Energy:   " . $config{'datacolor'} . $g->{energy}; }
-    if ($y == 2) { $line .= "  " . $config{'systemcolor'} . "Shields:  " . $config{'datacolor'} . $g->{shields}; }
-    if ($y == 3) { $line .= "  " . $config{'systemcolor'} . "Torpedoes:" . $config{'datacolor'} . " $g->{torps}"; }
-    if ($y == 4) { $line .= "  " . $config{'systemcolor'} . "Klingons: " . $config{'errorcolor'} . $g->{klingons_left}; }
-    if ($y == 5) { $line .= "  " . $config{'systemcolor'} . "Bases:    " . $config{'datacolor'} . $g->{bases_left}; }
-    if ($y == 6) { $line .= "  " . $config{'systemcolor'} . "Time left:" . $config{'datacolor'} . " " . (2100 + $g->{time_limit} - $g->{stardate}); }
-    if ($y == 7) { $line .= "  " . ($g->{docked} ? $config{'usercolor'} . "DOCKED" : ""); }
-
-    writeline($line . $RST, 1);
   }
+
+  # Line 12: Separator
+  door_hrule(60);
+
+  # Lines 13-15: Messages area (communiques + chat, max 3 lines)
+  my $msg_lines = 0;
+  my @chat = door_chat_poll($DOOR_NAME);
+  for my $m (@chat) {
+    writeline($config{'linecolor'} . " " . $m . $RST, 1);
+    $msg_lines++;
+    last if $msg_lines >= 3;
+  }
+  if ($msg_lines < 3) {
+    my $tracker = door_load_shared($DOOR_NAME, "federation.dat") //
+      { communiques => [] };
+    my @coms = @{$tracker->{communiques} // []};
+    if (@coms && $msg_lines < 3) {
+      my $latest = $coms[-1];
+      writeline($config{'datacolor'} . " STARFLEET: $latest" . $RST, 1);
+      $msg_lines++;
+    }
+  }
+  # Pad remaining message lines
+  for ($msg_lines .. 2) { writeline("", 1); }
+
+  # Lines 16-17: Klingon positions in quadrant (if any)
+  if (@{$g->{kdata}}) {
+    my @kpos;
+    for my $k (@{$g->{kdata}}) {
+      push @kpos, ($k->{y}+1) . "," . ($k->{x}+1) . " (" . $k->{energy} . ")";
+    }
+    writeline($config{'errorcolor'} . " Hostiles: " . join("  ", @kpos) . $RST, 1);
+  } else {
+    writeline("", 1);
+  }
+
+  # Line 18: blank
   writeline("", 1);
+
+  # Lines 19-20: Command bar (compact single-line commands)
+  writeline($config{'promptcolor'} . " N" . $config{'systemcolor'} . "av " .
+    $config{'promptcolor'} . "S" . $config{'systemcolor'} . "can " .
+    $config{'promptcolor'} . "L" . $config{'systemcolor'} . "RS " .
+    $config{'promptcolor'} . "P" . $config{'systemcolor'} . "haser " .
+    $config{'promptcolor'} . "T" . $config{'systemcolor'} . "orp " .
+    $config{'promptcolor'} . "H" . $config{'systemcolor'} . "shield " .
+    $config{'promptcolor'} . "D" . $config{'systemcolor'} . "mg " .
+    $config{'promptcolor'} . "C" . $config{'systemcolor'} . "hart " .
+    $config{'promptcolor'} . "B" . $config{'systemcolor'} . "ridge " .
+    $config{'promptcolor'} . "F" . $config{'systemcolor'} . "leet " .
+    $config{'promptcolor'} . "Q" . $config{'systemcolor'} . "uit" .
+    $RST, 1);
 }
 
 # ============================================================================
@@ -346,10 +474,15 @@ sub _st_long_range_scan {
 
   writeline("", 1);
   writeline($config{'themecolor'} . " Long Range Scan" . $RST, 1);
-  writeline($config{'linecolor'} . " +-----+-----+-----+" . $RST, 1);
+  my $_st_h5  = boxchar('horizontal') x 5;
+  my $_st_lrs_top = " " . boxchar('topleft') . $_st_h5 . boxchar('tdown') . $_st_h5 . boxchar('tdown') . $_st_h5 . boxchar('topright');
+  my $_st_lrs_mid = " " . boxchar('tright')  . $_st_h5 . boxchar('horizontal') x 1 . boxchar('horizontal') x 4 . boxchar('tright') . $_st_h5 . boxchar('horizontal') x 1 . boxchar('horizontal') x 4 . boxchar('tleft');
+  my $_st_lrs_sep = " " . boxchar('tright')  . $_st_h5 . boxchar('tdown') . $_st_h5 . boxchar('tdown') . $_st_h5 . boxchar('tleft');
+  my $_st_lrs_bot = " " . boxchar('bottomleft') . $_st_h5 . boxchar('tup') . $_st_h5 . boxchar('tup') . $_st_h5 . boxchar('bottomright');
+  writeline($config{'linecolor'} . $_st_lrs_top . $RST, 1);
 
   for my $dy (-1 .. 1) {
-    my $line = $config{'linecolor'} . " |" . $RST;
+    my $line = $config{'linecolor'} . " " . boxchar('vertical') . $RST;
     for my $dx (-1 .. 1) {
       my $qy = $g->{quad_y} + $dy;
       my $qx = $g->{quad_x} + $dx;
@@ -358,13 +491,17 @@ sub _st_long_range_scan {
         $qi->{visited} = 1;
         my $kbs = sprintf(" %d%d%d ", $qi->{klingons}, $qi->{bases}, $qi->{stars});
         my $c = $qi->{klingons} > 0 ? $config{'errorcolor'} : $config{'datacolor'};
-        $line .= $c . $kbs . $config{'linecolor'} . "|" . $RST;
+        $line .= $c . $kbs . $config{'linecolor'} . boxchar('vertical') . $RST;
       } else {
-        $line .= " *** " . $config{'linecolor'} . "|" . $RST;
+        $line .= " *** " . $config{'linecolor'} . boxchar('vertical') . $RST;
       }
     }
     writeline($line, 1);
-    writeline($config{'linecolor'} . " +-----+-----+-----+" . $RST, 1);
+    if ($dy < 1) {
+      writeline($config{'linecolor'} . " " . boxchar('tright') . $_st_h5 . boxchar('tdown') . $_st_h5 . boxchar('tdown') . $_st_h5 . boxchar('tleft') . $RST, 1);
+    } else {
+      writeline($config{'linecolor'} . $_st_lrs_bot . $RST, 1);
+    }
   }
   writeline($config{'systemcolor'} . " Format: Klingons/Bases/Stars" . $RST, 1);
   writeline("", 1);
@@ -583,6 +720,12 @@ sub _st_torpedoes {
       $g->{klingons_left}--;
       # Remove from kdata
       $g->{kdata} = [grep { $_->{y} != $ty || $_->{x} != $tx } @{$g->{kdata}}];
+      # Post communique for notable kills
+      my $killed = $g->{klingons_start} - $g->{klingons_left};
+      if ($killed % 5 == 0) {
+        _st_post_communique("Captain $info{'handle'} has destroyed $killed Klingons in " .
+          _st_quadrant_name($g->{quad_y}, $g->{quad_x}) . ".");
+      }
       last;
     }
     if ($g->{sector}[$ty][$tx] eq $S_STAR) {
@@ -732,7 +875,7 @@ sub _st_damage_report {
   my ($g) = @_;
   writeline("", 1);
   writeline($config{'themecolor'} . " Damage Report" . $RST, 1);
-  writeline($config{'linecolor'} . " " . ("-" x 40) . $RST, 1);
+  door_hrule(40);
   for my $i (0 .. 7) {
     my $status = $g->{damage}[$i];
     my $color = $status < 0 ? $config{'errorcolor'} : $config{'usercolor'};
@@ -790,29 +933,36 @@ sub _st_end_game {
     writeline($config{'systemcolor'} . "  Efficiency rating: " . $config{'datacolor'} . "$rating" . $RST, 1);
     writeline("", 1);
 
-    door_submit_score("startrek", $rating, { klingons => $g->{klingons_start}, time => $time_used });
-    door_log_activity("startrek", $info{'handle'} . " saved the Federation! Rating: $rating");
+    door_submit_score($DOOR_NAME, $rating, { klingons => $g->{klingons_start}, time => $time_used });
+    door_log_activity($DOOR_NAME, $info{'handle'} . " saved the Federation! Rating: $rating");
 
-    # Update shared kill tracking
-    my $tracker = door_load_shared("startrek", "federation.dat") // { total_kills => 0, campaigns => 0 };
+    # Update shared kill tracking and post communique
+    my $tracker = door_load_shared($DOOR_NAME, "federation.dat") //
+      { total_kills => 0, campaigns => 0, communiques => [] };
     $tracker->{total_kills} += $g->{klingons_start};
     $tracker->{campaigns}++;
-    door_save_shared("startrek", "federation.dat", $tracker);
+    my $com = "Captain $info{'handle'} destroyed $g->{klingons_start} Klingons! Rating: $rating.";
+    $tracker->{communiques} //= [];
+    push @{$tracker->{communiques}}, $com;
+    if (scalar @{$tracker->{communiques}} > 20) {
+      splice @{$tracker->{communiques}}, 0, scalar(@{$tracker->{communiques}}) - 20;
+    }
+    door_save_shared($DOOR_NAME, "federation.dat", $tracker);
 
     # Broadcast notable victories
     if ($rating > 500) {
-      door_broadcast("startrek", "Captain $info{'handle'} saved the Federation with a $rating rating!");
+      door_broadcast($DOOR_NAME, "Captain $info{'handle'} saved the Federation with a $rating rating!");
     }
 
     # Track personal record
-    my $record = door_load("startrek") // { victories => 0, defeats => 0, total_kills => 0, best_rating => 0 };
+    my $record = door_load($DOOR_NAME) // { victories => 0, defeats => 0, total_kills => 0, best_rating => 0 };
     $record->{victories}++;
     $record->{total_kills} += $g->{klingons_start};
     $record->{best_rating} = $rating if $rating > ($record->{best_rating} // 0);
-    door_save("startrek", $record);
+    door_save($DOOR_NAME, $record);
 
     if (door_yesno("View high scores?")) {
-      door_show_scores("startrek", "Star Trek High Scores", "Rating");
+      door_show_scores($DOOR_NAME, "Star Trek High Scores", "Rating");
     }
   } else {
     writeline($config{'errorcolor'} . "        M I S S I O N   F A I L E D" . $RST, 1);
@@ -821,10 +971,10 @@ sub _st_end_game {
     writeline($config{'systemcolor'} . "  The Enterprise has been lost." . $RST, 1);
     writeline($config{'systemcolor'} . "  $g->{klingons_left} Klingons remain." . $RST, 1);
 
-    my $record = door_load("startrek") // { victories => 0, defeats => 0, total_kills => 0, best_rating => 0 };
+    my $record = door_load($DOOR_NAME) // { victories => 0, defeats => 0, total_kills => 0, best_rating => 0 };
     $record->{defeats}++;
     $record->{total_kills} += ($g->{klingons_start} - $g->{klingons_left});
-    door_save("startrek", $record);
+    door_save($DOOR_NAME, $record);
   }
 
   writeline("", 1);

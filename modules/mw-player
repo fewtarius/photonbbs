@@ -1,0 +1,485 @@
+#!/usr/bin/perl
+#
+# mw-player - MechWars Player Management
+# Player creation, load, save, stats display, mech class system
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# ============================================================================
+# MECH CLASS DEFINITIONS
+# ============================================================================
+
+my @_MW_MECH_CLASSES = (
+    # TIER 1 - Starting classes (no level requirement)
+    {
+        type        => 'BORGMAN',
+        tier        => 1,
+        level_req   => 0,
+        name        => 'Borgman',
+        role        => 'Heavy Assault Tank',
+        desc        => 'Massive armor, relentless firepower. Slow but unstoppable.',
+        max_shields => 150,
+        max_energy  => 800,
+        cargo_max   => 40,
+        move_cost   => 15,
+        shot_damage => 30,
+        special     => 'Siege Mode: +50% damage when stationary',
+    },
+    {
+        type        => 'MIRAGE',
+        tier        => 1,
+        level_req   => 0,
+        name        => 'Mirage',
+        role        => 'Light Strike Fighter',
+        desc        => 'Blazing speed and high energy. Glass cannon, high risk.',
+        max_shields => 80,
+        max_energy  => 1500,
+        cargo_max   => 60,
+        move_cost   => 8,
+        shot_damage => 20,
+        special     => 'Afterburner: Movement costs 50% less energy',
+    },
+    {
+        type        => 'ORION',
+        tier        => 1,
+        level_req   => 0,
+        name        => 'Orion',
+        role        => 'Balanced Cruiser',
+        desc        => 'Solid all-around stats. Recommended for new pilots.',
+        max_shields => 100,
+        max_energy  => 1000,
+        cargo_max   => 50,
+        move_cost   => 10,
+        shot_damage => 25,
+        special     => 'Tactical Suite: +10% to all stats',
+    },
+
+    # TIER 2 - Level 10+
+    {
+        type        => 'STRIKER',
+        tier        => 2,
+        level_req   => 10,
+        name        => 'Striker',
+        role        => 'Rapid Interceptor',
+        desc        => 'Drone farmer. Fast sector clears, efficient XP gain.',
+        max_shields => 85,
+        max_energy  => 1100,
+        cargo_max   => 45,
+        move_cost   => 9,
+        shot_damage => 22,
+        special     => '+25% drone loot, faster fold recharge',
+    },
+    {
+        type        => 'ENGINEER',
+        tier        => 2,
+        level_req   => 10,
+        name        => 'Engineer',
+        role        => 'Trade and Construction',
+        desc        => 'Massive cargo hold. Build trading posts. Economy powerhouse.',
+        max_shields => 90,
+        max_energy  => 900,
+        cargo_max   => 100,
+        move_cost   => 12,
+        shot_damage => 18,
+        special     => 'Can build trading posts, +20% trade profits',
+    },
+    {
+        type        => 'WRAITH',
+        tier        => 2,
+        level_req   => 10,
+        name        => 'Wraith',
+        role        => 'Stealth Assassin',
+        desc        => 'Cloak and first-strike crits. High-risk hunter-killer.',
+        max_shields => 60,
+        max_energy  => 1200,
+        cargo_max   => 35,
+        move_cost   => 9,
+        shot_damage => 28,
+        special     => 'Extended cloak, +100% crit on first strike',
+    },
+
+    # TIER 3 - Level 25+
+    {
+        type        => 'SENTINEL',
+        tier        => 3,
+        level_req   => 25,
+        name        => 'Sentinel',
+        role        => 'Territory Guardian',
+        desc        => 'Extreme armor, shield regen, area denial specialist.',
+        max_shields => 200,
+        max_energy  => 600,
+        cargo_max   => 30,
+        move_cost   => 18,
+        shot_damage => 28,
+        special     => '+50% shield regen on owned planets',
+    },
+    {
+        type        => 'PALADIN',
+        tier        => 3,
+        level_req   => 25,
+        name        => 'Paladin',
+        role        => 'Team Tank',
+        desc        => 'Fleet protector. Shares shields with guild members.',
+        max_shields => 130,
+        max_energy  => 850,
+        cargo_max   => 40,
+        move_cost   => 13,
+        shot_damage => 24,
+        special     => 'Share 20% shields with nearby allies',
+    },
+    {
+        type        => 'HAVOC',
+        tier        => 3,
+        level_req   => 25,
+        name        => 'Havoc',
+        role        => 'Area Bomber',
+        desc        => 'Mine specialist. Splash damage. Sector denial master.',
+        max_shields => 95,
+        max_energy  => 950,
+        cargo_max   => 55,
+        move_cost   => 11,
+        shot_damage => 26,
+        special     => 'Sector mines do 2x damage, deploy 3 at once',
+    },
+    {
+        type        => 'RECON',
+        tier        => 3,
+        level_req   => 25,
+        name        => 'Recon',
+        role        => 'Scout and Navigator',
+        desc        => 'Sees further. Warp beacon network. Intelligence gatherer.',
+        max_shields => 70,
+        max_energy  => 1300,
+        cargo_max   => 60,
+        move_cost   => 8,
+        shot_damage => 19,
+        special     => 'See 5 sectors ahead, place warp beacons',
+    },
+
+    # TIER 4 - Level 40+
+    {
+        type        => 'SPECTRE',
+        tier        => 4,
+        level_req   => 40,
+        name        => 'Spectre',
+        role        => 'Energy Vampire',
+        desc        => 'Drains enemy energy. Self-sustaining infinite combat.',
+        max_shields => 75,
+        max_energy  => 2000,
+        cargo_max   => 45,
+        move_cost   => 10,
+        shot_damage => 24,
+        special     => 'Weapons steal energy from enemies on hit',
+    },
+
+    # TIER 5 - Prestige (level 50 + achievements)
+    {
+        type        => 'WARMASTER',
+        tier        => 5,
+        level_req   => 50,
+        name        => 'Warmaster',
+        role        => 'Endgame Dreadnought',
+        desc        => 'Supreme all-around power. Fleet command. Legendary status.',
+        max_shields => 175,
+        max_energy  => 1100,
+        cargo_max   => 65,
+        move_cost   => 11,
+        shot_damage => 35,
+        special     => 'Requires 1000 drone kills + rank 50',
+        unlock_kills => 1000,
+        unlock_rank  => 50,
+    },
+);
+
+# ============================================================================
+# MECH CLASS QUERIES
+# ============================================================================
+
+sub mw_get_available_mechs {
+    my ($level) = @_;
+    $level //= 0;
+    return grep { $_->{level_req} <= $level } @_MW_MECH_CLASSES;
+}
+
+sub mw_get_mech {
+    my ($type) = @_;
+    my ($m) = grep { $_->{type} eq uc($type) } @_MW_MECH_CLASSES;
+    return $m;
+}
+
+# ============================================================================
+# PLAYER CREATE
+# ============================================================================
+
+sub mw_player_create {
+    my ($handle) = @_;
+
+    my @available = mw_get_available_mechs(0);
+
+    while (1) {
+        door_header("MechWars - New Pilot Registration");
+        writeline($config{'datacolor'} . " Choose your mech class, Commander:" . $RST, 1);
+        writeline("", 1);
+
+        my $num = 1;
+        for my $m (@available) {
+            writeline("  " . $config{'promptcolor'} . $num .
+                      $config{'themecolor'} . " ... " .
+                      $config{'usercolor'} . $m->{name} .
+                      $config{'themecolor'} . " (" . $m->{role} . ")", 1);
+            writeline("      " . $config{'datacolor'} . $m->{desc}, 1);
+            writeline("      " . $config{'themecolor'} .
+                      "SH:" . $config{'datacolor'} . $m->{max_shields} .
+                      $config{'themecolor'} . " EN:" . $config{'datacolor'} . $m->{max_energy} .
+                      $config{'themecolor'} . " CG:" . $config{'datacolor'} . $m->{cargo_max} .
+                      $config{'themecolor'} . " | " .
+                      $config{'systemcolor'} . $m->{special}, 1);
+            writeline("", 1);
+            $num++;
+        }
+
+        writeline("  " . $config{'promptcolor'} . "Q" .
+                  $config{'themecolor'} . " ... " . $config{'usercolor'} . "Quit to BBS", 1);
+        writeline("", 1);
+        writeline($config{'promptcolor'} . " Select mech [1-" . scalar(@available) . ", Q]: " . $RST);
+        my $choice = waitkey("");
+        writeline("", 1);
+
+        return undef if uc($choice) eq 'Q';
+
+        if ($choice =~ /^\d+$/ && $choice >= 1 && $choice <= scalar(@available)) {
+            my $mech = $available[$choice - 1];
+
+            # Confirm selection
+            writeline($config{'datacolor'} . " Selected: " .
+                      $config{'usercolor'} . $mech->{name} . $RST, 1);
+            last unless door_yesno("Confirm selection?");
+
+            # Starting position - near center of universe
+            my ($sx, $sy) = (int(MW_UNIVERSE_SIZE / 2) + int(rand(11)) - 5,
+                             int(MW_UNIVERSE_SIZE / 2) + int(rand(11)) - 5);
+
+            my $player = {
+                handle      => $handle,
+                mech_type   => $mech->{type},
+                level       => 1,
+                xp          => 0,
+                xp_next     => 500,
+                shields     => $mech->{max_shields},
+                max_shields => $mech->{max_shields},
+                energy      => $mech->{max_energy},
+                max_energy  => $mech->{max_energy},
+                cargo_max   => $mech->{cargo_max},
+                cargo       => {},
+                gun_level   => 1,
+                starvacs    => START_STARVACS,
+                kills       => 0,
+                deaths      => 0,
+                x           => $sx,
+                y           => $sy,
+                turns       => TURNS_PER_DAY,
+                last_play   => get_current_date(),
+                guild       => undef,
+                guild_name  => '',
+                mines       => 5,
+                fold_charge => 100,
+                beacons     => {},
+            };
+
+            mw_player_save($player);
+            mw_sector_add_player($sx, $sy, $handle);
+
+            door_log_activity('mechwars',
+                "$handle joined MechWars as a " . $mech->{name});
+            door_broadcast('mechwars',
+                "$handle has joined MechWars as a " . $mech->{name} . "!");
+
+            writeline($config{'systemcolor'} . " Welcome to MechWars, Commander " .
+                      $config{'usercolor'} . $handle . $RST, 1);
+            door_pause();
+            return $player;
+        }
+    }
+}
+
+# ============================================================================
+# PLAYER LOAD / SAVE
+# ============================================================================
+
+sub mw_player_load {
+    my ($handle) = @_;
+    return door_load('mechwars', $handle);
+}
+
+sub mw_player_save {
+    my ($player) = @_;
+    door_save('mechwars', $player, $player->{handle});
+    # Submit score to global leaderboard (kills = score)
+    door_submit_score('mechwars', $player->{kills} || 0, {
+        level     => $player->{level},
+        mech_type => $player->{mech_type},
+    });
+}
+
+# ============================================================================
+# PLAYER STATS DISPLAY
+# ============================================================================
+
+sub mw_show_player_stats {
+    my ($player) = @_;
+    my $mech = mw_get_mech($player->{mech_type}) // {};
+
+    door_header("Pilot Dossier - " . $config{'usercolor'} . $player->{handle});
+
+    writeline("  " . $config{'themecolor'} . "Mech:      " .
+              $config{'usercolor'} . $player->{mech_type} .
+              $config{'themecolor'} . " (" . ($mech->{role} // '') . ")" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Level:     " .
+              $config{'datacolor'} . $player->{level} .
+              $config{'themecolor'} . "  XP: " .
+              $config{'datacolor'} . ($player->{xp} // 0) . "/" . ($player->{xp_next} // 500) . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Shields:   " .
+              $config{'datacolor'} . "$player->{shields}/$player->{max_shields}" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Energy:    " .
+              $config{'datacolor'} . "$player->{energy}/$player->{max_energy}" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Gun Level: " .
+              $config{'datacolor'} . ($player->{gun_level} // 1) . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "StarVacs:  " .
+              $config{'datacolor'} . $player->{starvacs} . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Cargo:     " .
+              $config{'datacolor'} . _mw_cargo_used($player) . "/" . $player->{cargo_max} . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Mines:     " .
+              $config{'datacolor'} . ($player->{mines} // 0) . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Kills:     " .
+              $config{'datacolor'} . ($player->{kills} // 0) . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Deaths:    " .
+              $config{'datacolor'} . ($player->{deaths} // 0) . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Location:  " .
+              $config{'datacolor'} . "[$player->{x}, $player->{y}]" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Turns:     " .
+              $config{'datacolor'} . $player->{turns} . $RST, 1);
+
+    if ($player->{guild}) {
+        writeline("  " . $config{'themecolor'} . "Guild:     " .
+                  $config{'datacolor'} . $player->{guild_name} . $RST, 1);
+    }
+
+    if ($mech->{special}) {
+        writeline("", 1);
+        writeline("  " . $config{'themecolor'} . "Ability: " .
+                  $config{'systemcolor'} . $mech->{special} . $RST, 1);
+    }
+
+    # Cargo contents
+    if (%{$player->{cargo} // {}}) {
+        writeline("", 1);
+        writeline("  " . $config{'datacolor'} . "Cargo Hold:" . $RST, 1);
+        for my $item (sort keys %{$player->{cargo}}) {
+            my $qty = $player->{cargo}{$item};
+            next unless $qty > 0;
+            writeline("    " . $config{'themecolor'} . ucfirst($item) . ": " .
+                      $config{'datacolor'} . $qty . $RST, 1);
+        }
+    }
+
+    writeline("", 1);
+}
+
+# ============================================================================
+# LEVEL UP
+# ============================================================================
+
+sub mw_check_level_up {
+    my ($player) = @_;
+    return if ($player->{xp} // 0) < ($player->{xp_next} // 500);
+
+    $player->{level}++;
+    $player->{xp}      -= $player->{xp_next};
+    $player->{xp_next}  = int($player->{xp_next} * 1.5);
+
+    # Stat increases
+    $player->{max_shields} += 10;
+    $player->{max_energy}  += 50;
+    $player->{shields}      = $player->{max_shields};
+    $player->{energy}       = $player->{max_energy};
+
+    writeline("", 1);
+    writeline($config{'usercolor'} . " *** LEVEL UP! You are now Level " .
+              $player->{level} . " ***" . $RST, 1);
+    writeline($config{'datacolor'} . " Max shields +10, max energy +50." . $RST, 1);
+
+    door_broadcast('mechwars',
+        $player->{handle} . " reached Level " . $player->{level} . "!");
+    door_log_activity('mechwars',
+        $player->{handle} . " leveled up to " . $player->{level});
+}
+
+# ============================================================================
+# PLAYER DEATH
+# ============================================================================
+
+sub mw_player_death {
+    my ($player, $killer) = @_;
+    $killer //= 'hostile forces';
+
+    $player->{deaths} = ($player->{deaths} // 0) + 1;
+
+    # Penalty: lose 20% of starvacs, all cargo, 10% XP
+    my $sv_loss = int($player->{starvacs} * 0.20);
+    $player->{starvacs} -= $sv_loss;
+    $player->{starvacs} = 0 if $player->{starvacs} < 0;
+    $player->{cargo} = {};
+
+    my $xp_loss = int(($player->{xp} // 0) * 0.10);
+    $player->{xp} = ($player->{xp} // 0) - $xp_loss;
+    $player->{xp} = 0 if $player->{xp} < 0;
+
+    writeline("", 1);
+    writeline($config{'errorcolor'} . " *** MECH DESTROYED ***" . $RST, 1);
+    writeline($config{'datacolor'} . " Eliminated by: $killer" . $RST, 1);
+    writeline($config{'datacolor'} . " Lost: $sv_loss StarVacs, all cargo, $xp_loss XP" . $RST, 1);
+
+    # Respawn near center
+    mw_sector_remove_player($player->{x}, $player->{y}, $player->{handle});
+    my ($rx, $ry) = (int(MW_UNIVERSE_SIZE / 2) + int(rand(11)) - 5,
+                     int(MW_UNIVERSE_SIZE / 2) + int(rand(11)) - 5);
+    $player->{x} = $rx;
+    $player->{y} = $ry;
+
+    # Restore partial shields/energy
+    $player->{shields} = int($player->{max_shields} * 0.25);
+    $player->{energy}  = int($player->{max_energy}  * 0.25);
+
+    mw_sector_add_player($rx, $ry, $player->{handle});
+    mw_sector_enter($player);
+
+    writeline($config{'systemcolor'} . " Emergency respawn at [$rx, $ry]." . $RST, 1);
+
+    door_broadcast('mechwars',
+        $player->{handle} . " was destroyed by $killer!");
+
+    door_pause();
+}
+
+# ============================================================================
+# CARGO HELPER
+# ============================================================================
+
+my %_MW_CARGO_WEIGHTS = (
+    lithium  => 1,
+    titanium => 2,
+    alloyis  => 3,
+);
+
+sub _mw_cargo_used {
+    my ($player) = @_;
+    my $used = 0;
+    for my $item (keys %{$player->{cargo} // {}}) {
+        my $qty = $player->{cargo}{$item} // 0;
+        $used += $qty * ($_MW_CARGO_WEIGHTS{$item} // 1);
+    }
+    return $used;
+}
+
+1;

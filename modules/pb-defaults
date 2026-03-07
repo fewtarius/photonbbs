@@ -42,6 +42,7 @@ our %config = (
     onelinerrows => "15",                     ## Number of oneliners to keep
     lastcallers => "25",                      ## Keep this many last callers in the list
     lastcallenable => "1",                    ## Last Callers Enable (1) / Disable (0)
+    render_markdown => "1",                   ## Render markdown in readfile() for .md files (0=off)
     unixuser    => "nobody",                     ## User account the application runs as
     port            => "23",                  ## Default port for the BBS daemon
     maint_interval  => "180",                 ## Maintenance interval in seconds
