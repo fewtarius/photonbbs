@@ -613,7 +613,7 @@ sub door_get_all_players {
   my @players;
   if (opendir(my $dh, $dir)) {
     for my $f (readdir($dh)) {
-      next unless $f =~ /^(.+)\.dat$/ && $f ne 'scores.dat' && $f !~ /^(universe|world|galaxy|shared)/;
+      next unless $f =~ /^(.+)\.dat$/ && $f !~ /^(scores|messages|universe|world|galaxy|shared|economy|news|bases|drones|planets|derby|sessions)/;
       my $name = $1;
       $name =~ s/_/ /g;
       push @players, $name;
@@ -630,7 +630,8 @@ sub door_load_player {
   return undef unless -e $file;
   my $data;
   eval { $data = lock_retrieve($file); };
-  return $@ ? undef : $data;
+  return undef if $@ || !$data || ref($data) ne 'HASH';
+  return $data;
 }
 
 # Save another player's data (after PvP attack modifies it)
