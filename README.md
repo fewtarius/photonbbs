@@ -43,7 +43,7 @@ PhotonBBS is a comprehensive telnet-based bulletin board system (BBS) and multi-
 
 **Modular Architecture**: Built with extensibility in mind, PhotonBBS uses a modular Perl-based architecture that makes it easy to add new features, customize behavior, and integrate door games.
 
-**10 Built-in Door Games**: Native Perl door games including Red Dragon, Star Trader, Casino, Drug Lord, Sea Battle, Star Trek, Big Catch, Atlantis, 1000 Miles, plus PhotonMUD - all with save/load, high scores, and credits system.
+**13 Built-in Door Games**: Native Perl door games including MechWars, Red Dragon, Star Trader, Casino, Drug Lord, Sea Battle, Star Trek, Big Catch, Atlantis, 1000 Miles, Property Wars, Dice Shake, plus PhotonMUD - all with save/load, high scores, multiplayer support, and credits system.
 
 **Modern Deployment**: Containerized deployment via Docker ensures easy installation and portability across Linux, macOS, and Windows.
 
@@ -56,8 +56,9 @@ PhotonBBS is a comprehensive telnet-based bulletin board system (BBS) and multi-
 - System bulletins and oneliners
 - Customizable menu system
 - Theme support with ANSI colors
-- 10 native door games with save/load and high scores
+- 13 native door games with save/load, high scores, and multiplayer
 - External BBS door game support (DOOR.SYS, DORINFO)
+- Real-time multiplayer via broker system
 - Door game operator tools (data editor, score management)
 - Administrative tools and utilities
 
@@ -74,17 +75,20 @@ PhotonBBS is a comprehensive telnet-based bulletin board system (BBS) and multi-
 
 ### Native Door Games
 
-PhotonBBS ships with 10 native Perl door games:
+PhotonBBS ships with 13 native Perl door games:
 
-- **Red Dragon** - Fantasy RPG (forest, combat, town, dragon boss)
+- **MechWars: Infinite Frontiers** - Space combat and trading (persistent universe, guilds, fortresses, economy)
+- **Red Dragon** - Fantasy RPG (forest, combat, town, dragon boss, live PvP duels)
 - **Star Trader** - Space trading (sectors, commodities, ship upgrades)
 - **Casino** - Card and dice games (blackjack, poker, craps, slots, roulette)
 - **Drug Lord** - Street empire (30-day campaign, buy/sell, police)
-- **Sea Battle** - Naval combat (Battleship-style grid targeting)
+- **Sea Battle** - Naval combat (Battleship-style grid targeting, live PvP)
 - **Star Trek** - Space exploration (galaxy navigation, Klingon combat)
 - **Big Catch** - Fishing simulation (5 lakes, tackle shop, tournaments)
 - **Atlantis** - Underwater adventure (diving, creatures, artifacts)
-- **1000 Miles** - Racing card game (2-4 players, AI opponents)
+- **1000 Miles** - Racing card game (2-4 players, real-time multiplayer)
+- **Property Wars** - Property trading board game (2-4 players, multiplayer)
+- **Dice Shake** - Dice scoring game (Yahtzee-style, 2-4 players)
 - **PhotonMUD** - Full multi-user dungeon (see PHOTONMUD.md)
 
 Several games were inspired by door games from the [Synchronet BBS](https://synchro.net) (SBBS) project. All implementations are original Perl code. See individual game headers for specific credits.
@@ -192,6 +196,7 @@ PhotonBBS consists of several key components:
 **photonmud-monsterai** - AI system for monster behavior and spawning
 **pb-* modules** - Core BBS functionality (framework, doors, chat, etc.)
 **pm-* modules** - MUD game logic (combat, spells, rooms, monsters, etc.)
+**mw-* modules** - MechWars game engine (universe, combat, economy, guilds, etc.)
 
 The system uses:
 - Perl for core BBS and MUD logic
@@ -242,6 +247,8 @@ PhotonBBS uses a modular architecture with core modules in the modules directory
 **BBS Modules (pb-):** Framework, main functionality, doors, user tools, security
 
 **MUD Modules (pm-):** Combat, rooms, monsters, spells, player management, objects
+
+**MechWars Modules (mw-):** Universe, combat, economy, bases, drones, planets, fortresses, guilds, movement, UI
 
 ## Configuration
 

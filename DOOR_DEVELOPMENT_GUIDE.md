@@ -18,19 +18,24 @@ Existing games (as of March 2026): Red Dragon, Star Trader, Casino, Drug Lord, S
 
 ```
 modules/
-├── pb-doorlib          # Shared door game library (REQUIRED - read this first)
-├── pb-door-casino      # Casino (cards, dice, slots)
-├── pb-door-druglord    # Drug Lord (trading, territory)
-├── pb-door-reddragon   # Red Dragon (RPG)
-├── pb-door-1000miles   # 1000 Miles (card game, multiplayer)
-├── pb-door-seabattle   # Sea Battle (naval combat)
-├── pb-door-startrek    # Star Trek
-├── pb-door-startrader  # Star Trader
-├── pb-door-bigcatch    # Big Catch (fishing)
-├── pb-door-atlantis    # Atlantis
+├── pb-doorlib            # Shared door game library (REQUIRED - read this first)
+├── pb-door-casino        # Casino (cards, dice, slots)
+├── pb-door-druglord      # Drug Lord (trading, territory)
+├── pb-door-reddragon     # Red Dragon (RPG, live PvP duels)
+├── pb-door-1000miles     # 1000 Miles (card game, real-time multiplayer)
+├── pb-door-seabattle     # Sea Battle (naval combat, live PvP)
+├── pb-door-startrek      # Star Trek
+├── pb-door-startrader    # Star Trader
+├── pb-door-bigcatch      # Big Catch (fishing)
+├── pb-door-atlantis      # Atlantis
+├── pb-door-propertywars  # Property Wars (board game, multiplayer)
+├── pb-door-diceshake     # Dice Shake (dice scoring, multiplayer)
+├── pb-door-mechwars      # MechWars (space strategy, persistent universe)
+├── mw-*                  # MechWars engine modules (12 modules)
 data/doors/
-├── casino/             # Per-game save data
+├── casino/               # Per-game save data
 ├── druglord/
+├── mechwars/             # MechWars shared universe data
 ├── 1000miles/
 └── ...
 ```
@@ -45,13 +50,16 @@ All functions are provided by `pb-doorlib`. Import it via `require_module('pb-do
 
 ```perl
 door_clear()                    # Clear screen
+door_header($title)             # Clear screen + title + horizontal rule (standard sub-screen header)
 door_pause()                    # Press any key to continue
 door_hrule($width)              # Horizontal rule separator (use boxchar)
 door_yesno($prompt)             # Returns 1 for Y, 0 for N
 door_noyes($prompt)             # Returns 1 for N, 0 for Y
 door_getnum($prompt, $min, $max) # Validated number input
+door_getamount($prompt, $max)   # Monetary amount input (supports 'all')
+door_getline($prompt, $maxlen)  # Text input with prompt
 door_menu($prompt, @options)    # Single-key menu selection
-door_money($prompt)             # Dollar amount input
+door_money($amount)             # Format number as currency string
 door_draw_cards(@cards)         # Display playing card hand
 door_draw_slots(@reels)         # Display slot machine reels
 ```
@@ -395,13 +403,16 @@ ssh deck@zaphod "docker cp ~/photonbbs/data/games.mnu \
 ```perl
 # I/O
 door_clear()
+door_header($title)                     # Clear + title + hrule
 door_pause()
 door_hrule($width)
 door_yesno($prompt)                     # Returns 1 (Y) or 0 (N)
 door_noyes($prompt)                     # Returns 1 (N) or 0 (Y)
 door_getnum($prompt, $min, $max)        # Validated number
+door_getamount($prompt, $max)           # Monetary amount (supports 'all')
+door_getline($prompt, $maxlen)          # Text input
 door_menu($prompt, @options)            # Single char menu
-door_money($prompt)                     # Dollar amount
+door_money($amount)                     # Format as currency
 
 # Card/slot visuals
 door_draw_cards(@card_indices)          # Display hand
@@ -425,8 +436,16 @@ door_use_turn($game)
 
 # Multiplayer
 door_broadcast($game, $message)
-door_send_message($user, $msg)
-my @online = door_get_online_players()
+door_send_message($game, $user, $msg)
+my @online = door_get_online_players($game)
+door_broker_connect($game, $room)       # Connect to broker for real-time multiplayer
+door_broker_move($room)                 # Move to different broker room
+door_broker_disconnect()                # Disconnect from broker at game exit
+door_broker_room_players()              # List players in current broker room
+door_chat_send($game, $msg)             # Send chat via broker
+door_chat_poll($game)                   # Poll for chat messages
+door_chat_display($game)                # Display pending chat + keepalive
+door_chat_input($game)                  # Interactive chat prompt
 ```
 
 ---

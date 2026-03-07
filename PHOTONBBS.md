@@ -388,7 +388,7 @@ These scripts run with reduced privileges (as the "nobody" user).
 
 ## Native Door Games
 
-PhotonBBS includes 10 built-in door games written in native Perl. These games are integrated directly into the BBS - no external executables, DOS emulation, or drop files required.
+PhotonBBS includes 13 built-in door games written in native Perl. These games are integrated directly into the BBS - no external executables, DOS emulation, or drop files required.
 
 ### Accessing Games
 
@@ -401,15 +401,47 @@ Games are accessible two ways:
 | Key | Game | Description |
 |-----|------|-------------|
 | A | **PhotonMUD** | Multi-user dungeon with procedural world, D&D combat, magic system |
-| B | **Red Dragon** | Fantasy RPG - forest exploration, monster combat, 10 levels, dragon boss |
-| C | **Star Trader** | Space trading - sector navigation, commodities, ship upgrades, pirate combat |
-| D | **Casino** | Card and dice games - blackjack, video poker, craps, slots, roulette |
-| E | **Drug Lord** | Street empire - buy/sell across locations, 30-day campaign |
-| F | **Sea Battle** | Naval combat - ship placement, grid targeting, AI opponent |
-| G | **Star Trek** | Space exploration - 8x8 galaxy, phaser/torpedo combat, starbases |
-| H | **Big Catch** | Fishing simulation - 5 lakes, 7 lures, tackle shop, tournaments |
+| B | **MechWars** | Space combat/trading - persistent 128x128 universe, mech classes, guilds, fortresses, economy |
+| C | **Sea Battle** | Naval combat - ship placement, grid targeting, live PvP via broker |
+| D | **1000 Miles** | Racing card game - 2-4 players, real-time multiplayer via broker |
+| E | **Property Wars** | Property trading board game - 2-4 players, multiplayer sessions |
+| F | **Dice Shake** | Dice scoring game - Yahtzee-style, 2-4 players, split scorecard/dice layout |
+| G | **Casino** | Card and dice games - blackjack, video poker, craps, slots, roulette |
+| H | **Red Dragon** | Fantasy RPG - forest exploration, monster combat, 10 levels, dragon boss, live PvP duels |
 | I | **Atlantis** | Underwater adventure - diving, sea creatures, artifacts, equipment upgrades |
-| J | **1000 Miles** | Racing card game - 2-4 players, 101-card deck, coup fourre |
+| J | **Star Trek** | Space exploration - 8x8 galaxy, phaser/torpedo combat, starbases |
+| K | **Star Trader** | Space trading - sector navigation, commodities, ship upgrades, pirate combat |
+| L | **Drug Lord** | Street empire - buy/sell across locations, 30-day campaign |
+| M | **Big Catch** | Fishing simulation - 5 lakes, 7 lures, tackle shop, tournaments |
+
+### MechWars: Infinite Frontiers
+
+MechWars is a large-scale space strategy game with a persistent shared universe:
+
+- **128x128 sector universe** with trading bases, planets, and fortresses
+- **5 mech classes** (Scout, Fighter, Cruiser, Battleship, Carrier) with distinct stats
+- **Real-time combat** against AI drones and other players
+- **Economy** with 5 resources, trading bases, equipment shop, mech upgrades
+- **Guilds** with member management, war declarations, and message boards
+- **Fortresses** with 4 upgrade levels, sector control, and guild assignment
+- **Planets** with resource harvesting, defense building, and colonization
+- **Hyperspace fold** system with accuracy mechanics and warp beacons
+- **Mine deployment** for sector denial
+- **Sector mini-map** showing nearby objects and threats
+- **Daily maintenance** resets turns and spawns new drones
+
+MechWars uses 12 dedicated modules (`mw-*`) for its subsystems.
+
+### Multiplayer Features
+
+Several games support real-time multiplayer via the broker system:
+
+- **1000 Miles** - Live multiplayer card game sessions (2-4 players)
+- **Sea Battle** - Live PvP naval combat via broker
+- **Property Wars** - Multiplayer property trading sessions
+- **Dice Shake** - Multiplayer dice game sessions
+- **Red Dragon** - Live PvP duels between players
+- **MechWars** - Shared persistent universe with real-time sector awareness
 
 ### Door Features
 
@@ -421,6 +453,8 @@ All native door games share these features through the doorlib framework:
 - **Broadcasts**: Notable achievements announced to online users
 - **Turn Limits**: Configurable daily turn limits per game (optional)
 - **Activity Logging**: Game actions logged for operator review
+- **Broker Keepalive**: BBS session stays alive during long door game sessions
+- **Chat Integration**: Send/receive messages while in any door game
 
 ### Game Administration
 
