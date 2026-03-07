@@ -129,6 +129,14 @@ to all users:
         ANSI                    Change your ANSI preference
         DEFAULT                 Set your default channel
         UNIXPWD                 Change your unix password if applicable
+        SSHKEY                  Upload SSH public key for key-based login
+        SSHKEY REMOVE           Remove your SSH key
+
+### SSH Access
+
+Users can upload their SSH public keys via `/set sshkey` in teleconference for passwordless login. Supported key types: ssh-rsa, ssh-ed25519, ecdsa-sha2-nistp256.
+
+SSH is optionally enabled via Docker environment variable `PHOTONBBS_SSH_ENABLE=1` and maps to port 2222 by default. SSH users are forced into the BBS client (no shell access) with automatic authentication based on their registered key.
 
 ## Installation
 
@@ -403,7 +411,7 @@ Games are accessible two ways:
 | A | **PhotonMUD** | Multi-user dungeon with procedural world, D&D combat, magic system |
 | B | **MechWars** | Space combat/trading - persistent 128x128 universe, mech classes, guilds, fortresses, economy |
 | C | **Sea Battle** | Naval combat - ship placement, grid targeting, live PvP via broker |
-| D | **1000 Miles** | Racing card game - 2-4 players, real-time multiplayer via broker |
+| D | **1000 Miles** | Racing card game - 2-4 players, real-time multiplayer via broker, deck reshuffle |
 | E | **Property Wars** | Property trading board game - 2-4 players, multiplayer sessions |
 | F | **Dice Shake** | Dice scoring game - Yahtzee-style, 2-4 players, split scorecard/dice layout |
 | G | **Casino** | Card and dice games - blackjack, video poker, craps, slots, roulette |
@@ -412,7 +420,7 @@ Games are accessible two ways:
 | J | **Star Trek** | Space exploration - 8x8 galaxy, phaser/torpedo combat, starbases |
 | K | **Star Trader** | Space trading - sector navigation, commodities, ship upgrades, pirate combat |
 | L | **Drug Lord** | Street empire - buy/sell across locations, 30-day campaign |
-| M | **Big Catch** | Fishing simulation - 5 lakes, 7 lures, tackle shop, tournaments |
+| M | **Big Catch** | Fishing simulation - 12 lakes, 27 species, directional casting, real-time retrieve, fight system |
 
 ### MechWars: Infinite Frontiers
 
@@ -455,6 +463,30 @@ All native door games share these features through the doorlib framework:
 - **Activity Logging**: Game actions logged for operator review
 - **Broker Keepalive**: BBS session stays alive during long door game sessions
 - **Chat Integration**: Send/receive messages while in any door game
+- **Unified Slash Commands**: Press `/` at any game prompt for:
+  - `/who` or `/online` - See who's online
+  - `/scores` - View high scores
+  - `/chat <message>` - Send chat message
+  - `/quit` - Exit the game
+  - `/help` - List available commands
+
+### Big Catch: Fishing Simulation
+
+Big Catch features a realistic fishing experience inspired by classic BBS fishing games:
+
+- **12 named lakes** with unique species, depth profiles, and structure
+- **27 fish species** across 7 families with realistic depth/weight/behavior
+- **Directional casting** - 8-point compass direction and 1-5 cell distance
+- **Full-screen retrieve** - player-controlled reel speed with tackle-specific patterns:
+  - Topwater lures: twitch/stop-go patterns trigger strikes
+  - Crankbaits/Spinners: steady medium-fast retrieve works best
+  - Jigs/Worms: pauses and slow movement trigger strikes
+- **Fight system** with line tension, fish stamina, drag control (Loose/Medium/Tight), pump technique
+- **Skill progression** - angler level increases with lifetime catches
+- **8 lure types x 4 sizes** with behavior-specific depth profiles
+- **Tournaments, duels, and derby** leaderboards
+- **Tackle shop** with line upgrades, fish finder, and lure purchases
+- **Weather system** affecting fish activity and bite rates
 
 ### Game Administration
 

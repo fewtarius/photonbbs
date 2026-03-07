@@ -95,6 +95,21 @@ door_send_message($user, $msg)          # Private message to user
 my @online = door_get_online_players()  # List of online users
 ```
 
+### Keepalive and Slash Commands
+
+```perl
+door_keepalive()                         # Reset idle timer (auto in clear/pause)
+my $result = door_check_command($game)   # Handle /who, /scores, /chat, /quit, /help
+# Returns: 'quit' if user wants to exit, 1 if handled, 0 if unrecognized
+```
+
+**Slash command integration**: Add `elsif ($cmd eq '/') { ... }` to your main
+input loop. See "Unified Slash Commands" in DEVELOPER.md for the pattern.
+
+**Keepalive**: Called automatically by `door_clear()` and `door_pause()`. Add
+explicit `door_keepalive()` calls before `select()` waits or long processing loops
+to prevent idle disconnection during AI turns or multiplayer polling.
+
 ---
 
 ## Module Structure
@@ -395,6 +410,42 @@ ssh deck@zaphod "docker cp ~/photonbbs/data/games.mnu \
 | Scrolled-off content | Board too tall for 24-line terminal | Count lines, use 2-column layout, merge optional fields |
 | No turns display after deploy | Menu file not copied to Docker volume | `docker cp data/games.mnu container:/appdata/games.mnu` |
 | Color codes break column alignment | Using `length()` on colored strings | Track visible length separately from string |
+| Idle timeout disconnects during AI | No keepalive during wait loops | Add `door_keepalive()` before `select()` calls |
+
+---
+
+## Full-Screen Mini-Game Pattern
+
+For immersive gameplay (fighting, fishing, etc.), use `door_clear()` to redraw a full 24-line
+screen each tick. See `_bc_draw_retrieve()` and `_bc_draw_fight()` in `pb-door-bigcatch`:
+
+```perl
+# Each game tick:
+# 1. Clear screen
+door_clear();
+
+# 2. Draw header (1-2 lines)
+writeline($config{'themecolor'} . " Game Title - Status" . $RST, 1);
+
+# 3. Draw main display (12-16 lines)
+# Progress bars, maps, cross-sections, etc.
+my $bar = ("=" x $fill) . (" " x ($max - $fill));
+writeline(" [" . $bar . "]" . $RST, 1);
+
+# 4. Draw action log (3-5 lines)
+for my $entry (@log[-3..-1]) {
+    writeline($config{'datacolor'} . "   $entry" . $RST, 1);
+}
+
+# 5. Draw controls and prompt (2-3 lines)
+writeline($config{'systemcolor'} . " [R]eel [B]ear Down [G]ive Line" . $RST, 1);
+writeline($config{'promptcolor'} . " > " . $RST);
+
+# 6. Get input (waitkey with optional timeout)
+my $action = waitkey("", $timeout);
+```
+
+Budget: 24 lines total. Always count your lines.
 
 ---
 
@@ -402,21 +453,25 @@ ssh deck@zaphod "docker cp ~/photonbbs/data/games.mnu \
 
 ```perl
 # I/O
-door_clear()
-door_header($title)                     # Clear + title + hrule
-door_pause()
+door_clear()                             # Clear screen + keepalive
+door_header($title)                      # Clear + title + hrule
+door_pause()                             # Wait for keypress + keepalive
 door_hrule($width)
-door_yesno($prompt)                     # Returns 1 (Y) or 0 (N)
-door_noyes($prompt)                     # Returns 1 (N) or 0 (Y)
-door_getnum($prompt, $min, $max)        # Validated number
-door_getamount($prompt, $max)           # Monetary amount (supports 'all')
-door_getline($prompt, $maxlen)          # Text input
-door_menu($prompt, @options)            # Single char menu
-door_money($amount)                     # Format as currency
+door_yesno($prompt)                      # Returns 1 (Y) or 0 (N)
+door_noyes($prompt)                      # Returns 1 (N) or 0 (Y)
+door_getnum($prompt, $min, $max)         # Validated number
+door_getamount($prompt, $max)            # Monetary amount (supports 'all')
+door_getline($prompt, $maxlen)           # Text input
+door_menu($prompt, @options)             # Single char menu
+door_money($amount)                      # Format as currency
+
+# Session management
+door_keepalive()                         # Reset idle timer + broker heartbeat
+door_check_command($game)                # Unified /commands (returns 'quit'/1/0)
 
 # Card/slot visuals
-door_draw_cards(@card_indices)          # Display hand
-door_draw_slots(@reel_symbols)          # Slot display
+door_draw_cards(@card_indices)           # Display hand
+door_draw_slots(@reel_symbols)           # Slot display
 
 # Persistence
 door_save($game, \%data)
