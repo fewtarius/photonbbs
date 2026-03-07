@@ -792,6 +792,8 @@ sub _dl_trade_menu {
         $g->{quit} = 1;
         $trading = 0;
       }
+    } elsif (door_check_shortcut($choice, $DOOR_NAME)) {
+      next;
     } elsif ($choice eq '/') {
       my $result = door_check_command($DOOR_NAME);
       if ($result && $result eq 'quit') { $g->{quit} = 1; $trading = 0; }

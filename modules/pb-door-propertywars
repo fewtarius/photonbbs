@@ -1039,6 +1039,8 @@ sub _pw_human_turn {
       _pw_trade_menu($g, $pidx);
     } elsif ($cmd eq 'C') {
       door_chat_input($DOOR_NAME);
+    } elsif (door_check_shortcut($cmd, $DOOR_NAME)) {
+      next;
     } elsif ($cmd eq '/') {
       my $result = door_check_command($DOOR_NAME);
       if ($result && $result eq 'quit') {

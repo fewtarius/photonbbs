@@ -266,6 +266,7 @@ sub _st_command_loop {
   elsif ($cmd eq 'C') { _st_star_chart($g); door_pause(); }
   elsif ($cmd eq 'F') { _st_communiques_full($g); }
   elsif ($cmd eq 'B') { door_chat_input($DOOR_NAME); }
+  elsif (door_check_shortcut($cmd, $DOOR_NAME)) { next; }
   elsif ($cmd eq '/') {
     my $result = door_check_command($DOOR_NAME);
     if ($result && $result eq 'quit') { $g->{game_over} = 1; }

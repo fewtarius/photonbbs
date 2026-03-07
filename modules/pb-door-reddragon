@@ -152,6 +152,7 @@ sub reddragon_main {
     elsif ($ch eq 'C') { door_chat_input($DOOR_NAME); }
     elsif ($ch eq 'D') { _rd_dragon($p); }
     elsif ($ch eq 'S') { door_show_scores($DOOR_NAME, "Red Dragon Hall of Fame", "Kills", 10); door_pause(); }
+    elsif (door_check_shortcut($ch, $DOOR_NAME)) { next; }
     elsif ($ch eq '/') {
       my $result = door_check_command($DOOR_NAME);
       if ($result && $result eq 'quit') { $quit = 1; }
@@ -539,7 +540,7 @@ sub _rd_weapon_shop {
 
   my $idx = 0;
   for my $w (@WEAPONS) {
-    next if $idx == 0; # Skip the Stick
+    if ($idx == 0) { $idx++; next; } # Skip the Stick
     my $afford = ($p->{gold} >= $w->{price}) ? $config{'datacolor'} : $config{'linecolor'};
     my $own = ($idx == $p->{weapon}) ? $config{'usercolor'} . " (owned)" : "";
     writeline(sprintf("  %s%-2d%s %s%-22s%s STR +%-3d %s%s%s",
@@ -594,7 +595,7 @@ sub _rd_armor_shop {
 
   my $idx = 0;
   for my $a (@ARMORS) {
-    next if $idx == 0; # Skip the Coat
+    if ($idx == 0) { $idx++; next; } # Skip the Coat
     my $afford = ($p->{gold} >= $a->{price}) ? $config{'datacolor'} : $config{'linecolor'};
     my $own = ($idx == $p->{armor}) ? $config{'usercolor'} . " (owned)" : "";
     writeline(sprintf("  %s%-2d%s %s%-22s%s DEF +%-3d %s%s%s",

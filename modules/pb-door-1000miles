@@ -916,6 +916,7 @@ sub _mb_do_human_turn {
     my $input = uc(waitkey(""));
     writeline("", 1);
 
+    next if door_check_shortcut($input, $DOOR_NAME);
     if ($input eq '/') {
       my $result = door_check_command($DOOR_NAME);
       if ($result && $result eq 'quit') { $g->{quit} = 1; return 0; }

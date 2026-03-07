@@ -192,6 +192,7 @@ sub _mw_command_loop {
     }
     elsif ($cmd eq 'H') { door_chat_input($DOOR_NAME); }
     elsif ($cmd eq '?') { _mw_help(); }
+    elsif (door_check_shortcut($cmd, $DOOR_NAME)) { next; }
     elsif ($cmd eq '/') {
       my $result = door_check_command($DOOR_NAME);
       return 0 if ($result && $result eq 'quit');

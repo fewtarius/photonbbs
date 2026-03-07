@@ -193,6 +193,8 @@ sub casino_main {
     } elsif ($choice eq 'H') {
       door_show_scores($DOOR_NAME, "Casino High Rollers", "Winnings");
       door_pause();
+    } elsif (door_check_shortcut($choice, $DOOR_NAME)) {
+      next;
     } elsif ($choice eq '/') {
       my $result = door_check_command($DOOR_NAME);
       if ($result && $result eq 'quit') { $playing = 0; }

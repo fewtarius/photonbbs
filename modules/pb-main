@@ -1438,6 +1438,9 @@ sub teleconf {
       goto telemain;
     }
     if ($chatline =~/^[!xX]$/ || $chatline =~/^\/[Qq][Uu][Ii][Tt]$/ || $chatline =~/^[Ee][Xx][Ii][Tt]$/) {
+        unless (door_yesno("Leave chat?")) {
+          goto telemain;
+        }
         writeline ($BWH."\nLeaving teleconference..",1);
         $leaving="1";
         telesend("just left the channel!");
