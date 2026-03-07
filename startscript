@@ -139,26 +139,51 @@ if [ "${PHOTONBBS_SSH_ENABLE:-0}" = "1" ]; then
     ssh-keygen -A 2>/dev/null || true
   fi
   # Write BBS SSH configuration
+  mkdir -p /etc/ssh/sshd_config.d
   cat > /etc/ssh/sshd_config.d/photonbbs.conf <<'EOF'
 # PhotonBBS SSH Access
-# Users with "bbs" as their login shell connect directly to the BBS
 Port 22
 PermitRootLogin no
 PasswordAuthentication no
 PubkeyAuthentication yes
 UsePAM no
-# Force BBS client for all connections
+# Allow per-key environment variables (PHOTONBBS_USER for user identification)
+PermitUserEnvironment yes
+# Force all bbs user connections into the BBS client
 Match User bbs
-    ForceCommand /opt/photonbbs/sbin/photonbbs-client SSH %I %p
+    ForceCommand /opt/photonbbs/sbin/photonbbs-ssh
     AllowTcpForwarding no
     X11Forwarding no
 EOF
-  # Create bbs user if not present
-  id bbs >/dev/null 2>&1 || useradd -r -s /bin/false -d /opt/photonbbs bbs
+  # Create bbs user with home directory (shell needed for ForceCommand execution)
+  id bbs >/dev/null 2>&1 || useradd -r -s /bin/sh -d /home/bbs bbs
+  # Ensure shell is correct even if user already exists
+  usermod -s /bin/sh bbs 2>/dev/null || true
   mkdir -p /home/bbs/.ssh && chmod 700 /home/bbs/.ssh
-  chown -R bbs:bbs /home/bbs/.ssh
+  touch /home/bbs/.ssh/authorized_keys && chmod 600 /home/bbs/.ssh/authorized_keys
+  chown -R bbs:bbs /home/bbs
+
+  # Allow bbs user to write to BBS data directories (nodes, messages, etc.)
+  # The BBS daemon runs as 'nobody', SSH sessions run as 'bbs'
+  usermod -a -G $(id -gn nobody) bbs 2>/dev/null || true
+  # Make all BBS data directories group-writable for SSH sessions
+  find /appdata -type d -exec chmod g+rwx {} + 2>/dev/null || true
+  find /appdata -type f -exec chmod g+rw {} + 2>/dev/null || true
+  # Transient directory for session files
+  chmod -R 1777 /opt/photonbbs/transient 2>/dev/null || true
+  # Doors directory for drop files
+  find /opt/photonbbs/doors -type d -exec chmod g+rwx {} + 2>/dev/null || true
+  find /opt/photonbbs/doors -type f -exec chmod g+rw {} + 2>/dev/null || true
+
   /usr/sbin/sshd -e &
   echo "[startscript] SSH server started on port 22"
+
+  # Fix permissions after daemon starts (daemon sets 0750, we need 0770 for SSH)
+  (
+    sleep 5
+    chmod -R g+w /appdata/nodes /dev/shm/photonbbs 2>/dev/null || true
+    chmod 1770 /dev/shm/photonbbs/doors/nodes 2>/dev/null || true
+  ) &
 fi
 
 /opt/photonbbs/photonbbs

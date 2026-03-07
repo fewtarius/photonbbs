@@ -32,6 +32,20 @@ sub check_password {
 }
 
 sub authenticate {
+  # SSH key authentication - user already verified by sshd
+  if ($info{'proto'} eq "SSH" && $ENV{'PHOTONBBS_USER'}) {
+    $info{'handle'} = $ENV{'PHOTONBBS_USER'};
+    my $ucheck = finduser();
+    if ($ucheck !~ /invalid/) {
+      colorize();
+      logger("NOTICE: $info{'handle'} authenticated via SSH key on node $info{'tty'} via $info{'connect'}");
+      return;
+    }
+    # Key exists but user record gone - fall through to normal login
+    $info{'handle'} = "";
+    logger("WARN: SSH key user $ENV{'PHOTONBBS_USER'} not found in user database");
+  }
+
   # Reduce the idle disconnect for sessions at the login prompt.
   $defaultidle=$config{'idledisconnect'};
   $config{'idledisconnect'}=90;
@@ -525,6 +539,162 @@ sub chemail {
   writeline($theme{'setemaila'});
   $info{'email'}=getline(text,40,"",1);
   updateuser();
+}
+
+# ============================================================================
+# SSH KEY MANAGEMENT
+# ============================================================================
+
+# Valid SSH key type prefixes
+my @VALID_KEY_TYPES = (
+    'ssh-rsa',
+    'ssh-ed25519',
+    'ssh-ed448',
+    'ssh-dss',
+    'ecdsa-sha2-nistp256',
+    'ecdsa-sha2-nistp384',
+    'ecdsa-sha2-nistp521',
+    'sk-ssh-ed25519@openssh.com',
+    'sk-ecdsa-sha2-nistp256@openssh.com',
+);
+
+sub validate_ssh_key {
+    my ($key) = @_;
+    return 0 unless defined $key && length($key) > 20;
+
+    # Must be a single line
+    return 0 if $key =~ /\n/;
+
+    # Must start with a valid key type
+    my $valid_type = 0;
+    for my $type (@VALID_KEY_TYPES) {
+        if ($key =~ /^\Q$type\E\s/) {
+            $valid_type = 1;
+            last;
+        }
+    }
+    return 0 unless $valid_type;
+
+    # Key data should be base64 (second field)
+    my @parts = split(/\s+/, $key);
+    return 0 unless scalar(@parts) >= 2;
+    return 0 unless $parts[1] =~ /^[A-Za-z0-9+\/=]+$/;
+    return 0 unless length($parts[1]) >= 16;
+
+    # Reasonable length limit (16KB should cover any key type)
+    return 0 if length($key) > 16384;
+
+    return 1;
+}
+
+sub chsshkey {
+    my ($subcmd) = @_;
+
+    # /set sshkey remove
+    if (defined $subcmd && $subcmd =~ /^remove$/i) {
+        if (!$info{'sshkey'} || $info{'sshkey'} eq '') {
+            writeline($config{'systemcolor'} . "No SSH key configured." . $RST, 1);
+            return;
+        }
+        $info{'sshkey'} = '';
+        updateuser();
+        rebuild_authorized_keys();
+        writeline($config{'systemcolor'} . "SSH key removed." . $RST, 1);
+        logger("NOTICE: $info{'handle'} removed their SSH key");
+        return;
+    }
+
+    # Show current key if set
+    if ($info{'sshkey'} && $info{'sshkey'} ne '') {
+        my $keytype = (split(/\s+/, $info{'sshkey'}))[0];
+        my $keydata = (split(/\s+/, $info{'sshkey'}))[1];
+        my $fingerprint = substr($keydata, 0, 12) . "..." . substr($keydata, -8);
+        writeline($config{'datacolor'} . "Current key: " .
+                  $config{'usercolor'} . $keytype . " " . $fingerprint . $RST, 1);
+        writeline("", 1);
+    }
+
+    writeline($config{'themecolor'} . "Paste your SSH public key (from ~/.ssh/id_*.pub):" . $RST, 1);
+    writeline($config{'systemcolor'} . "Or press Enter to cancel." . $RST, 1);
+    writeline($config{'promptcolor'} . "> " . $RST);
+
+    my $key = getline('text', 2048, "", 1);
+    $key =~ s/^\s+|\s+$//g if defined $key;
+
+    if (!defined $key || $key eq '') {
+        writeline($config{'systemcolor'} . "Cancelled." . $RST, 1);
+        return;
+    }
+
+    unless (validate_ssh_key($key)) {
+        writeline($config{'errorcolor'} . "Invalid SSH public key format." . $RST, 1);
+        writeline($config{'systemcolor'} . "Key must start with ssh-rsa, ssh-ed25519, ecdsa-sha2-*, etc." . $RST, 1);
+        return;
+    }
+
+    $info{'sshkey'} = $key;
+    updateuser();
+    rebuild_authorized_keys();
+
+    my $keytype = (split(/\s+/, $key))[0];
+    writeline($config{'systemcolor'} . "SSH key saved (" .
+              $config{'usercolor'} . $keytype . $config{'systemcolor'} . ")." . $RST, 1);
+    writeline($config{'datacolor'} . "You can now SSH to this BBS." . $RST, 1);
+    logger("NOTICE: $info{'handle'} set SSH key ($keytype)");
+}
+
+sub rebuild_authorized_keys {
+    my $auth_keys_dir  = "/home/bbs/.ssh";
+    my $auth_keys_file = "$auth_keys_dir/authorized_keys";
+    my $users_dir      = $config{'home'} . $config{'data'} . "/users";
+
+    # Bail if SSH is not enabled (no /home/bbs/.ssh directory)
+    return unless -d $auth_keys_dir;
+
+    my @lines;
+    my $forced_opts = 'command="/opt/photonbbs/sbin/photonbbs-client SSH",' .
+                      'no-port-forwarding,no-X11-forwarding,no-agent-forwarding';
+
+    # Scan all user data files for sshkey entries
+    if (opendir(my $dh, $users_dir)) {
+        while (my $file = readdir($dh)) {
+            next unless $file =~ /^\d+\.dat$/;
+            my $path = "$users_dir/$file";
+            if (open(my $fh, '<', $path)) {
+                my $handle = '';
+                my $sshkey = '';
+                while (my $line = <$fh>) {
+                    chomp $line;
+                    if ($line =~ /^handle=(.+)/) {
+                        $handle = $1;
+                    } elsif ($line =~ /^sshkey=(.+)/) {
+                        $sshkey = $1;
+                    }
+                }
+                close($fh);
+                if ($sshkey ne '' && validate_ssh_key($sshkey)) {
+                    # environment="PHOTONBBS_USER=handle" lets the client
+                    # identify which BBS user is connecting
+                    push @lines, "environment=\"PHOTONBBS_USER=$handle\",$forced_opts $sshkey";
+                }
+            }
+        }
+        closedir($dh);
+    }
+
+    # Atomic write
+    my $tmp = "$auth_keys_file.tmp.$$";
+    if (open(my $fh, '>', $tmp)) {
+        for my $line (@lines) {
+            print $fh "$line\n";
+        }
+        close($fh);
+        chmod(0600, $tmp);
+        rename($tmp, $auth_keys_file);
+        # Ensure ownership (bbs user)
+        my ($uid, $gid) = (getpwnam('bbs'))[2,3];
+        chown($uid, $gid, $auth_keys_file) if defined $uid;
+    }
 }
 
 return 1;

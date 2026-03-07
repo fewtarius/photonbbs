@@ -13,15 +13,16 @@ services:
     - /lib/modules:/lib/modules:rwm
     ports:
     - 23:23/tcp
-    # Uncomment to enable SSH access (also set PHOTONBBS_SSH_ENABLE=1 below)
-    # - 22:22/tcp
+    # SSH access for key-authenticated BBS users (set PHOTONBBS_SSH_ENABLE=1)
+    # Change 2222 to 22 on dedicated BBS hosts with no other SSH service
+    - 2222:22/tcp
     privileged: true
     tty: true
     environment:
     - PHOTONMUD_DEBUG=0
     - PHOTON_MONSTER_DEBUG=0
     - PHOTON_ROOMS_DEBUG=0
-    # Set to 1 to enable SSH access (requires openssh-server in container)
+    # Set to 1 to enable SSH access (public key authentication only)
     - PHOTONBBS_SSH_ENABLE=0
     volumes:
     - appdata:/appdata:rw

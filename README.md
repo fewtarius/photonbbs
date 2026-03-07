@@ -134,6 +134,29 @@ telnet localhost 23
 
 That's it! PhotonBBS will build and start automatically.
 
+### SSH Access (Optional)
+
+PhotonBBS supports SSH access with public key authentication. Users manage their SSH keys from the BBS itself.
+
+**Enable SSH:**
+
+1. Set `PHOTONBBS_SSH_ENABLE=1` in your docker-compose environment
+2. Expose port 22 inside the container (mapped to 2222 by default to avoid conflicts)
+3. Restart the container
+
+**User setup (from the BBS):**
+```
+/set sshkey           - Paste your public key to enable SSH login
+/set sshkey remove    - Remove your SSH key
+```
+
+**Connect via SSH:**
+```bash
+ssh -p 2222 bbs@your-bbs-host
+```
+
+SSH users are automatically authenticated by their key - no password prompt. The connection is forced directly into the BBS client with no shell access.
+
 ### System Requirements
 
 **For Docker deployment:**

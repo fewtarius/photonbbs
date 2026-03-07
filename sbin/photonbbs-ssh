@@ -1,0 +1,84 @@
+#!/usr/bin/perl
+# PhotonBBS SSH session wrapper
+# Launched by sshd ForceCommand, allocates a node and starts the BBS client.
+# Usage: photonbbs-ssh (no arguments - environment provides context)
+
+use strict;
+use warnings;
+use Fcntl qw(:flock);
+
+# Find our installation directory
+my $home = '/opt/photonbbs';
+if (-d $home) {
+    # Docker container path
+} elsif (-d "$ENV{HOME}/photonbbs") {
+    $home = "$ENV{HOME}/photonbbs";
+} elsif (-d '/usr/local/photonbbs') {
+    $home = '/usr/local/photonbbs';
+}
+
+# Load config to get max nodes and paths
+my $config_file = "$home/configs/etc/default/photonbbs";
+my %config = (
+    'home'     => $home,
+    'nodes'    => '/data/nodes',
+    'data'     => '/data',
+);
+
+if (open(my $fh, '<', $config_file)) {
+    while (my $line = <$fh>) {
+        chomp $line;
+        next if $line =~ /^\s*#/ || $line =~ /^\s*$/;
+        if ($line =~ /^(\w+)="?([^"]*)"?;?\s*(?:#.*)?$/) {
+            $config{$1} = $2;
+        }
+    }
+    close($fh);
+}
+
+my $nodes_dir = "$config{'home'}$config{'nodes'}";
+my $max_nodes = $config{'totalnodes'} || 64;
+
+# Get IP from SSH_CLIENT environment
+my $ip = '0.0.0.0';
+if ($ENV{'SSH_CLIENT'}) {
+    ($ip) = split(/\s+/, $ENV{'SSH_CLIENT'});
+}
+
+# Allocate a node from the upper half of the range to avoid
+# conflicts with telnet-assigned nodes (which count from 1)
+my $nodeid;
+my $start_node = int($max_nodes / 2) + 1;
+
+for my $n ($start_node .. $max_nodes) {
+    my $nodefile = "$nodes_dir/$n";
+    next if -e $nodefile;
+
+    # Claim this node atomically
+    if (open(my $fh, '>', $nodefile)) {
+        flock($fh, LOCK_EX | LOCK_NB) or next;
+        print $fh "$ip|$n|$$|" . time() . "||SSH|Logging in\n";
+        flock($fh, LOCK_UN);
+        close($fh);
+        $nodeid = $n;
+        last;
+    }
+}
+
+unless (defined $nodeid) {
+    print "System is full. Please try again later.\n";
+    exit 1;
+}
+
+# Set environment for the BBS client
+$ENV{TERM}              = $ENV{TERM} || 'xterm-256color';
+$ENV{HOME}              = $config{'home'};
+$ENV{PHOTONBBS_NODEID}  = $nodeid;
+
+# Execute the BBS client directly (SSH provides the terminal)
+my $client = "$config{'home'}/sbin/photonbbs-client";
+exec($client, 'SSH', $ip, $nodeid) or do {
+    # Clean up node file on failure
+    unlink("$nodes_dir/$nodeid");
+    die "Could not exec $client: $!\n";
+};
