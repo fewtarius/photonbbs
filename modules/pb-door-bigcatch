@@ -590,6 +590,11 @@ sub _bc_command {
   elsif ($cmd eq 'r') { _bc_join_tournament($g); }
   elsif ($cmd eq 'v') { _bc_fishing_duel($g); }
   elsif ($cmd eq 'n') { door_chat_input($DOOR_NAME); }
+  elsif ($cmd eq '/') {
+    my $result = door_check_command($DOOR_NAME);
+    if ($result && $result eq 'quit') { $g->{quit} = 1; }
+    else { door_pause() unless $result; }
+  }
   elsif ($cmd eq 'q') {
     writeline($config{'systemcolor'} . " Quit fishing? (Y/N) " . $RST);
     my $yn = uc(waitkey("")); writeline("", 1);

@@ -192,6 +192,11 @@ sub _mw_command_loop {
     }
     elsif ($cmd eq 'H') { door_chat_input($DOOR_NAME); }
     elsif ($cmd eq '?') { _mw_help(); }
+    elsif ($cmd eq '/') {
+      my $result = door_check_command($DOOR_NAME);
+      return 0 if ($result && $result eq 'quit');
+      door_pause() unless $result;
+    }
     elsif ($cmd eq 'Q') {
         if (door_noyes("Leave MechWars?")) {
             return 0;

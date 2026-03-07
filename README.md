@@ -21,9 +21,9 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 The latest version of this software can be downloaded from:
 https://github.com/fewtarius/photonbbs
 
-## Live Demo
+## Terminal Tavern BBS
 
-Try PhotonBBS and PhotonMUD live at **Terminal Tavern**:
+Join us at **Terminal Tavern** where you can chat, play games, and test out PhotonBBS and PhotonMUD!
 
 ```
 telnet bbs.terminaltavern.com
@@ -378,7 +378,7 @@ PhotonBBS implements several security features:
 
 - **GitHub**: https://github.com/fewtarius/photonbbs
 - **Issues**: Report bugs and feature requests via GitHub Issues
-- **Live Demo**: telnet bbs.terminaltavern.com
+- **Terminal Tavern BBS**: telnet bbs.terminaltavern.com
 
 ## Contributing
 

@@ -470,6 +470,7 @@ sub _pw_join_game {
       $game_state = $s->{game_state};
       last;
     }
+    door_keepalive();
     select(undef, undef, undef, 1);
   }
 
@@ -581,6 +582,7 @@ sub _pw_game_loop {
       # Show board after AI turn so human can see what happened
       _pw_draw_status($g, $my_pidx);
       writeline($config{'linecolor'} . " " . $p->{name} . "'s turn..." . $RST, 1);
+      door_keepalive();
       select(undef, undef, undef, 1.2);
     }
 
@@ -1037,6 +1039,14 @@ sub _pw_human_turn {
       _pw_trade_menu($g, $pidx);
     } elsif ($cmd eq 'C') {
       door_chat_input($DOOR_NAME);
+    } elsif ($cmd eq '/') {
+      my $result = door_check_command($DOOR_NAME);
+      if ($result && $result eq 'quit') {
+        $p->{bankrupt} = 1;
+        _pw_liquidate($g, $pidx, -1);
+        _pw_log($g, "$p->{name} resigned from the game");
+        $turn_done = 1;
+      } else { door_pause() unless $result; }
     } elsif ($cmd eq 'Q') {
       if (door_yesno("Really quit? You'll go bankrupt.")) {
         $p->{bankrupt} = 1;

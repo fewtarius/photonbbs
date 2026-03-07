@@ -139,6 +139,11 @@ sub atlantis_main {
     elsif ($ch eq 'C') { _atl_cooperative_sites($p); }
     elsif ($ch eq 'N') { _atl_ocean_news(); }
     elsif ($ch eq 'T') { door_chat_input($DOOR_NAME); }
+    elsif ($ch eq '/') {
+      my $result = door_check_command($DOOR_NAME);
+      if ($result && $result eq 'quit') { $quit = 1; }
+      else { door_pause() unless $result; }
+    }
     elsif ($ch eq 'Q') { $quit = 1; }
   }
 

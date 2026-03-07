@@ -424,6 +424,11 @@ sub _st_command_menu {
       return 0;
     }
   }
+  elsif ($cmd eq '/') {
+    my $result = door_check_command($DOOR_NAME);
+    return 0 if ($result && $result eq 'quit');
+    door_pause() unless $result;
+  }
 
   return 1;
 }
