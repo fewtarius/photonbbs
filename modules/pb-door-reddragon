@@ -126,6 +126,8 @@ sub reddragon_main {
   # Check for daily reset
   _rd_daily_reset($p);
 
+  iamat($info{'handle'}, "Playing Red Dragon");
+
   # Connect to broker for in-town chat
   door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-town");
 
@@ -159,6 +161,7 @@ sub reddragon_main {
   writeline($config{'themecolor'} . " The town gates close behind you..." . $RST, 1);
   writeline("", 1);
   door_pause();
+  iamat($info{'handle'}, "Finished Red Dragon");
 }
 
 # ============================================================================
@@ -544,8 +547,7 @@ sub _rd_weapon_shop {
   }
 
   writeline("", 1);
-  writeline($config{'systemcolor'} . " Buy which? (0 to leave) " . $RST);
-  my $choice = int(getline('text', 2, "", 1));
+  my $choice = door_getnum("Buy which (0 to leave):", $idx - 1);
 
   if ($choice > 0 && $choice <= $#WEAPONS) {
     my $w = $WEAPONS[$choice];
@@ -600,8 +602,7 @@ sub _rd_armor_shop {
   }
 
   writeline("", 1);
-  writeline($config{'systemcolor'} . " Buy which? (0 to leave) " . $RST);
-  my $choice = int(getline('text', 2, "", 1));
+  my $choice = door_getnum("Buy which (0 to leave):", $idx - 1);
 
   if ($choice > 0 && $choice <= $#ARMORS) {
     my $a = $ARMORS[$choice];
@@ -1111,6 +1112,7 @@ sub _rd_dragon {
     writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . "+" . _fmt($RED_DRAGON{gold}) . $RST, 1);
 
     door_submit_score($DOOR_NAME, $p->{dragon_kills}, { level => $p->{level} });
+    door_log_activity($DOOR_NAME, "$info{'handle'} slew the Red Dragon at level $p->{level}!");
     door_broadcast($DOOR_NAME, "$info{'handle'} has slain the Red Dragon!");
   }
 
@@ -1138,18 +1140,48 @@ sub _rd_pvp_attack {
     return;
   }
 
+  # Check for incoming duel challenges
+  my $sessions = door_session_list($DOOR_NAME);
+  my @challenges;
+  for my $s (@$sessions) {
+    next if lc($s->{host}) eq lc($info{'handle'});
+    # Check if the challenge targets us (stored in game_state)
+    if ($s->{game_state}{target} && lc($s->{game_state}{target}) eq lc($info{'handle'})) {
+      push @challenges, $s;
+    }
+  }
+
+  if (@challenges) {
+    for my $c (@challenges) {
+      writeline("", 1);
+      writeline($config{'errorcolor'} . " $c->{host} challenges you to a live duel!" . $RST, 1);
+      if (door_yesno("Accept the challenge?")) {
+        my $session = door_session_join($DOOR_NAME, $c->{id});
+        if ($session) {
+          _rd_live_duel($p, $session, 1);
+          return;
+        }
+      } else {
+        door_session_destroy($DOOR_NAME, $c->{id});
+        door_send_message($DOOR_NAME, $c->{host}, "$info{'handle'} declined your duel challenge.");
+      }
+    }
+  }
+
   door_header("The Dark Alley");
-  writeline($config{'systemcolor'} . " Attack a sleeping warrior..." . $RST, 1);
+  writeline($config{'systemcolor'} . " Attack a warrior..." . $RST, 1);
   writeline("", 1);
 
-  # List attackable players
+  # List attackable players - mark online ones
   my @all = door_get_all_players($DOOR_NAME);
+  my @online = door_get_online_players($DOOR_NAME);
+  my %online_map = map { lc($_) => 1 } @online;
   my @targets;
   for my $name (@all) {
     next if lc($name) eq lc($info{'handle'});
     my $pd = door_load_player($DOOR_NAME, $name);
     next unless $pd && $pd->{alive};
-    push @targets, { name => $name, data => $pd };
+    push @targets, { name => $name, data => $pd, online => $online_map{lc($name)} // 0 };
   }
 
   if (@targets == 0) {
@@ -1162,10 +1194,11 @@ sub _rd_pvp_attack {
   for my $t (@targets) {
     my $td = $t->{data};
     my $title = $LEVELS[$td->{level} - 1]{title};
-    writeline(sprintf("  %s%-2d%s %s%-18s%s Lvl %-2d %s%s",
+    my $status = $t->{online} ? $config{'usercolor'} . " [ONLINE]" : "";
+    writeline(sprintf("  %s%-2d%s %s%-18s%s Lvl %-2d %s%s%s",
       $config{'promptcolor'}, $idx, $config{'themecolor'},
       $config{'usercolor'}, substr($t->{name}, 0, 18), $config{'systemcolor'},
-      $td->{level}, $title, $RST), 1);
+      $td->{level}, $title, $status, $RST), 1);
     $idx++;
   }
 
@@ -1178,6 +1211,41 @@ sub _rd_pvp_attack {
   my $td = $target->{data};
   my $tname = $target->{name};
 
+  # If target is online, offer live duel
+  if ($target->{online}) {
+    if (door_yesno("$tname is online! Challenge to a live duel?")) {
+      writeline($config{'systemcolor'} . " Sending challenge..." . $RST, 1);
+      my $session = door_session_create($DOOR_NAME, {
+        max_players => 2,
+        game_state  => {
+          target     => $tname,
+          challenger => $info{'handle'},
+          ch_level   => $p->{level},
+          ch_hp      => $p->{hp},
+          ch_max_hp  => $p->{max_hp},
+        },
+      });
+      if ($session) {
+        door_send_message($DOOR_NAME, $tname,
+          "$info{'handle'} (Lvl $p->{level}) challenges you to a live duel! Visit the Dark Alley to accept.");
+        writeline($config{'datacolor'} . " Challenge sent! Waiting for response..." . $RST, 1);
+        writeline($config{'datacolor'} . " Press Q to cancel." . $RST, 1);
+
+        my $result = door_session_wait($DOOR_NAME, $session->{id}, {
+          timeout => 45, max_cycles => 2,
+        });
+
+        if ($result && scalar @{$result->{players}} >= 2) {
+          _rd_live_duel($p, $result, 0);
+          return;
+        }
+        writeline($config{'systemcolor'} . " $tname didn't respond. Ambushing instead..." . $RST, 1);
+        writeline("", 1);
+      }
+    }
+  }
+
+  # Offline PvP attack (original behavior)
   $p->{pvp_fights}--;
 
   writeline("", 1);
@@ -1257,6 +1325,160 @@ sub _rd_pvp_attack {
   }
 
   door_save($DOOR_NAME, $p);
+  writeline("", 1);
+  door_pause();
+}
+
+# Live duel - real-time PvP via session system
+sub _rd_live_duel {
+  my ($p, $session, $my_idx) = @_;
+  my $session_id = $session->{id};
+  my $opp_idx = $my_idx == 0 ? 1 : 0;
+  my $opp_name = $session->{players}[$opp_idx]{name};
+  my $opp_data = door_load_player($DOOR_NAME, $opp_name);
+
+  $p->{pvp_fights}--;
+
+  unless ($opp_data && $opp_data->{alive}) {
+    writeline($config{'errorcolor'} . " $opp_name is not able to fight!" . $RST, 1);
+    door_session_destroy($DOOR_NAME, $session_id);
+    door_pause();
+    return;
+  }
+
+  iamat($info{'handle'}, "Dueling $opp_name");
+
+  my $total_str = $p->{str} + $WEAPONS[$p->{weapon}]{str};
+  my $total_def = $p->{def} + $ARMORS[$p->{armor}]{def};
+  my $t_str = $opp_data->{str} + ($WEAPONS[$opp_data->{weapon}]{str} // 0);
+  my $t_def = $opp_data->{def} + ($ARMORS[$opp_data->{armor}]{def} // 0);
+  my $my_hp = $p->{hp};
+  my $t_hp = $opp_data->{hp};
+
+  door_clear();
+  writeline("", 1);
+  writeline($config{'errorcolor'} . " LIVE DUEL!" . $RST, 1);
+  writeline($config{'usercolor'} . " $info{'handle'}" . $config{'systemcolor'} . " vs " .
+    $config{'errorcolor'} . "$opp_name" . $RST, 1);
+  door_hrule(40);
+  writeline("", 1);
+
+  my $round = 0;
+  my @log;
+  while ($my_hp > 0 && $t_hp > 0 && $round < 15) {
+    $round++;
+    door_clear();
+    writeline($config{'errorcolor'} . " LIVE DUEL - Round $round" . $RST, 1);
+    door_hrule(40);
+    writeline($config{'usercolor'} . " $info{'handle'}" .
+      $config{'systemcolor'} . "  HP: " . $config{'datacolor'} . "$my_hp/$p->{max_hp}" . $RST, 1);
+    writeline($config{'errorcolor'} . " $opp_name" .
+      $config{'systemcolor'} . "  HP: " . $config{'datacolor'} . "$t_hp/$opp_data->{max_hp}" . $RST, 1);
+    writeline("", 1);
+
+    for my $l (@log) { writeline($l, 1); }
+    @log = ();
+    writeline("", 1);
+
+    writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} . "ttack  " .
+              $config{'promptcolor'} . "D" . $config{'themecolor'} . "efend  " .
+              $config{'promptcolor'} . "U" . $config{'themecolor'} . "se Gem  " .
+              $config{'systemcolor'} . "? " . $RST);
+    my $ch = uc(getline('text', 1, "", 1));
+
+    if ($ch eq 'A') {
+      my $pdmg = int(rand($total_str) * 0.8) + int($total_str * 0.3);
+      $pdmg -= int($t_def * 0.3);
+      $pdmg = 1 if $pdmg < 1;
+      $t_hp -= $pdmg;
+      push @log, $config{'usercolor'} . " You strike $opp_name for " .
+        $config{'datacolor'} . "$pdmg" . $config{'usercolor'} . " damage!" . $RST;
+
+      # Opponent retaliates (full strength - they're awake!)
+      if ($t_hp > 0) {
+        my $tdmg = int(rand($t_str) * 0.8) + int($t_str * 0.3);
+        $tdmg -= int($total_def * 0.3);
+        $tdmg = 1 if $tdmg < 1;
+        $my_hp -= $tdmg;
+        push @log, $config{'errorcolor'} . " $opp_name strikes back for " .
+          $config{'datacolor'} . "$tdmg" . $config{'errorcolor'} . " damage!" . $RST;
+      }
+    }
+    elsif ($ch eq 'D') {
+      # Defend: reduce incoming damage, small counter-attack
+      push @log, $config{'systemcolor'} . " You brace for the attack..." . $RST;
+      my $tdmg = int(rand($t_str) * 0.5) + int($t_str * 0.1);
+      $tdmg -= int($total_def * 0.5);  # Better defense
+      $tdmg = 0 if $tdmg < 0;
+      $my_hp -= $tdmg;
+      push @log, $config{'errorcolor'} . " $opp_name attacks for " .
+        $config{'datacolor'} . "$tdmg" . $config{'errorcolor'} . " damage! (Blocked!)" . $RST;
+
+      my $counter = int(rand($total_str) * 0.3);
+      $counter -= int($t_def * 0.3);
+      if ($counter > 0) {
+        $t_hp -= $counter;
+        push @log, $config{'usercolor'} . " Counter-attack! $counter damage!" . $RST;
+      }
+    }
+    elsif ($ch eq 'U') {
+      if ($p->{gems} > 0) {
+        $p->{gems}--;
+        my $gdmg = int($p->{str} * 2) + int(rand(50));
+        $t_hp -= $gdmg;
+        push @log, $config{'datacolor'} . " The gem explodes with energy!" . $RST;
+        push @log, $config{'usercolor'} . " $opp_name takes $gdmg damage!" . $RST;
+      } else {
+        push @log, $config{'systemcolor'} . " No gems! You lose your action." . $RST;
+        my $tdmg = int(rand($t_str) * 0.8) + int($t_str * 0.3);
+        $tdmg -= int($total_def * 0.3);
+        $tdmg = 1 if $tdmg < 1;
+        $my_hp -= $tdmg;
+        push @log, $config{'errorcolor'} . " $opp_name strikes for $tdmg!" . $RST;
+      }
+    }
+  }
+
+  # Update our HP
+  $p->{hp} = $my_hp > 0 ? $my_hp : 0;
+
+  writeline("", 1);
+  if ($t_hp <= 0) {
+    # We won
+    my $stolen = int($opp_data->{gold} * 0.15);
+    $p->{gold} += $stolen;
+    $p->{kills}++;
+    $p->{exp} += int($opp_data->{level} * 75);
+
+    $opp_data->{hp} = 0;
+    $opp_data->{alive} = 0;
+    $opp_data->{deaths}++;
+    $opp_data->{gold} -= $stolen;
+    door_save_player($DOOR_NAME, $opp_name, $opp_data);
+
+    writeline($config{'usercolor'} . " You have defeated $opp_name in a live duel!" . $RST, 1);
+    writeline($config{'systemcolor'} . " Stolen: " . $config{'datacolor'} . _fmt($stolen) . " gold" . $RST, 1);
+    door_send_message($DOOR_NAME, $opp_name,
+      "$info{'handle'} defeated you in a live duel and took " . _fmt($stolen) . " gold!");
+    door_broadcast($DOOR_NAME, "$info{'handle'} defeated $opp_name in a live duel!");
+  }
+  elsif ($my_hp <= 0) {
+    $p->{hp} = 0;
+    $p->{alive} = 0;
+    $p->{deaths}++;
+    writeline($config{'errorcolor'} . " $opp_name has defeated you in the duel!" . $RST, 1);
+    door_send_message($DOOR_NAME, $opp_name,
+      "You defeated $info{'handle'} in a live duel!");
+    door_broadcast($DOOR_NAME, "$opp_name defeated $info{'handle'} in a live duel!");
+  }
+  else {
+    writeline($config{'systemcolor'} . " The duel ends in a draw after $round rounds." . $RST, 1);
+    door_send_message($DOOR_NAME, $opp_name,
+      "Your duel with $info{'handle'} ended in a draw.");
+  }
+
+  door_save($DOOR_NAME, $p);
+  door_session_destroy($DOOR_NAME, $session_id);
   writeline("", 1);
   door_pause();
 }

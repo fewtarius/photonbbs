@@ -121,12 +121,13 @@ my %ROULETTE_RED_MAP = map { $_ => 1 } @ROULETTE_RED;
 # MAIN ENTRY POINT
 # ============================================================================
 
-my $CASINO_DOOR = "casino";
+my $DOOR_NAME = "casino";
 
 sub casino_main {
   iamat($info{'handle'}, "At the Casino");
 
-  door_broker_connect($CASINO_DOOR, "door-$CASINO_DOOR-floor");
+  door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-floor");
+  door_show_messages($DOOR_NAME);
 
   # Load/init player casino balance
   my $balance = door_get_credits();
@@ -148,8 +149,8 @@ sub casino_main {
     writeline("", 1);
 
     # Show who else is at the casino and jackpot size
-    my @online = door_get_online_players("casino");
-    my $pool = door_load_shared("casino", "jackpot.dat") // { amount => 500 };
+    my @online = door_get_online_players($DOOR_NAME);
+    my $pool = door_load_shared($DOOR_NAME, "jackpot.dat") // { amount => 500 };
     if (@online) {
       my $others = join(", ", map { $config{'usercolor'} . $_ . $RST } @online);
       writeline($config{'datacolor'} . "  Also playing: " . $others, 1);
@@ -158,7 +159,7 @@ sub casino_main {
     writeline("", 1);
 
     # Show any incoming floor chat
-    my @chat = door_chat_poll($CASINO_DOOR);
+    my @chat = door_chat_poll($DOOR_NAME);
     for my $m (@chat) {
       writeline($config{'linecolor'} . $m . $RST, 1);
     }
@@ -188,9 +189,9 @@ sub casino_main {
     } elsif ($choice eq 'J') {
       _casino_jackpot();
     } elsif ($choice eq 'C') {
-      door_chat_input($CASINO_DOOR);
+      door_chat_input($DOOR_NAME);
     } elsif ($choice eq 'H') {
-      door_show_scores("casino", "Casino High Rollers", "Winnings");
+      door_show_scores($DOOR_NAME, "Casino High Rollers", "Winnings");
       door_pause();
     } elsif ($choice eq 'Q') {
       $playing = 0;
@@ -203,7 +204,7 @@ sub casino_main {
 
 # Show recent casino activity (last 5 broadcasts)
 sub _casino_show_news {
-  my $news = door_load_shared("casino", "news.dat") // { items => [] };
+  my $news = door_load_shared($DOOR_NAME, "news.dat") // { items => [] };
   my @items = @{$news->{items}};
   return unless @items;
   writeline($config{'linecolor'} . "  -- Casino Floor News --" . $RST, 1);
@@ -217,13 +218,13 @@ sub _casino_show_news {
 # Post a news item to the casino floor
 sub _casino_post_news {
   my ($msg) = @_;
-  my $news = door_load_shared("casino", "news.dat") // { items => [] };
+  my $news = door_load_shared($DOOR_NAME, "news.dat") // { items => [] };
   push @{$news->{items}}, $msg;
   # Keep last 20
   if (scalar @{$news->{items}} > 20) {
     splice @{$news->{items}}, 0, scalar(@{$news->{items}}) - 20;
   }
-  door_save_shared("casino", "news.dat", $news);
+  door_save_shared($DOOR_NAME, "news.dat", $news);
 }
 
 # ============================================================================
@@ -360,11 +361,11 @@ sub _casino_blackjack {
     door_add_credits($winnings);
     my $profit = $winnings - $bet;
     if ($profit > 0) {
-      door_submit_score("casino", $profit, { game => "Blackjack" });
+      door_submit_score($DOOR_NAME, $profit, { game => "Blackjack" });
       if ($profit >= 500) {
         my $msg = "$info{'handle'} won " . door_money($profit) . " at Blackjack!";
         _casino_post_news($msg);
-        door_broadcast("casino", $msg) if $profit >= 2000;
+        door_broadcast($DOOR_NAME, $msg) if $profit >= 2000;
       }
     }
   }
@@ -466,11 +467,11 @@ sub _casino_roulette {
     door_add_credits($winnings);
     writeline($config{'usercolor'} . " You win " . door_money($winnings) . "!" . $RST, 1);
     my $profit = $winnings - $bet;
-    door_submit_score("casino", $profit, { game => "Roulette" });
+    door_submit_score($DOOR_NAME, $profit, { game => "Roulette" });
     if ($profit >= 500) {
       my $msg = "$info{'handle'} won " . door_money($profit) . " at Roulette!";
       _casino_post_news($msg);
-      door_broadcast("casino", $msg) if $profit >= 2000;
+      door_broadcast($DOOR_NAME, $msg) if $profit >= 2000;
     }
   } else {
     writeline($config{'errorcolor'} . " You lose." . $RST, 1);
@@ -550,11 +551,11 @@ sub _casino_slots {
     if ($winnings > 0) {
       door_add_credits($winnings);
       if ($winnings > $bet * 10) {
-        door_submit_score("casino", $winnings, { game => "Slots" });
-        door_log_activity("casino", $info{'handle'} . " hit " . door_money($winnings) . " on the slots!");
+        door_submit_score($DOOR_NAME, $winnings, { game => "Slots" });
+        door_log_activity($DOOR_NAME, $info{'handle'} . " hit " . door_money($winnings) . " on the slots!");
         my $msg = "$info{'handle'} hit " . door_money($winnings) . " on the Slot Machine!";
         _casino_post_news($msg);
-        door_broadcast("casino", $msg) if $winnings >= $bet * 50;
+        door_broadcast($DOOR_NAME, $msg) if $winnings >= $bet * 50;
       }
     }
     door_pause();
@@ -667,8 +668,8 @@ sub _casino_video_poker {
     door_add_credits($winnings);
     writeline($config{'usercolor'} . " $result! You win " . door_money($winnings) . "!" . $RST, 1);
     if ($POKER_PAYOUTS{$result} >= 25) {
-      door_submit_score("casino", $winnings, { game => "Video Poker", hand => $result });
-      door_log_activity("casino", $info{'handle'} . " hit a $result on Video Poker for " . door_money($winnings) . "!");
+      door_submit_score($DOOR_NAME, $winnings, { game => "Video Poker", hand => $result });
+      door_log_activity($DOOR_NAME, $info{'handle'} . " hit a $result on Video Poker for " . door_money($winnings) . "!");
     }
   } else {
     writeline($config{'errorcolor'} . " No winning hand. Better luck next time." . $RST, 1);
@@ -768,7 +769,7 @@ sub _poker_evaluate {
 # ============================================================================
 
 sub _casino_jackpot {
-  my $pool = door_load_shared("casino", "jackpot.dat") // { amount => 500, contributors => {}, last_winner => "" };
+  my $pool = door_load_shared($DOOR_NAME, "jackpot.dat") // { amount => 500, contributors => {}, last_winner => "" };
 
   door_header("Progressive Jackpot");
   writeline($config{'usercolor'} . " Current Jackpot: " . $config{'datacolor'} . door_money($pool->{amount}) . $RST, 1);
@@ -814,9 +815,9 @@ sub _casino_jackpot {
     $pool->{amount} = 500; # Reset pool
     $pool->{last_winner} = $info{'handle'};
     my $jackpot_msg = "$info{'handle'} hit the JACKPOT at the Casino for " . door_money($winnings) . "!";
-    door_broadcast("casino", $jackpot_msg);
+    door_broadcast($DOOR_NAME, $jackpot_msg);
     _casino_post_news($jackpot_msg);
-    door_submit_score("casino", $winnings, { type => "jackpot" });
+    door_submit_score($DOOR_NAME, $winnings, { type => "jackpot" });
   }
   elsif ($spin[0] eq $spin[1] && $spin[1] eq $spin[2]) {
     # Three of a kind (not jackpot)
@@ -834,7 +835,7 @@ sub _casino_jackpot {
     writeline($config{'linecolor'} . "  No match. Better luck next time." . $RST, 1);
   }
 
-  door_save_shared("casino", "jackpot.dat", $pool);
+  door_save_shared($DOOR_NAME, "jackpot.dat", $pool);
   door_pause();
 }
 

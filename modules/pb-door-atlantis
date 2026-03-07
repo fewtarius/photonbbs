@@ -116,6 +116,8 @@ sub atlantis_main {
   my $p = _atl_load_player();
   _atl_daily_reset($p);
 
+  iamat($info{'handle'}, "Playing Atlantis");
+
   door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-port");
 
   _atl_title_screen();
@@ -127,6 +129,7 @@ sub atlantis_main {
     my $ch = uc(getline('text', 1, "", 1));
 
     if    ($ch eq 'D') { _atl_dive($p); }
+    elsif ($ch eq 'B') { _atl_buddy_dive($p); }
     elsif ($ch eq 'M') { _atl_map($p); }
     elsif ($ch eq 'E') { _atl_equipment_shop($p); }
     elsif ($ch eq 'S') { _atl_sell_artifacts($p); }
@@ -145,6 +148,7 @@ sub atlantis_main {
   writeline($config{'themecolor'} . " You surface and return to port..." . $RST, 1);
   writeline("", 1);
   door_pause();
+  iamat($info{'handle'}, "Finished Atlantis");
 }
 
 # ============================================================================
@@ -302,7 +306,14 @@ sub _atl_main_menu {
       scalar(@active) . $RST, 1);
   }
 
+  # Show who's in port
+  my @online = door_get_online_players($DOOR_NAME);
+  my @others_online = grep { lc($_) ne lc($info{'handle'}) } @online;
+
   writeline("  " . $config{'promptcolor'} . "D" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Dive" . $RST, 1);
+  if (@others_online) {
+    writeline("  " . $config{'promptcolor'} . "B" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Buddy Dive (co-op)" . $RST, 1);
+  }
   writeline("  " . $config{'promptcolor'} . "M" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "View Depth Map" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "E" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Equipment Shop" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "S" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Sell Artifacts" . $RST, 1);
@@ -314,6 +325,11 @@ sub _atl_main_menu {
   writeline("  " . $config{'promptcolor'} . "T" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Talk (Port Chat)" . $RST, 1);
   writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... " . $config{'usercolor'} . "Quit" . $RST, 1);
   writeline("", 1);
+
+  if (@others_online) {
+    my $buddies = join(", ", map { $config{'usercolor'} . $_ . $RST } @others_online);
+    writeline($config{'datacolor'} . "  In port: " . $buddies, 1);
+  }
 
   # Show any port chat
   my @chat = door_chat_poll($DOOR_NAME);
@@ -348,8 +364,7 @@ sub _atl_dive {
   # Choose depth
   my $max_d = $DIVING_GEAR[$p->{gear}]{depth};
   writeline("", 1);
-  writeline($config{'systemcolor'} . " Choose depth (1-$max_d): " . $RST);
-  my $depth = int(getline('text', 1, "", 1) || 1);
+  my $depth = door_getnum("Choose depth (1-$max_d):", $max_d);
   $depth = 1 if $depth < 1;
   $depth = $max_d if $depth > $max_d;
   $p->{depth} = $depth;
@@ -706,6 +721,7 @@ sub _atl_atlantis_gate {
     writeline($config{'systemcolor'} . " Gold: " . $config{'datacolor'} . "+" . _afmt($GUARDIAN{gold}) . $RST, 1);
 
     door_submit_score($DOOR_NAME, $p->{max_depth}, { artifacts => $p->{artifacts_found} });
+    door_log_activity($DOOR_NAME, "$info{'handle'} discovered Atlantis at depth $p->{max_depth}!");
     my $atlantis_bc = "$info{'handle'} has discovered the lost city of Atlantis!";
     door_broadcast($DOOR_NAME, $atlantis_bc);
     _atl_post_news($atlantis_bc);
@@ -858,8 +874,7 @@ sub _atl_buy_list {
   }
 
   writeline("", 1);
-  writeline($config{'systemcolor'} . " Buy which? (0 to leave) " . $RST);
-  my $choice = int(getline('text', 2, "", 1));
+  my $choice = door_getnum("Buy which (0 to leave):", $idx - 1);
 
   if ($choice > 0 && $choice <= $#$items) {
     my $item = $items->[$choice];
@@ -1064,6 +1079,183 @@ my @EXCAVATION_NAMES = (
   "Ancient Amphora", "Sunken Trireme", "Poseidon's Trident", "Golden Idol",
   "Atlantean Codex", "Crystal Obelisk", "Leviathan Skull", "Temple Bell",
 );
+
+# Co-op buddy dive - invite another online diver to dive together
+sub _atl_buddy_dive {
+  my ($p) = @_;
+
+  if ($p->{turns} <= 0) {
+    writeline($config{'errorcolor'} . " No turns remaining." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  # Check for existing dive sessions we can join
+  my $sessions = door_session_list($DOOR_NAME);
+  my @joinable;
+  for my $s (@$sessions) {
+    next if lc($s->{host}) eq lc($info{'handle'});
+    next unless ($s->{game_state}{type} // '') eq 'buddy_dive';
+    push @joinable, $s;
+  }
+
+  if (@joinable) {
+    writeline("", 1);
+    writeline($config{'usercolor'} . " " . $joinable[0]{host} . " is looking for a dive buddy!" . $RST, 1);
+    if (door_yesno("Join their dive?")) {
+      my $session = door_session_join($DOOR_NAME, $joinable[0]{id});
+      if ($session) {
+        _atl_buddy_dive_run($p, $session, $joinable[0]{host});
+        return;
+      }
+      writeline($config{'errorcolor'} . " Couldn't join - they may have left." . $RST, 1);
+      door_pause();
+      return;
+    }
+  }
+
+  # Create a new buddy dive session
+  my @online = door_get_online_players($DOOR_NAME);
+  my @others = grep { lc($_) ne lc($info{'handle'}) } @online;
+
+  unless (@others) {
+    writeline($config{'systemcolor'} . " No other divers in port right now." . $RST, 1);
+    writeline($config{'systemcolor'} . " Use D for a solo dive instead." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Creating buddy dive session..." . $RST, 1);
+  writeline($config{'datacolor'} . " Another diver must join from the port menu." . $RST, 1);
+  writeline($config{'datacolor'} . " Press Q to cancel, A for solo dive." . $RST, 1);
+
+  my $session = door_session_create($DOOR_NAME, {
+    max_players => 2,
+    game_state  => { type => 'buddy_dive', depth => 0 },
+  });
+
+  unless ($session) {
+    writeline($config{'errorcolor'} . " Couldn't create session." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  door_broadcast($DOOR_NAME, "$info{'handle'} is looking for a dive buddy! Join from the Atlantis menu.");
+
+  my $result = door_session_wait($DOOR_NAME, $session->{id}, {
+    timeout => 45, max_cycles => 2,
+  });
+
+  unless ($result && scalar @{$result->{players}} >= 2) {
+    writeline($config{'systemcolor'} . " No one joined. Try a solo dive." . $RST, 1);
+    door_session_destroy($DOOR_NAME, $session->{id});
+    door_pause();
+    return;
+  }
+
+  my $buddy = $result->{players}[1]{name};
+  _atl_buddy_dive_run($p, $result, $buddy);
+}
+
+# Execute a buddy dive - enhanced solo dive with bonuses
+sub _atl_buddy_dive_run {
+  my ($p, $session, $buddy_name) = @_;
+
+  iamat($info{'handle'}, "Buddy Dive with $buddy_name");
+
+  writeline($config{'usercolor'} . " Buddy dive with $buddy_name!" . $RST, 1);
+  writeline($config{'systemcolor'} . " Co-op bonuses: +25% artifacts, shared discoveries" . $RST, 1);
+  writeline("", 1);
+
+  # Choose depth (same as solo dive)
+  my $max_d = $DIVING_GEAR[$p->{gear}]{depth};
+  my $depth = door_getnum("Choose depth (1-$max_d):", $max_d);
+  $depth = 1 if $depth < 1;
+  $depth = $max_d if $depth > $max_d;
+  $p->{depth} = $depth;
+
+  # Co-op bonus: shared oxygen (lasts longer)
+  $p->{oxygen} = int($DIVING_GEAR[$p->{gear}]{oxygen} * 1.15);
+
+  $p->{dives}++;
+  $p->{max_depth} = $depth if $depth > $p->{max_depth};
+
+  my $surfaced = 0;
+  my $buddy_finds = 0;
+  while (!$surfaced && $p->{turns} > 0 && $p->{hp} > 0 && $p->{oxygen} > 0) {
+    _atl_dive_screen($p);
+    writeline($config{'datacolor'} . " Buddy: " . $config{'usercolor'} . $buddy_name . $RST, 1);
+    writeline("  " . $config{'promptcolor'} . "N" . $config{'themecolor'} . "orth  " .
+              $config{'promptcolor'} . "S" . $config{'themecolor'} . "outh  " .
+              $config{'promptcolor'} . "E" . $config{'themecolor'} . "ast  " .
+              $config{'promptcolor'} . "W" . $config{'themecolor'} . "est  " .
+              $config{'promptcolor'} . "X" . $config{'themecolor'} . "plore  " .
+              $config{'promptcolor'} . "U" . $config{'themecolor'} . "p (Surface)" . $RST, 1);
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " > " . $RST);
+    my $ch = uc(getline('text', 1, "", 1));
+
+    if    ($ch eq 'N') { _atl_move($p, 0, -1); }
+    elsif ($ch eq 'S') { _atl_move($p, 0, 1); }
+    elsif ($ch eq 'E') { _atl_move($p, 1, 0); }
+    elsif ($ch eq 'W') { _atl_move($p, -1, 0); }
+    elsif ($ch eq 'X') {
+      _atl_explore_tile($p);
+      # Buddy bonus: extra artifact chance
+      if (rand(100) < 20) {
+        $buddy_finds++;
+        my $bonus_gold = 50 + int(rand(200));
+        $p->{gold} += $bonus_gold;
+        writeline($config{'usercolor'} . " $buddy_name found something! +" . _afmt($bonus_gold) . " gold" . $RST, 1);
+      }
+    }
+    elsif ($ch eq 'U') { $surfaced = 1; }
+
+    # Consume oxygen (slightly less with buddy - shared effort)
+    my $o2_cost = 2 + ($depth - 1) * 2;
+    $p->{oxygen} -= $o2_cost;
+
+    # Encounter chance (lower with buddy - safety in numbers)
+    if (!$surfaced && rand(100) < 20) {
+      _atl_encounter($p);
+    }
+
+    if ($p->{oxygen} <= 0) {
+      writeline($config{'errorcolor'} . " WARNING: Oxygen depleted! $buddy_name signals to surface!" . $RST, 1);
+      my $dmg = int($p->{max_hp} * 0.15);  # Less damage with buddy assistance
+      $p->{hp} -= $dmg;
+      writeline($config{'errorcolor'} . " Bends damage: $dmg ($buddy_name helped you up)" . $RST, 1);
+      $surfaced = 1;
+    }
+  }
+
+  if ($p->{hp} <= 0) {
+    $p->{hp} = 0;
+    writeline($config{'errorcolor'} . " You lost consciousness! $buddy_name dragged you to safety." . $RST, 1);
+    my $lost = int($p->{gold} * 0.08);  # Lose less with buddy rescue
+    $p->{gold} -= $lost;
+    $p->{gold} = 0 if $p->{gold} < 0;
+    $p->{hp} = int($p->{max_hp} * 0.4);
+  }
+
+  if ($surfaced) {
+    writeline("", 1);
+    writeline($config{'usercolor'} . " You and $buddy_name surface together." . $RST, 1);
+    if ($buddy_finds > 0) {
+      writeline($config{'datacolor'} . " $buddy_name made $buddy_finds extra find(s) during the dive!" . $RST, 1);
+    }
+  }
+
+  # Co-op experience bonus
+  $p->{exp} = ($p->{exp} // 0) + 5;
+
+  door_send_message($DOOR_NAME, $buddy_name,
+    "Great buddy dive with $info{'handle'}! " . ($buddy_finds > 0 ? "You found $buddy_finds bonus treasure(s)." : ""));
+  door_session_destroy($DOOR_NAME, $session->{id});
+  door_save($DOOR_NAME, $p);
+  door_pause();
+}
 
 sub _atl_cooperative_sites {
   my ($p) = @_;

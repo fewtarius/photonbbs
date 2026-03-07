@@ -1,0 +1,279 @@
+#!/usr/bin/perl
+#
+# mw-movement - MechWars Movement System
+# 8-direction movement, energy consumption, hyperspace fold, warp beacons
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# Direction mappings: numpad layout
+my %_MW_DIRS = (
+    '7' => { dx => -1, dy =>  1, name => 'NW' },
+    '8' => { dx =>  0, dy =>  1, name => 'N'  },
+    '9' => { dx =>  1, dy =>  1, name => 'NE' },
+    '4' => { dx => -1, dy =>  0, name => 'W'  },
+    '6' => { dx =>  1, dy =>  0, name => 'E'  },
+    '1' => { dx => -1, dy => -1, name => 'SW' },
+    '2' => { dx =>  0, dy => -1, name => 'S'  },
+    '3' => { dx =>  1, dy => -1, name => 'SE' },
+    # QWERTY layout
+    'Q' => { dx => -1, dy =>  1, name => 'NW' },
+    'W' => { dx =>  0, dy =>  1, name => 'N'  },
+    'E' => { dx =>  1, dy =>  1, name => 'NE' },
+    'A' => { dx => -1, dy =>  0, name => 'W'  },
+    'D' => { dx =>  1, dy =>  0, name => 'E'  },
+    'Z' => { dx => -1, dy => -1, name => 'SW' },
+    'X' => { dx =>  0, dy => -1, name => 'S'  },
+    'C' => { dx =>  1, dy => -1, name => 'SE' },
+);
+
+use constant {
+    MW_FOLD_COST        => 60,    # Energy to fold
+    MW_FOLD_ACCURACY    => 90,    # % accuracy
+    MW_BEACON_COST      => 1000,  # StarVacs to place beacon
+};
+
+# ============================================================================
+# STANDARD MOVEMENT
+# ============================================================================
+
+sub mw_move_player {
+    my ($player, $dir) = @_;
+
+    my $dinfo = $_MW_DIRS{uc($dir)};
+    unless ($dinfo) {
+        writeline($config{'errorcolor'} . " Invalid direction." . $RST, 1);
+        return 0;
+    }
+
+    my $mech = mw_get_mech($player->{mech_type}) // {};
+    my $cost = $mech->{move_cost} // 10;
+
+    # Mirage gets 50% move cost reduction
+    $cost = int($cost * 0.5) if ($player->{mech_type} // '') eq 'MIRAGE';
+
+    if ($player->{energy} < $cost) {
+        writeline($config{'errorcolor'} .
+                  " Insufficient energy! Need $cost, have $player->{energy}." . $RST, 1);
+        writeline($config{'systemcolor'} . " Dock at a trading base to refuel." . $RST, 1);
+        door_pause();
+        return 0;
+    }
+
+    my $nx = $player->{x} + $dinfo->{dx};
+    my $ny = $player->{y} + $dinfo->{dy};
+
+    unless (mw_valid_coords($nx, $ny)) {
+        writeline($config{'errorcolor'} . " Cannot move beyond universe edge." . $RST, 1);
+        return 0;
+    }
+
+    # Leave old sector
+    mw_sector_leave($player);
+
+    # Move
+    $player->{x}      = $nx;
+    $player->{y}      = $ny;
+    $player->{energy} -= $cost;
+    $player->{turns}  = ($player->{turns} // 1) - 1;
+
+    # Enter new sector
+    mw_sector_enter($player);
+
+    # Check for hazards
+    _mw_check_mines($player);
+
+    return 1;
+}
+
+# ============================================================================
+# HYPERSPACE FOLD
+# ============================================================================
+
+sub mw_fold_menu {
+    my ($player) = @_;
+
+    if (($player->{turns} // 0) < 2) {
+        writeline($config{'errorcolor'} . " Need at least 2 turns to fold." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    door_header("Hyperspace Fold System");
+    writeline("  " . $config{'themecolor'} . "Energy cost:  " .
+              $config{'datacolor'} . MW_FOLD_COST . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Accuracy:     " .
+              $config{'datacolor'} . MW_FOLD_ACCURACY . "%" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Your energy:  " .
+              $config{'datacolor'} . $player->{energy} . $RST, 1);
+    writeline("", 1);
+
+    # Show warp beacons
+    if (%{$player->{beacons} // {}}) {
+        writeline("  " . $config{'datacolor'} . "Saved Beacons:" . $RST, 1);
+        my $bnum = 1;
+        for my $bname (sort keys %{$player->{beacons}}) {
+            my $b = $player->{beacons}{$bname};
+            writeline("    " . $config{'promptcolor'} . $bnum .
+                      $config{'themecolor'} . " ... " .
+                      $config{'usercolor'} . $bname .
+                      $config{'datacolor'} . " [$b->{x},$b->{y}]" . $RST, 1);
+            $bnum++;
+        }
+        writeline("", 1);
+    }
+
+    writeline("  " . $config{'promptcolor'} . "F" . $config{'themecolor'} . " ... Fold to coordinates", 1);
+    if (%{$player->{beacons} // {}}) {
+        writeline("  " . $config{'promptcolor'} . "B" . $config{'themecolor'} . " ... Fold to beacon", 1);
+    }
+    # Recon class can place beacons
+    if (($player->{mech_type} // '') eq 'RECON') {
+        writeline("  " . $config{'promptcolor'} . "P" .
+                  $config{'themecolor'} . " ... Place beacon here (" .
+                  $config{'datacolor'} . MW_BEACON_COST . " SV" .
+                  $config{'themecolor'} . ")", 1);
+    }
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... Cancel", 1);
+    writeline("", 1);
+    writeline($config{'promptcolor'} . " Command: " . $RST);
+    my $cmd = uc(waitkey(""));
+    writeline("", 1);
+
+    if ($cmd eq 'F') {
+        _mw_fold_to_coords($player);
+    } elsif ($cmd eq 'B' && %{$player->{beacons} // {}}) {
+        _mw_fold_to_beacon($player);
+    } elsif ($cmd eq 'P' && ($player->{mech_type} // '') eq 'RECON') {
+        _mw_place_beacon($player);
+    }
+}
+
+sub _mw_fold_to_coords {
+    my ($player) = @_;
+
+    if ($player->{energy} < MW_FOLD_COST) {
+        writeline($config{'errorcolor'} . " Need " . MW_FOLD_COST . " energy to fold." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    writeline($config{'systemcolor'} . " Destination X [1-" . MW_UNIVERSE_SIZE . "]: " . $RST);
+    my $dx = int(getline('text', 4, '', 1) // 0);
+    writeline($config{'systemcolor'} . " Destination Y [1-" . MW_UNIVERSE_SIZE . "]: " . $RST);
+    my $dy = int(getline('text', 4, '', 1) // 0);
+
+    unless (mw_valid_coords($dx, $dy)) {
+        writeline($config{'errorcolor'} . " Invalid coordinates." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    _mw_execute_fold($player, $dx, $dy);
+}
+
+sub _mw_fold_to_beacon {
+    my ($player) = @_;
+
+    my @bnames = sort keys %{$player->{beacons}};
+    writeline($config{'systemcolor'} . " Beacon number: " . $RST);
+    my $choice = waitkey("");
+    writeline("", 1);
+
+    return unless $choice =~ /^\d+$/ && $choice >= 1 && $choice <= scalar(@bnames);
+    my $beacon = $player->{beacons}{$bnames[$choice - 1]};
+
+    if ($player->{energy} < MW_FOLD_COST) {
+        writeline($config{'errorcolor'} . " Need " . MW_FOLD_COST . " energy to fold." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    _mw_execute_fold($player, $beacon->{x}, $beacon->{y});
+}
+
+sub _mw_place_beacon {
+    my ($player) = @_;
+
+    if ($player->{starvacs} < MW_BEACON_COST) {
+        writeline($config{'errorcolor'} . " Need " . MW_BEACON_COST . " SV to place beacon." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    writeline($config{'systemcolor'} . " Beacon name: " . $RST);
+    my $bname = getline('text', 20, '', 1);
+    return unless $bname && $bname =~ /\S/;
+    $bname =~ s/[^a-zA-Z0-9 _-]//g;
+
+    $player->{beacons}{$bname} = { x => $player->{x}, y => $player->{y} };
+    $player->{starvacs} -= MW_BEACON_COST;
+
+    writeline($config{'systemcolor'} . " Beacon '$bname' placed at [" .
+              $player->{x} . "," . $player->{y} . "]." . $RST, 1);
+    door_pause();
+}
+
+sub _mw_execute_fold {
+    my ($player, $dest_x, $dest_y) = @_;
+
+    mw_sector_leave($player);
+    $player->{energy} -= MW_FOLD_COST;
+    $player->{turns}   = ($player->{turns} // 1) - 2;
+
+    # Accuracy check
+    if (rand(100) < MW_FOLD_ACCURACY) {
+        $player->{x} = $dest_x;
+        $player->{y} = $dest_y;
+        writeline($config{'systemcolor'} . " Fold successful! Arrived at [$dest_x, $dest_y]." . $RST, 1);
+    } else {
+        my ($rx, $ry) = mw_random_sector();
+        $player->{x} = $rx;
+        $player->{y} = $ry;
+        writeline($config{'errorcolor'} . " FOLD MALFUNCTION! Emergency drop at [$rx, $ry]." . $RST, 1);
+    }
+
+    mw_sector_enter($player);
+    _mw_check_mines($player);
+    door_pause();
+}
+
+# ============================================================================
+# MINE TRIGGER CHECK
+# ============================================================================
+
+sub _mw_check_mines {
+    my ($player) = @_;
+    my $sector = mw_get_sector($player->{x}, $player->{y});
+    return unless $sector && ($sector->{mines} // 0) > 0;
+
+    # Own mines don't trigger
+    return if ($sector->{mine_owner} // '') eq $player->{handle};
+
+    my $count  = $sector->{mines};
+    my $damage = $count * MW_MINE_DAMAGE;
+
+    # Havoc takes 50% mine damage
+    $damage = int($damage * 0.5) if ($player->{mech_type} // '') eq 'HAVOC';
+
+    writeline($config{'errorcolor'} . " *** MINE FIELD! $count mine(s) detonate! ***" . $RST, 1);
+    writeline($config{'datacolor'} . " Damage: $damage" . $RST, 1);
+
+    $player->{shields} -= $damage;
+    $player->{shields}  = 0 if $player->{shields} < 0;
+
+    # Mines detonate (remove some)
+    my $detonated = $count > 3 ? 3 : $count;
+    $sector->{mines} -= $detonated;
+    $sector->{mines}  = 0 if $sector->{mines} < 0;
+
+    if ($player->{shields} <= 0) {
+        mw_player_death($player, "mine field");
+    } else {
+        writeline($config{'systemcolor'} . " Shields: " . $player->{shields} . "/" .
+                  $player->{max_shields} . $RST, 1);
+        door_pause();
+    }
+}
+
+1;

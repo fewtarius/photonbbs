@@ -1,0 +1,472 @@
+#!/usr/bin/perl
+#
+# mw-combat - MechWars Combat System
+# Drone combat, PvP combat, mine deployment, damage calculations
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# Combat constants
+use constant {
+    MW_BASE_HIT_CHANCE  => 65,     # Base % to hit
+    MW_DODGE_CHANCE     => 15,     # Base % to dodge
+    MW_CRIT_CHANCE      => 10,     # % crit chance
+    MW_CRIT_MULT        => 1.5,    # Crit damage multiplier
+    MW_ENERGY_PER_SHOT  => 5,      # Energy cost per shot
+    MW_MINE_DAMAGE      => 15,     # Damage per mine
+    MW_MINE_COST        => 500,    # StarVacs per mine
+    MW_MAX_MINES_SECTOR => 10,     # Max mines per sector
+};
+
+# ============================================================================
+# ATTACK MENU (dispatch: drone or player)
+# ============================================================================
+
+sub mw_attack_menu {
+    my ($player) = @_;
+
+    my $sector = mw_get_sector($player->{x}, $player->{y});
+    unless ($sector) {
+        writeline($config{'errorcolor'} . " Sector data unavailable." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my @drones  = @{$sector->{drones}  // []};
+    my @players = grep { $_ ne $player->{handle} } @{$sector->{players} // []};
+
+    unless (@drones || @players) {
+        writeline($config{'systemcolor'} . " No targets in this sector." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    door_clear();
+    writeline($config{'errorcolor'} . " Combat Targeting" . $RST, 1);
+    door_hrule(50);
+    writeline("", 1);
+
+    my @targets;
+    my $max_targets = 9;  # waitkey reads single digit
+
+    if (@drones) {
+        writeline($config{'datacolor'} . " AI Drones:" . $RST, 1);
+        my $num = 1;
+        for my $did (@drones) {
+            last if $num > $max_targets;
+            my $drone = mw_get_drone($did);
+            next unless $drone;
+            my $dtype = mw_get_drone_type($drone->{type});
+            writeline("  " . $config{'promptcolor'} . $num .
+                      $config{'themecolor'} . " ... " .
+                      $config{'errorcolor'} . $dtype->{name} .
+                      $config{'datacolor'} . " (SH: $drone->{shields}/$drone->{max_shields})" . $RST, 1);
+            push @targets, { type => 'drone', id => $did };
+            $num++;
+        }
+        if (scalar(@drones) > scalar(@targets)) {
+            writeline($config{'linecolor'} . "  (+" .
+                      (scalar(@drones) - scalar(@targets)) . " more)" . $RST, 1);
+        }
+        writeline("", 1);
+    }
+
+    if (@players && scalar(@targets) < $max_targets) {
+        writeline($config{'datacolor'} . " Other Pilots:" . $RST, 1);
+        my $num = scalar(@targets) + 1;
+        for my $ph (@players) {
+            last if $num > $max_targets;
+            my $tp = door_load_player('mechwars', $ph);
+            my $info_str = $tp
+                ? "(" . $tp->{mech_type} . " L" . ($tp->{level} // 1) . ")"
+                : "(offline)";
+            writeline("  " . $config{'promptcolor'} . $num .
+                      $config{'themecolor'} . " ... " .
+                      $config{'usercolor'} . $ph .
+                      $config{'datacolor'} . " $info_str" . $RST, 1);
+            push @targets, { type => 'player', handle => $ph };
+            $num++;
+        }
+        writeline("", 1);
+    }
+
+    writeline("  " . $config{'promptcolor'} . "Q" .
+              $config{'themecolor'} . " ... " . $config{'usercolor'} . "Cancel", 1);
+    writeline("", 1);
+    writeline($config{'promptcolor'} . " Target [1-" . scalar(@targets) . ", Q]: " . $RST);
+    my $choice = waitkey("");
+    writeline("", 1);
+
+    return if uc($choice) eq 'Q';
+
+    if ($choice =~ /^\d+$/ && $choice >= 1 && $choice <= scalar(@targets)) {
+        my $tgt = $targets[$choice - 1];
+        if ($tgt->{type} eq 'drone') {
+            mw_attack_drone($player, $tgt->{id});
+        } else {
+            mw_attack_player($player, $tgt->{handle});
+        }
+    }
+}
+
+# ============================================================================
+# DRONE COMBAT
+# ============================================================================
+
+sub mw_attack_drone {
+    my ($player, $drone_id) = @_;
+
+    my $drone = mw_get_drone($drone_id);
+    unless ($drone) {
+        writeline($config{'errorcolor'} . " Target has fled the sector." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my $dtype = mw_get_drone_type($drone->{type});
+    unless ($dtype) {
+        writeline($config{'errorcolor'} . " Unknown drone type." . $RST, 1);
+        door_pause();
+        return;
+    }
+    my $mech  = mw_get_mech($player->{mech_type}) // {};
+
+    door_clear();
+    writeline($config{'errorcolor'} . " COMBAT INITIATED" . $RST, 1);
+    door_hrule(50);
+    writeline($config{'datacolor'} . " Target: " .
+              $config{'errorcolor'} . $dtype->{name} . $RST, 1);
+    writeline("", 1);
+
+    while ($drone->{shields} > 0 && $player->{shields} > 0) {
+        # Status display
+        writeline($config{'themecolor'} .
+                  sprintf("  You:  SH %d/%d  EN %d/%d",
+                          $player->{shields}, $player->{max_shields},
+                          $player->{energy},  $player->{max_energy}) . $RST, 1);
+        writeline($config{'errorcolor'} .
+                  sprintf("  %s:  SH %d/%d",
+                          $dtype->{name}, $drone->{shields}, $drone->{max_shields}) . $RST, 1);
+        writeline("", 1);
+        writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} . " ... Attack   " .
+                  $config{'promptcolor'} . "R" . $config{'themecolor'} . " ... Retreat", 1);
+        writeline($config{'systemcolor'} . "  Command: " . $RST);
+        my $cmd = uc(waitkey(""));
+        writeline("", 1);
+
+        if ($cmd eq 'R') {
+            my $cost = 15;
+            if ($player->{energy} < $cost) {
+                writeline($config{'errorcolor'} . " Not enough energy to retreat!" . $RST, 1);
+            } else {
+                $player->{energy} -= $cost;
+                writeline($config{'systemcolor'} . " Retreating from combat." . $RST, 1);
+                door_pause();
+                return;
+            }
+        } elsif ($cmd eq 'A') {
+            if ($player->{energy} < MW_ENERGY_PER_SHOT) {
+                writeline($config{'errorcolor'} . " Insufficient energy!" . $RST, 1);
+                door_pause();
+                next;
+            }
+
+            $player->{energy} -= MW_ENERGY_PER_SHOT;
+            $player->{turns} = ($player->{turns} // 1) - 1;
+
+            # Player hits drone
+            my $hit_pct = MW_BASE_HIT_CHANCE + (($player->{gun_level} // 1) * 3);
+            if (rand(100) < $hit_pct) {
+                my $dmg = _mw_calc_player_damage($player, $mech);
+                my $crit = 0;
+                if (rand(100) < MW_CRIT_CHANCE) {
+                    $dmg = int($dmg * MW_CRIT_MULT);
+                    $crit = 1;
+                }
+                $drone->{shields} -= $dmg;
+                $drone->{shields} = 0 if $drone->{shields} < 0;
+
+                if ($crit) {
+                    writeline($config{'usercolor'} . "  CRITICAL HIT! $dmg damage!" . $RST, 1);
+                } else {
+                    writeline($config{'datacolor'} . "  Hit! $dmg damage." . $RST, 1);
+                }
+            } else {
+                writeline($config{'linecolor'} . "  Shot missed." . $RST, 1);
+            }
+
+            # Drone retaliates
+            if ($drone->{shields} > 0) {
+                my $ddmg = int($dtype->{damage} * (0.8 + rand(0.4)));
+                if (rand(100) > MW_DODGE_CHANCE) {
+                    $player->{shields} -= $ddmg;
+                    $player->{shields} = 0 if $player->{shields} < 0;
+                    writeline($config{'errorcolor'} . "  " . $dtype->{name} .
+                              " hits you for $ddmg!" . $RST, 1);
+                } else {
+                    writeline($config{'systemcolor'} . "  Dodged the " .
+                              $dtype->{name} . "'s attack." . $RST, 1);
+                }
+            }
+        }
+
+        writeline("", 1);
+        last if $drone->{shields} <= 0 || $player->{shields} <= 0;
+    }
+
+    # Resolution
+    if ($drone->{shields} <= 0) {
+        _mw_drone_kill($player, $drone, $dtype);
+    }
+
+    if ($player->{shields} <= 0) {
+        mw_remove_drone($drone_id);
+        mw_player_death($player, $dtype->{name});
+    }
+}
+
+sub _mw_drone_kill {
+    my ($player, $drone, $dtype) = @_;
+
+    writeline("", 1);
+    writeline($config{'usercolor'} . "  " . $dtype->{name} . " DESTROYED!" . $RST, 1);
+
+    # Bounty
+    my $bounty = $dtype->{bounty} // 500;
+    # Striker class bonus
+    if (($player->{mech_type} // '') eq 'STRIKER') {
+        $bounty = int($bounty * 1.25);
+    }
+    $player->{starvacs} += $bounty;
+    writeline($config{'datacolor'} . "  Bounty: $bounty StarVacs" . $RST, 1);
+
+    # XP
+    my $xp = $dtype->{xp} // 50;
+    $player->{xp} = ($player->{xp} // 0) + $xp;
+    writeline($config{'datacolor'} . "  XP: +$xp" . $RST, 1);
+
+    $player->{kills} = ($player->{kills} // 0) + 1;
+
+    mw_check_level_up($player);
+
+    # Remove drone
+    mw_remove_drone($drone->{id});
+
+    door_pause();
+}
+
+# ============================================================================
+# PVP COMBAT
+# ============================================================================
+
+sub mw_attack_player {
+    my ($player, $target_handle) = @_;
+
+    my $target = door_load_player('mechwars', $target_handle);
+    unless ($target) {
+        writeline($config{'errorcolor'} . " Target data unavailable." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    # Verify same sector
+    unless ($target->{x} == $player->{x} && $target->{y} == $player->{y}) {
+        writeline($config{'errorcolor'} . " Target has left the sector." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    # Guild protection check
+    if ($player->{guild} && $target->{guild} && $player->{guild} eq $target->{guild}) {
+        writeline($config{'errorcolor'} . " Cannot attack guild members!" . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    door_clear();
+    writeline($config{'errorcolor'} . " PVP COMBAT" . $RST, 1);
+    door_hrule(50);
+    writeline($config{'datacolor'} . " Target: " .
+              $config{'usercolor'} . $target->{handle} .
+              $config{'datacolor'} . " (" . $target->{mech_type} .
+              " L" . ($target->{level} // 1) . ")" . $RST, 1);
+    writeline($config{'datacolor'} .
+              " Shields: " . $target->{shields} . "/" . $target->{max_shields} . $RST, 1);
+    writeline("", 1);
+
+    # Notify target via broker
+    door_chat_send($DOOR_NAME,
+        "!!! " . $player->{handle} . " is attacking " . $target->{handle} .
+        " in sector [" . $player->{x} . "," . $player->{y} . "]!");
+
+    # 5-round PvP
+    my $rounds   = 5;
+    my $dmg_dealt = 0;
+    my $dmg_taken = 0;
+
+    my $pmech = mw_get_mech($player->{mech_type}) // {};
+    my $tmech = mw_get_mech($target->{mech_type}) // {};
+
+    for my $round (1 .. $rounds) {
+        last if $player->{shields} <= 0 || $target->{shields} <= 0;
+
+        writeline($config{'themecolor'} . " --- Round $round/$rounds ---" . $RST, 1);
+        writeline($config{'systemcolor'} .
+                  sprintf("  You: %d/%d SH  %d EN",
+                          $player->{shields}, $player->{max_shields},
+                          $player->{energy}) . $RST, 1);
+        writeline($config{'datacolor'} .
+                  sprintf("  %s: %d/%d SH",
+                          $target->{handle},
+                          $target->{shields}, $target->{max_shields}) . $RST, 1);
+        writeline("", 1);
+
+        # Player attacks
+        if ($player->{energy} >= MW_ENERGY_PER_SHOT) {
+            $player->{energy} -= MW_ENERGY_PER_SHOT;
+            my $dmg = _mw_calc_player_damage($player, $pmech);
+            if (rand(100) < (MW_BASE_HIT_CHANCE + ($player->{gun_level} // 1) * 3)) {
+                $target->{shields} -= $dmg;
+                $target->{shields} = 0 if $target->{shields} < 0;
+                $dmg_dealt += $dmg;
+                writeline($config{'datacolor'} . "  You hit " . $target->{handle} .
+                          " for $dmg." . $RST, 1);
+            } else {
+                writeline($config{'linecolor'} . "  Your shot misses." . $RST, 1);
+            }
+        }
+
+        # Target retaliates (simulated)
+        if ($target->{shields} > 0) {
+            my $tdmg = _mw_calc_player_damage($target, $tmech);
+            $tdmg = int($tdmg * 0.8);    # Offline player penalty
+            if (rand(100) < MW_BASE_HIT_CHANCE) {
+                $player->{shields} -= $tdmg;
+                $player->{shields} = 0 if $player->{shields} < 0;
+                $dmg_taken += $tdmg;
+                writeline($config{'errorcolor'} . "  " . $target->{handle} .
+                          " hits you for $tdmg." . $RST, 1);
+            } else {
+                writeline($config{'systemcolor'} . "  " . $target->{handle} .
+                          "'s shot misses." . $RST, 1);
+            }
+        }
+
+        writeline("", 1);
+        $player->{turns} = ($player->{turns} // 1) - 1;
+    }
+
+    # Resolution
+    if ($target->{shields} <= 0) {
+        # Attacker wins
+        writeline($config{'usercolor'} . " VICTORY! " . $target->{handle} .
+                  " has been defeated!" . $RST, 1);
+
+        my $loot = int($target->{starvacs} * 0.15);
+        $player->{starvacs} += $loot;
+        $player->{kills} = ($player->{kills} // 0) + 1;
+        $player->{xp}    = ($player->{xp} // 0) + 300;
+
+        writeline($config{'datacolor'} . " Looted: $loot StarVacs" . $RST, 1);
+
+        # Deal death to target
+        $target->{shields} = 0;
+        mw_player_death($target, $player->{handle});
+        door_save('mechwars', $target, $target->{handle});
+
+        mw_check_level_up($player);
+
+        door_broadcast('mechwars',
+            $player->{handle} . " destroyed " . $target->{handle} . " in combat!");
+        door_log_activity('mechwars',
+            $player->{handle} . " defeated " . $target->{handle} . " in PvP");
+
+    } elsif ($player->{shields} <= 0) {
+        # Attacker loses
+        writeline($config{'errorcolor'} . " DEFEATED by " . $target->{handle} . "!" . $RST, 1);
+        mw_player_death($player, $target->{handle});
+    } else {
+        # Draw
+        writeline($config{'systemcolor'} . " Combat inconclusive after $rounds rounds." . $RST, 1);
+        writeline($config{'datacolor'} .
+                  " Dealt: $dmg_dealt  Taken: $dmg_taken" . $RST, 1);
+    }
+
+    door_pause();
+}
+
+# ============================================================================
+# MINE DEPLOYMENT
+# ============================================================================
+
+sub mw_deploy_mines {
+    my ($player) = @_;
+
+    my $mines_have = $player->{mines} // 0;
+
+    door_header("Mine Operations");
+
+    my $sector = mw_get_sector($player->{x}, $player->{y});
+    my $mines_here = $sector ? ($sector->{mines} // 0) : 0;
+
+    writeline("  " . $config{'themecolor'} . "Mines in inventory: " .
+              $config{'datacolor'} . $mines_have . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Mines in sector:    " .
+              $config{'datacolor'} . $mines_here . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Mine cost (buy):    " .
+              $config{'datacolor'} . MW_MINE_COST . " SV each (at bases)" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Mine damage:        " .
+              $config{'datacolor'} . MW_MINE_DAMAGE . " per mine" . $RST, 1);
+    writeline("", 1);
+
+    if ($mines_have <= 0) {
+        writeline($config{'errorcolor'} . " No mines in inventory. Buy at trading bases." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    # Havoc class deploys 3 at once
+    my $deploy_count = ($player->{mech_type} // '') eq 'HAVOC' ? 3 : 1;
+    $deploy_count = $mines_have if $deploy_count > $mines_have;
+    $deploy_count = (MW_MAX_MINES_SECTOR - $mines_here) if $deploy_count > (MW_MAX_MINES_SECTOR - $mines_here);
+
+    if ($deploy_count <= 0) {
+        writeline($config{'errorcolor'} . " Sector is at maximum mine capacity." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    writeline("  " . $config{'promptcolor'} . "D" . $config{'themecolor'} . " ... Deploy mine(s) here", 1);
+    writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... Cancel", 1);
+    writeline("", 1);
+    writeline($config{'promptcolor'} . " Command: " . $RST);
+    my $cmd = uc(waitkey(""));
+    writeline("", 1);
+
+    if ($cmd eq 'D' && $sector) {
+        $sector->{mines}       += $deploy_count;
+        $sector->{mine_owner}   = $player->{handle};
+        $player->{mines}       -= $deploy_count;
+        $player->{turns}        = ($player->{turns} // 1) - 1;
+
+        writeline($config{'systemcolor'} . " Deployed $deploy_count mine(s) in sector [" .
+                  $player->{x} . "," . $player->{y} . "]." . $RST, 1);
+        mw_universe_save();
+    }
+
+    door_pause();
+}
+
+# ============================================================================
+# DAMAGE CALCULATION
+# ============================================================================
+
+sub _mw_calc_player_damage {
+    my ($player, $mech) = @_;
+    my $base = ($mech->{shot_damage} // 20) + (($player->{gun_level} // 1) - 1) * 10;
+    # Random variance +/- 20%
+    my $dmg = int($base * (0.8 + rand(0.4)));
+    return $dmg < 1 ? 1 : $dmg;
+}
+
+1;

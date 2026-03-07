@@ -407,9 +407,11 @@ sub _st_command_menu {
     _st_galactic_news($u, $p);
   }
   elsif ($cmd eq 'X') {
-    _st_trade_exchange($u, $p);
+    # Player trade exchange - not yet implemented
+    writeline($config{'systemcolor'} . " Trade exchange coming soon." . $RST, 1);
+    door_pause();
   }
-  elsif ($cmd eq 'C') {
+  elsif ($cmd eq 'H') {
     # In-game sector chat
     door_chat_input($DOOR_NAME);
   }
@@ -833,7 +835,33 @@ sub _st_fighter_combat {
 
 sub _st_attack {
   my ($u, $p) = @_;
-  # Simple NPC pirate encounter
+
+  # Check if any ONLINE players are in this sector
+  my @online = door_get_online_players($DOOR_NAME);
+  my @here;
+  for my $name (@online) {
+    next if lc($name) eq lc($info{'handle'});
+    my $pd = door_load_player($DOOR_NAME, $name);
+    next unless $pd && ($pd->{sector} // -1) == $p->{sector};
+    push @here, { name => $name, data => $pd };
+  }
+
+  if (@here) {
+    writeline($config{'errorcolor'} . " Hostile ships in sector!" . $RST, 1);
+    for my $t (@here) {
+      my $ship = $SHIP_CLASSES[$t->{data}{ship_class} // 0]{name};
+      writeline("  " . $config{'usercolor'} . $t->{name} . $config{'systemcolor'} .
+        " (" . $ship . ", " . ($t->{data}{fighters} // 0) . " fighters)" . $RST, 1);
+    }
+    writeline("", 1);
+
+    if (@here == 1 && door_yesno("Challenge " . $here[0]{name} . " to live combat?")) {
+      _st_live_pvp($u, $p, $here[0]{name}, $here[0]{data});
+      return;
+    }
+  }
+
+  # Standard NPC pirate encounter
   if (rand(100) < 30) {
     writeline($config{'systemcolor'} . " No targets in this sector." . $RST, 1);
     door_pause();
@@ -879,6 +907,7 @@ sub _st_attack {
       _st_post_news("$info{'handle'} destroyed their first pirate!");
     }
     door_submit_score($DOOR_NAME, $p->{experience}, { kills => $p->{kills} });
+    door_log_activity($DOOR_NAME, "$info{'handle'} destroyed a pirate (kills: $p->{kills})");
   } else {
     writeline($config{'errorcolor'} . " You've been overwhelmed!" . $RST, 1);
     $p->{deaths}++;
@@ -888,6 +917,139 @@ sub _st_attack {
     $p->{fighters} = int($SHIP_CLASSES[$p->{ship_class}]{fighters} / 4);
     writeline($config{'systemcolor'} . " Emergency warp to Federation HQ!" . $RST, 1);
   }
+  door_pause();
+}
+
+# Live PvP ship-to-ship combat via session system
+sub _st_live_pvp {
+  my ($u, $p, $opp_name, $opp_data) = @_;
+
+  iamat($info{'handle'}, "Combat with $opp_name");
+
+  # Create duel session
+  my $session = door_session_create($DOOR_NAME, {
+    max_players => 2,
+    game_state  => {
+      challenger => $info{'handle'},
+      target     => $opp_name,
+      sector     => $p->{sector},
+    },
+  });
+
+  unless ($session) {
+    writeline($config{'errorcolor'} . " Couldn't initiate combat." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  door_send_message($DOOR_NAME, $opp_name,
+    "$info{'handle'} is attacking your ship in sector " . ($p->{sector} + 1) . "!");
+
+  writeline($config{'systemcolor'} . " Engaging $opp_name..." . $RST, 1);
+  writeline("", 1);
+
+  # Run combat rounds (local resolution - opponent's current stats are used)
+  my $my_f = $p->{fighters};
+  my $my_s = $p->{shields};
+  my $op_f = $opp_data->{fighters} // 0;
+  my $op_s = $opp_data->{shields} // 0;
+  my $round = 0;
+  my $fled = 0;
+
+  while ($my_f > 0 && $op_f + $op_s > 0 && $round < 20) {
+    $round++;
+    door_clear();
+    writeline($config{'errorcolor'} . " SHIP COMBAT - Round $round" . $RST, 1);
+    door_hrule(50);
+    writeline($config{'usercolor'} . " $info{'handle'}" .
+      $config{'systemcolor'} . "  F:" . $config{'datacolor'} . "$my_f" .
+      $config{'systemcolor'} . "  S:" . $config{'datacolor'} . "$my_s" . $RST, 1);
+    writeline($config{'errorcolor'} . " $opp_name" .
+      $config{'systemcolor'} . "  F:" . $config{'datacolor'} . "$op_f" .
+      $config{'systemcolor'} . "  S:" . $config{'datacolor'} . "$op_s" . $RST, 1);
+    writeline("", 1);
+
+    writeline("  " . $config{'promptcolor'} . "A" . $config{'themecolor'} . "ttack  " .
+              $config{'promptcolor'} . "R" . $config{'themecolor'} . "etreat  " .
+              $config{'systemcolor'} . "? " . $RST);
+    my $ch = uc(getline('text', 1, "", 1));
+
+    if ($ch eq 'R') {
+      # Retreat - costs some fighters as escape
+      my $loss = 1 + int(rand(int($op_f / 4) + 1));
+      $my_f -= $loss;
+      $my_f = 0 if $my_f < 0;
+      writeline($config{'systemcolor'} . " Emergency retreat! Lost $loss fighters in escape." . $RST, 1);
+      $fled = 1;
+      last;
+    }
+
+    # Both sides fire
+    my $our_dmg = 1 + int(rand(int($my_f / 2) + 1));
+    my $their_dmg = 1 + int(rand(int($op_f / 3) + 1));
+
+    # Apply our damage to opponent
+    $op_f -= $our_dmg;
+    if ($op_f < 0) {
+      $op_s += $op_f * 10;
+      $op_f = 0;
+    }
+
+    # Apply their damage to us
+    $my_f -= $their_dmg;
+    if ($my_f < 0) {
+      $my_s += $my_f * 10;
+      $my_f = 0;
+    }
+    $op_s = 0 if $op_s < 0;
+    $my_s = 0 if $my_s < 0;
+
+    writeline($config{'usercolor'} . " You hit $opp_name for $our_dmg fighter damage." . $RST, 1);
+    writeline($config{'errorcolor'} . " $opp_name hits you for $their_dmg fighter damage." . $RST, 1);
+    writeline("", 1);
+    door_pause("Press any key for next round...");
+  }
+
+  # Update our stats
+  $p->{fighters} = $my_f;
+  $p->{shields} = $my_s;
+
+  writeline("", 1);
+  if (!$fled && $op_f <= 0 && $op_s <= 0) {
+    # We won
+    my $loot = int(($opp_data->{credits} // 0) * 0.2);
+    $p->{credits} += $loot;
+    $p->{kills}++;
+    $p->{experience} += 50;
+    $p->{alignment} -= 5 if $p->{alignment} > -1000;  # Attacking lowers alignment
+
+    $opp_data->{fighters} = 0;
+    $opp_data->{shields} = 0;
+    $opp_data->{deaths} = ($opp_data->{deaths} // 0) + 1;
+    $opp_data->{credits} = ($opp_data->{credits} // 0) - $loot;
+    $opp_data->{sector} = 0;  # Respawn at Fed HQ
+    $opp_data->{shields} = int($SHIP_CLASSES[$opp_data->{ship_class} // 0]{shields} / 2);
+    $opp_data->{fighters} = int($SHIP_CLASSES[$opp_data->{ship_class} // 0]{fighters} / 4);
+    door_save_player($DOOR_NAME, $opp_name, $opp_data);
+
+    writeline($config{'usercolor'} . " $opp_name's ship destroyed! Loot: " . door_money($loot) . $RST, 1);
+    door_send_message($DOOR_NAME, $opp_name,
+      "$info{'handle'} destroyed your ship in sector " . ($p->{sector} + 1) .
+      " and stole " . door_money($loot) . "!");
+    door_broadcast($DOOR_NAME, "$info{'handle'} destroyed $opp_name's ship in combat!");
+    _st_post_news("$info{'handle'} destroyed $opp_name in sector " . ($p->{sector} + 1) . "!");
+    door_submit_score($DOOR_NAME, $p->{experience}, { kills => $p->{kills} });
+    door_log_activity($DOOR_NAME, "$info{'handle'} defeated $opp_name in PvP combat!");
+  } elsif ($fled) {
+    writeline($config{'systemcolor'} . " You retreated from combat." . $RST, 1);
+    $p->{alignment} -= 2 if $p->{alignment} > -1000;
+  } else {
+    writeline($config{'systemcolor'} . " Combat ended in a stalemate." . $RST, 1);
+  }
+
+  door_session_destroy($DOOR_NAME, $session->{id});
+  _st_save_player($p);
+  writeline("", 1);
   door_pause();
 }
 
@@ -1040,8 +1202,8 @@ sub _st_help {
     ['N',   'Lay mines in sector'],
     ['S',   'Scan for other players'],
     ['G',   'Galactic news feed'],
-    ['X',   'Trade exchange (player trading)'],
-    ['C',   'Chat (sector chat)'],
+    ['X',   'Trade exchange (coming soon)'],
+    ['H',   'Hail (sector chat)'],
     ['R',   'Rankings'],
     ['Q',   'Quit game'],
     ['#',   'Quick warp (type sector number)'],

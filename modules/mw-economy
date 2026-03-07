@@ -1,0 +1,377 @@
+#!/usr/bin/perl
+#
+# mw-economy - MechWars Trading and Equipment System
+# Trading bases, equipment shop, repair, refuel, dynamic pricing
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# Resource definitions
+my %_MW_RESOURCES = (
+    lithium  => { name => 'Lithium',  base => 100, weight => 1 },
+    titanium => { name => 'Titanium', base => 150, weight => 2 },
+    alloyis  => { name => 'Alloyis',  base => 200, weight => 3 },
+);
+
+# Equipment catalog
+my @_MW_EQUIPMENT = (
+    { id => 'gun2',  name => 'Mk2 Blaster',        cost =>   5000, type => 'gun',    level => 2, desc => '+10 base damage' },
+    { id => 'gun3',  name => 'Mk3 Pulse Cannon',    cost =>  15000, type => 'gun',    level => 3, desc => '+20 base damage' },
+    { id => 'gun4',  name => 'Mk4 Plasma Railgun',  cost =>  40000, type => 'gun',    level => 4, desc => '+30 base damage' },
+    { id => 'gun5',  name => 'Mk5 Nova Lance',      cost => 100000, type => 'gun',    level => 5, desc => '+40 base damage' },
+    { id => 'shd1',  name => 'Shield Booster I',    cost =>   3000, type => 'shield', bonus => 25,  desc => '+25 max shields' },
+    { id => 'shd2',  name => 'Shield Booster II',   cost =>  12000, type => 'shield', bonus => 50,  desc => '+50 max shields' },
+    { id => 'shd3',  name => 'Shield Booster III',  cost =>  35000, type => 'shield', bonus => 100, desc => '+100 max shields' },
+    { id => 'eng1',  name => 'Reactor Upgrade I',   cost =>   4000, type => 'energy', bonus => 100, desc => '+100 max energy' },
+    { id => 'eng2',  name => 'Reactor Upgrade II',  cost =>  15000, type => 'energy', bonus => 250, desc => '+250 max energy' },
+    { id => 'eng3',  name => 'Reactor Upgrade III', cost =>  45000, type => 'energy', bonus => 500, desc => '+500 max energy' },
+    { id => 'crg1',  name => 'Cargo Expansion I',   cost =>   6000, type => 'cargo',  bonus => 20,  desc => '+20 cargo space' },
+    { id => 'crg2',  name => 'Cargo Expansion II',  cost =>  20000, type => 'cargo',  bonus => 50,  desc => '+50 cargo space' },
+    { id => 'mine5', name => 'Mines x5',             cost =>   2500, type => 'mines',  count => 5,   desc => '5 sector mines' },
+    { id => 'mine10',name => 'Mines x10',            cost =>   4500, type => 'mines',  count => 10,  desc => '10 sector mines' },
+);
+
+# ============================================================================
+# PORT MENU (main dock interface at a trading base)
+# ============================================================================
+
+sub mw_port_menu {
+    my ($player) = @_;
+
+    my $sector = mw_get_sector($player->{x}, $player->{y});
+    unless ($sector && $sector->{base_id}) {
+        writeline($config{'errorcolor'} . " No trading base in this sector." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my $base = mw_get_base($sector->{base_id});
+    unless ($base) {
+        writeline($config{'errorcolor'} . " Base data unavailable." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    while (1) {
+        door_clear();
+        writeline($config{'usercolor'} . " " . $base->{name} . $RST, 1);
+        door_hrule(50);
+        writeline($config{'datacolor'} . "  StarVacs: " .
+                  $config{'usercolor'} . $player->{starvacs} .
+                  $config{'datacolor'} . "  Cargo: " .
+                  $config{'usercolor'} . _mw_cargo_used($player) . "/" . $player->{cargo_max} . $RST, 1);
+        writeline("", 1);
+        writeline("  " . $config{'promptcolor'} . "T" . $config{'themecolor'} . " ... Trade Resources", 1);
+        writeline("  " . $config{'promptcolor'} . "E" . $config{'themecolor'} . " ... Equipment Shop", 1);
+        writeline("  " . $config{'promptcolor'} . "R" . $config{'themecolor'} . " ... Repair Shields", 1);
+        writeline("  " . $config{'promptcolor'} . "F" . $config{'themecolor'} . " ... Refuel Energy", 1);
+        writeline("  " . $config{'promptcolor'} . "H" . $config{'themecolor'} . " ... Hall of Fame", 1);
+        writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... Undock", 1);
+        writeline("", 1);
+        writeline($config{'promptcolor'} . "  Command: " . $RST);
+        my $cmd = uc(waitkey(""));
+        writeline("", 1);
+
+        if    ($cmd eq 'T') { _mw_trade_menu($player, $base); }
+        elsif ($cmd eq 'E') { _mw_equip_menu($player, $base); }
+        elsif ($cmd eq 'R') { _mw_repair_menu($player); }
+        elsif ($cmd eq 'F') { _mw_refuel_menu($player); }
+        elsif ($cmd eq 'H') {
+            door_show_scores('mechwars', "MechWars Hall of Fame", "Kills");
+            door_pause();
+        }
+        elsif ($cmd eq 'Q') { return; }
+    }
+}
+
+# ============================================================================
+# TRADING
+# ============================================================================
+
+sub _mw_trade_menu {
+    my ($player, $base) = @_;
+
+    while (1) {
+        door_clear();
+        writeline($config{'usercolor'} . " Resource Market - " . $base->{name} . $RST, 1);
+        door_hrule(50);
+
+        my @rkeys = sort keys %_MW_RESOURCES;
+        my $num = 1;
+        for my $rk (@rkeys) {
+            my $ri  = $_MW_RESOURCES{$rk};
+            my $buy  = $base->{prices}{"${rk}_buy"}  // $ri->{base};
+            my $sell = $base->{prices}{"${rk}_sell"} // int($ri->{base} * 0.8);
+            my $have = $player->{cargo}{$rk} // 0;
+
+            writeline("  " . $config{'promptcolor'} . $num .
+                      $config{'themecolor'} . " ... " .
+                      $config{'usercolor'} . sprintf("%-10s", $ri->{name}) .
+                      $config{'themecolor'} . " Buy:" . $config{'datacolor'} . sprintf("%5d", $buy) .
+                      $config{'themecolor'} . " Sell:" . $config{'datacolor'} . sprintf("%5d", $sell) .
+                      $config{'themecolor'} . " Have:" . $config{'datacolor'} . $have . $RST, 1);
+            $num++;
+        }
+
+        writeline("", 1);
+        writeline($config{'datacolor'} . "  StarVacs: " . $player->{starvacs} .
+                  "  Cargo: " . _mw_cargo_used($player) . "/" . $player->{cargo_max} . $RST, 1);
+        writeline("", 1);
+        writeline("  " . $config{'promptcolor'} . "B" . $config{'themecolor'} . " ... Buy  " .
+                  $config{'promptcolor'} . "S" . $config{'themecolor'} . " ... Sell  " .
+                  $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... Back", 1);
+        writeline($config{'promptcolor'} . "  Action: " . $RST);
+        my $cmd = uc(waitkey(""));
+        writeline("", 1);
+
+        return if $cmd eq 'Q';
+
+        if ($cmd eq 'B' || $cmd eq 'S') {
+            writeline($config{'systemcolor'} . " Which resource? [1-" . scalar(@rkeys) . "]: " . $RST);
+            my $rc = waitkey("");
+            writeline("", 1);
+            next unless $rc =~ /^\d+$/ && $rc >= 1 && $rc <= scalar(@rkeys);
+            my $rk = $rkeys[$rc - 1];
+            my $ri = $_MW_RESOURCES{$rk};
+
+            writeline($config{'systemcolor'} . " Quantity: " . $RST);
+            my $qty = int(getline('text', 6, '', 1) // 0);
+            next if $qty <= 0;
+
+            if ($cmd eq 'B') {
+                _mw_buy_resource($player, $base, $rk, $ri, $qty);
+            } else {
+                _mw_sell_resource($player, $base, $rk, $ri, $qty);
+            }
+            door_pause();
+        }
+    }
+}
+
+sub _mw_buy_resource {
+    my ($player, $base, $rk, $ri, $qty) = @_;
+
+    my $price  = ($base->{prices}{"${rk}_buy"} // $ri->{base}) * $qty;
+    my $weight = $ri->{weight} * $qty;
+    my $space  = $player->{cargo_max} - _mw_cargo_used($player);
+
+    if ($price > $player->{starvacs}) {
+        writeline($config{'errorcolor'} . " Need $price SV, have $player->{starvacs}." . $RST, 1);
+        return;
+    }
+    if ($weight > $space) {
+        writeline($config{'errorcolor'} . " Need $weight cargo space, have $space." . $RST, 1);
+        return;
+    }
+
+    $player->{starvacs} -= $price;
+    $player->{cargo}{$rk} = ($player->{cargo}{$rk} // 0) + $qty;
+    writeline($config{'datacolor'} . " Bought $qty " . $ri->{name} . " for $price SV." . $RST, 1);
+}
+
+sub _mw_sell_resource {
+    my ($player, $base, $rk, $ri, $qty) = @_;
+
+    my $have = $player->{cargo}{$rk} // 0;
+    if ($qty > $have) {
+        writeline($config{'errorcolor'} . " Only have $have " . $ri->{name} . "." . $RST, 1);
+        return;
+    }
+
+    my $price = ($base->{prices}{"${rk}_sell"} // int($ri->{base} * 0.8)) * $qty;
+
+    # Engineer bonus
+    if (($player->{mech_type} // '') eq 'ENGINEER') {
+        $price = int($price * 1.20);
+    }
+
+    $player->{starvacs} += $price;
+    $player->{cargo}{$rk} -= $qty;
+
+    writeline($config{'datacolor'} . " Sold $qty " . $ri->{name} . " for $price SV." . $RST, 1);
+
+    # Broadcast big trades
+    if ($price > 50000) {
+        door_broadcast('mechwars',
+            $player->{handle} . " sold $qty " . $ri->{name} . " for $price SV!");
+    }
+}
+
+# ============================================================================
+# EQUIPMENT SHOP
+# ============================================================================
+
+sub _mw_equip_menu {
+    my ($player, $base) = @_;
+
+    while (1) {
+        door_clear();
+        writeline($config{'usercolor'} . " Equipment Shop - " . $base->{name} . $RST, 1);
+        door_hrule(50);
+        writeline($config{'datacolor'} . "  StarVacs: " . $player->{starvacs} . $RST, 1);
+        writeline("", 1);
+
+        my $num = 1;
+        for my $eq (@_MW_EQUIPMENT) {
+            my $owned = _mw_has_equipment($player, $eq);
+            my $color = $owned ? $config{'linecolor'} : $config{'promptcolor'};
+            my $mark  = $owned ? "(owned)" : "";
+            writeline("  " . $color . $num .
+                      $config{'themecolor'} . " ... " .
+                      $config{'usercolor'} . sprintf("%-22s", $eq->{name}) .
+                      $config{'datacolor'} . sprintf("%7d SV", $eq->{cost}) .
+                      "  " . $config{'systemcolor'} . $eq->{desc} .
+                      "  " . $config{'linecolor'} . $mark . $RST, 1);
+            $num++;
+        }
+
+        writeline("", 1);
+        writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... Back", 1);
+        writeline("", 1);
+        my $choice = door_getnum("Buy item [1-" . scalar(@_MW_EQUIPMENT) . ", 0=back]:",
+                                 scalar(@_MW_EQUIPMENT));
+
+        return if $choice == 0;
+
+        _mw_buy_equipment($player, $_MW_EQUIPMENT[$choice - 1]);
+        door_pause();
+    }
+}
+
+sub _mw_has_equipment {
+    my ($player, $eq) = @_;
+    if ($eq->{type} eq 'gun') {
+        return ($player->{gun_level} // 1) >= $eq->{level};
+    }
+    return 0;  # Other items can be stacked
+}
+
+sub _mw_buy_equipment {
+    my ($player, $eq) = @_;
+
+    if ($player->{starvacs} < $eq->{cost}) {
+        writeline($config{'errorcolor'} . " Need $eq->{cost} SV, have $player->{starvacs}." . $RST, 1);
+        return;
+    }
+
+    # Gun upgrade validation
+    if ($eq->{type} eq 'gun') {
+        if (($player->{gun_level} // 1) >= $eq->{level}) {
+            writeline($config{'errorcolor'} . " Already have this gun level or higher." . $RST, 1);
+            return;
+        }
+    }
+
+    $player->{starvacs} -= $eq->{cost};
+
+    if ($eq->{type} eq 'gun') {
+        $player->{gun_level} = $eq->{level};
+    } elsif ($eq->{type} eq 'shield') {
+        $player->{max_shields} += $eq->{bonus};
+        $player->{shields}     += $eq->{bonus};
+    } elsif ($eq->{type} eq 'energy') {
+        $player->{max_energy} += $eq->{bonus};
+        $player->{energy}     += $eq->{bonus};
+    } elsif ($eq->{type} eq 'cargo') {
+        $player->{cargo_max} += $eq->{bonus};
+    } elsif ($eq->{type} eq 'mines') {
+        $player->{mines} = ($player->{mines} // 0) + $eq->{count};
+    }
+
+    writeline($config{'systemcolor'} . " Purchased: " . $eq->{name} . $RST, 1);
+}
+
+# ============================================================================
+# REPAIR AND REFUEL
+# ============================================================================
+
+sub _mw_repair_menu {
+    my ($player) = @_;
+
+    my $need    = $player->{max_shields} - $player->{shields};
+    my $cost_sv = $need * 5;    # 5 SV per shield point
+
+    door_header("Shield Repair");
+    writeline("  " . $config{'themecolor'} . "Current: " .
+              $config{'datacolor'} . "$player->{shields}/$player->{max_shields}" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Cost:    " .
+              $config{'datacolor'} . "5 SV per shield point" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "To full: " .
+              $config{'datacolor'} . "$cost_sv SV ($need points)" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Balance: " .
+              $config{'datacolor'} . $player->{starvacs} . " SV" . $RST, 1);
+    writeline("", 1);
+
+    if ($need <= 0) {
+        writeline($config{'systemcolor'} . " Shields already at maximum." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    writeline($config{'systemcolor'} . " How many points to repair (0=full)? " . $RST);
+    my $pts = int(getline('text', 6, '', 1) // 0);
+    if ($pts <= 0) { $pts = $need; }
+    $pts = $need if $pts > $need;
+
+    my $actual_cost = $pts * 5;
+    if ($actual_cost > $player->{starvacs}) {
+        $pts         = int($player->{starvacs} / 5);
+        $actual_cost = $pts * 5;
+    }
+
+    if ($pts <= 0) {
+        writeline($config{'errorcolor'} . " Not enough StarVacs." . $RST, 1);
+    } else {
+        $player->{starvacs} -= $actual_cost;
+        $player->{shields}  += $pts;
+        writeline($config{'datacolor'} . " Repaired $pts shield points for $actual_cost SV." . $RST, 1);
+    }
+
+    door_pause();
+}
+
+sub _mw_refuel_menu {
+    my ($player) = @_;
+
+    my $need    = $player->{max_energy} - $player->{energy};
+    my $cost_sv = int($need * 0.5);    # 0.5 SV per energy unit
+
+    door_header("Energy Refuel");
+    writeline("  " . $config{'themecolor'} . "Current: " .
+              $config{'datacolor'} . "$player->{energy}/$player->{max_energy}" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Cost:    " .
+              $config{'datacolor'} . "0.5 SV per energy unit" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "To full: " .
+              $config{'datacolor'} . "$cost_sv SV ($need units)" . $RST, 1);
+    writeline("  " . $config{'themecolor'} . "Balance: " .
+              $config{'datacolor'} . $player->{starvacs} . " SV" . $RST, 1);
+    writeline("", 1);
+
+    if ($need <= 0) {
+        writeline($config{'systemcolor'} . " Energy already at maximum." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    writeline($config{'systemcolor'} . " How many units to refuel (0=full)? " . $RST);
+    my $units = int(getline('text', 8, '', 1) // 0);
+    if ($units <= 0) { $units = $need; }
+    $units = $need if $units > $need;
+
+    my $affordable = int($player->{starvacs} / 0.5);
+    $units = $affordable if $units > $affordable;
+
+    my $actual_cost = int($units * 0.5);
+
+    if ($units <= 0) {
+        writeline($config{'errorcolor'} . " Not enough StarVacs." . $RST, 1);
+    } else {
+        $player->{starvacs} -= $actual_cost;
+        $player->{energy}   += $units;
+        writeline($config{'datacolor'} . " Refueled $units energy for $actual_cost SV." . $RST, 1);
+    }
+
+    door_pause();
+}
+
+1;

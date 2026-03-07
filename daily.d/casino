@@ -1,0 +1,48 @@
+#!/usr/bin/perl
+#
+# Casino Daily Maintenance
+# Run from daily.d/ hook at midnight
+#
+# Tasks:
+#   1. Top up jackpot pool if below minimum (the house adds money)
+#   2. Clean up news entries
+#
+
+my $PHOTON_HOME = $ENV{PHOTON_HOME} // '/opt/photonbbs';
+my $DOOR_NAME = 'casino';
+my $MIN_JACKPOT = 500;    # Minimum jackpot floor
+my $DAILY_ADD   = 200;    # House contribution per day
+
+sub casino_daily {
+    print "[casino] Daily maintenance starting...\n";
+
+    # Load doorlib
+    eval { require_module('pb-doorlib'); };
+    if ($@) {
+        eval { require "$PHOTON_HOME/modules/pb-doorlib"; };
+        if ($@) { print "[casino] Cannot load pb-doorlib: $@\n"; return; }
+    }
+
+    # Top up jackpot
+    my $pool = door_load_shared($DOOR_NAME, "jackpot.dat") // { amount => $MIN_JACKPOT, contributors => {}, last_winner => "" };
+    my $before = $pool->{amount};
+    $pool->{amount} += $DAILY_ADD;
+    door_save_shared($DOOR_NAME, "jackpot.dat", $pool);
+    print "[casino] Jackpot: \$$before + \$$DAILY_ADD house contribution = \$$pool->{amount}\n";
+
+    # Trim news to last 25 entries
+    my $news = door_load_shared($DOOR_NAME, "news.dat");
+    if ($news && $news->{items} && @{$news->{items}} > 25) {
+        my $before_count = scalar @{$news->{items}};
+        splice @{$news->{items}}, 0, $before_count - 25;
+        door_save_shared($DOOR_NAME, "news.dat", $news);
+        print "[casino] Trimmed news from $before_count to 25 entries.\n";
+    }
+
+    print "[casino] Daily maintenance complete.\n";
+}
+
+# Run if called directly
+casino_daily() unless caller();
+
+1;

@@ -1,0 +1,175 @@
+#!/usr/bin/perl
+#
+# mw-universe - MechWars Universe Management
+# 125x125 sector grid, entity placement, sector queries
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# Universe shared state (module-level)
+my %_MW_UNIVERSE;
+my $_MW_UNI_LOADED = 0;
+
+# Universe constants
+use constant {
+    MW_UNIVERSE_SIZE => 125,
+    MW_MAX_BASES     => 1000,
+};
+
+# ============================================================================
+# LOAD / SAVE
+# ============================================================================
+
+sub mw_universe_load {
+    return if $_MW_UNI_LOADED;
+    my $data = door_load_shared('mechwars', 'universe.dat');
+    if ($data && ref($data) eq 'HASH' && $data->{sectors}) {
+        %_MW_UNIVERSE = %{$data->{sectors}};
+        $_MW_UNI_LOADED = 1;
+        return;
+    }
+    # Initialize fresh universe
+    _mw_universe_init();
+    $_MW_UNI_LOADED = 1;
+}
+
+sub mw_universe_save {
+    door_save_shared('mechwars', 'universe.dat', { sectors => \%_MW_UNIVERSE });
+}
+
+sub _mw_universe_init {
+    writeline($config{'systemcolor'} . " Initializing universe..." . $RST, 1);
+    %_MW_UNIVERSE = ();
+    my $size = MW_UNIVERSE_SIZE;
+    for my $x (1 .. $size) {
+        for my $y (1 .. $size) {
+            $_MW_UNIVERSE{"$x,$y"} = {
+                x         => $x,
+                y         => $y,
+                drones    => [],
+                players   => [],
+                base_id   => undef,
+                planet_id => undef,
+                fort_id   => undef,
+                mines     => 0,
+                mine_owner => '',
+            };
+        }
+    }
+    writeline($config{'datacolor'} . " Created " . ($size * $size) . " sectors." . $RST, 1);
+}
+
+# ============================================================================
+# SECTOR ACCESS
+# ============================================================================
+
+sub mw_get_sector {
+    my ($x, $y) = @_;
+    return undef unless mw_valid_coords($x, $y);
+    return $_MW_UNIVERSE{"$x,$y"};
+}
+
+sub mw_update_sector {
+    my ($x, $y, $data) = @_;
+    return unless mw_valid_coords($x, $y);
+    $_MW_UNIVERSE{"$x,$y"} = $data;
+}
+
+sub mw_valid_coords {
+    my ($x, $y) = @_;
+    return 0 unless defined $x && defined $y;
+    my $s = MW_UNIVERSE_SIZE;
+    return ($x >= 1 && $x <= $s && $y >= 1 && $y <= $s) ? 1 : 0;
+}
+
+# ============================================================================
+# ENTITY MANAGEMENT IN SECTORS
+# ============================================================================
+
+sub mw_sector_add_drone {
+    my ($x, $y, $id) = @_;
+    my $s = mw_get_sector($x, $y);
+    return unless $s;
+    push @{$s->{drones}}, $id
+        unless grep { $_ == $id } @{$s->{drones}};
+}
+
+sub mw_sector_remove_drone {
+    my ($x, $y, $id) = @_;
+    my $s = mw_get_sector($x, $y);
+    return unless $s;
+    $s->{drones} = [grep { $_ != $id } @{$s->{drones}}];
+}
+
+sub mw_sector_add_player {
+    my ($x, $y, $handle) = @_;
+    my $s = mw_get_sector($x, $y);
+    return unless $s;
+    push @{$s->{players}}, $handle
+        unless grep { $_ eq $handle } @{$s->{players}};
+}
+
+sub mw_sector_remove_player {
+    my ($x, $y, $handle) = @_;
+    my $s = mw_get_sector($x, $y);
+    return unless $s;
+    $s->{players} = [grep { $_ ne $handle } @{$s->{players}}];
+}
+
+# ============================================================================
+# SECTOR PRESENCE (broker room transitions)
+# ============================================================================
+
+sub mw_sector_enter {
+    my ($player) = @_;
+    mw_sector_add_player($player->{x}, $player->{y}, $player->{handle});
+    # Move broker to sector room
+    my $room = "door-mechwars-s-$player->{x}-$player->{y}";
+    door_broker_move($room);
+}
+
+sub mw_sector_leave {
+    my ($player) = @_;
+    mw_sector_remove_player($player->{x}, $player->{y}, $player->{handle});
+}
+
+# ============================================================================
+# RANDOM SECTOR HELPERS
+# ============================================================================
+
+sub mw_random_sector {
+    my $s = MW_UNIVERSE_SIZE;
+    return (int(rand($s)) + 1, int(rand($s)) + 1);
+}
+
+sub mw_random_empty_sector {
+    my $attempts = 0;
+    while ($attempts++ < 2000) {
+        my ($x, $y) = mw_random_sector();
+        my $sec = mw_get_sector($x, $y);
+        return ($x, $y) unless
+            $sec->{base_id} || $sec->{planet_id} || $sec->{fort_id};
+    }
+    return mw_random_sector();
+}
+
+sub mw_adjacent_sectors {
+    my ($x, $y) = @_;
+    my @dirs = ([-1,1],[0,1],[1,1],[-1,0],[1,0],[-1,-1],[0,-1],[1,-1]);
+    my @result;
+    for my $d (@dirs) {
+        my ($nx, $ny) = ($x + $d->[0], $y + $d->[1]);
+        push @result, { x => $nx, y => $ny } if mw_valid_coords($nx, $ny);
+    }
+    return @result;
+}
+
+# ============================================================================
+# UNIVERSE REFERENCE (for other modules)
+# ============================================================================
+
+sub mw_universe_ref {
+    return \%_MW_UNIVERSE;
+}
+
+1;

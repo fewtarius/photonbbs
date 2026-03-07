@@ -1,0 +1,77 @@
+#!/usr/bin/perl
+#
+# Star Trader Daily Maintenance
+# Run from daily.d/ hook at midnight
+#
+# Tasks:
+#   1. Restock port commodities (partial refill toward base levels)
+#   2. Trim old news entries
+#
+
+my $PHOTON_HOME = $ENV{PHOTON_HOME} // '/opt/photonbbs';
+my $DOOR_NAME = 'startrader';
+
+# Base stock levels for ports
+my $BASE_STOCK_MIN = 800;
+my $BASE_STOCK_MAX = 2000;
+my $RESTOCK_RATE   = 0.15;  # Restore 15% of deficit per day
+my $FED_STOCK      = 9999;  # Federation HQ stays full
+my $DOCK_STOCK     = 5000;  # Stardock stays stocked
+
+sub startrader_daily {
+    print "[startrader] Daily maintenance starting...\n";
+
+    # Load doorlib
+    eval { require_module('pb-doorlib'); };
+    if ($@) {
+        eval { require "$PHOTON_HOME/modules/pb-doorlib"; };
+        if ($@) { print "[startrader] Cannot load pb-doorlib: $@\n"; return; }
+    }
+
+    # Load universe
+    my $u = door_load_shared($DOOR_NAME, "universe.dat");
+    unless ($u && $u->{sectors}) {
+        print "[startrader] No universe data found. Skipping.\n";
+        return;
+    }
+
+    my $restocked = 0;
+
+    for my $si (0 .. $#{$u->{sectors}}) {
+        my $sector = $u->{sectors}[$si];
+        next unless $sector && $sector->{port};
+        my $port = $sector->{port};
+
+        # Don't touch Federation HQ or Stardock
+        if ($port->{name} eq 'Federation HQ') {
+            $port->{stock} = [$FED_STOCK, $FED_STOCK, $FED_STOCK];
+            next;
+        }
+        if ($port->{name} eq 'Stardock Shipyard') {
+            $port->{stock} = [$DOCK_STOCK, $DOCK_STOCK, $DOCK_STOCK];
+            next;
+        }
+
+        # Restock each commodity toward a target of BASE_STOCK_MIN-BASE_STOCK_MAX
+        for my $ci (0..2) {
+            my $current = $port->{stock}[$ci] // 0;
+            my $target = $BASE_STOCK_MIN + int(rand($BASE_STOCK_MAX - $BASE_STOCK_MIN));
+            if ($current < $target) {
+                my $deficit = $target - $current;
+                my $add = int($deficit * $RESTOCK_RATE) + int(rand(50));
+                $add = 1 if $add < 1;  # Always add at least 1
+                $port->{stock}[$ci] = $current + $add;
+                $restocked++;
+            }
+        }
+    }
+
+    door_save_shared($DOOR_NAME, "universe.dat", $u);
+    print "[startrader] Restocked $restocked commodity slots.\n";
+    print "[startrader] Daily maintenance complete.\n";
+}
+
+# Run if called directly
+startrader_daily() unless caller();
+
+1;
