@@ -1,0 +1,287 @@
+#!/usr/bin/perl
+#
+# mw-ui - MechWars User Interface
+# Sector display, scanner, mini-map, status bar, sector info
+#
+# No package declaration - runs in main:: namespace
+
+# ============================================================================
+# MAIN SECTOR DISPLAY
+# ============================================================================
+
+sub mw_display_sector {
+    my ($player) = @_;
+
+    door_clear();
+
+    # Title bar with coordinates and turns
+    writeline($config{'themecolor'} . " MechWars - Infinite Frontiers" .
+              $config{'datacolor'} . "  Sector [" . $player->{x} . "," . $player->{y} . "]" .
+              $config{'systemcolor'} . "  Turns: " . $config{'datacolor'} . $player->{turns} . $RST, 1);
+    door_hrule(70);
+
+    # Player status bar
+    _mw_draw_status($player);
+    writeline("", 1);
+
+    # Sector contents
+    my $sector = mw_get_sector($player->{x}, $player->{y});
+    if ($sector) {
+        # Base
+        if ($sector->{base_id}) {
+            my $base = mw_get_base($sector->{base_id});
+            writeline("  " . $config{'systemcolor'} . "Port:    " .
+                      $config{'usercolor'} . ($base ? $base->{name} : "Trading Base") . $RST, 1);
+        }
+
+        # Planet
+        if ($sector->{planet_id}) {
+            my $planet = mw_get_planet($sector->{planet_id});
+            if ($planet) {
+                my $owner_str = $planet->{owner} ? " (Owner: " . $planet->{owner} . ")" : " (Unclaimed)";
+                writeline("  " . $config{'systemcolor'} . "Planet:  " .
+                          $config{'usercolor'} . $planet->{name} .
+                          $config{'datacolor'} . $owner_str . $RST, 1);
+            }
+        }
+
+        # Fortress
+        if ($sector->{fort_id}) {
+            my $fort = mw_get_fortress($sector->{fort_id});
+            if ($fort) {
+                writeline("  " . $config{'systemcolor'} . "Fort:    " .
+                          $config{'usercolor'} . $fort->{name} .
+                          $config{'datacolor'} . " (Owner: " . $fort->{owner} .
+                          " DEF:" . $fort->{defense} . ")" . $RST, 1);
+            }
+        }
+
+        # Drones
+        my @drones = @{$sector->{drones} // []};
+        if (@drones) {
+            my $count = scalar(@drones);
+            my @dtypes;
+            for my $did (@drones) {
+                my $d = mw_get_drone($did);
+                push @dtypes, mw_get_drone_type($d->{type})->{name} if $d;
+            }
+            writeline("  " . $config{'errorcolor'} . "Hostiles:" .
+                      $config{'datacolor'} . " $count drone(s) - " .
+                      join(", ", @dtypes[0..2]) . ($count > 3 ? " ..." : "") . $RST, 1);
+        }
+
+        # Other players
+        my @players = grep { $_ ne $player->{handle} } @{$sector->{players} // []};
+        if (@players) {
+            writeline("  " . $config{'systemcolor'} . "Pilots:  " .
+                      $config{'usercolor'} . join(", ", @players) . $RST, 1);
+        }
+
+        # Mines
+        if (($sector->{mines} // 0) > 0) {
+            my $owner = $sector->{mine_owner} // 'unknown';
+            my $color = ($owner eq $player->{handle}) ? $config{'systemcolor'} : $config{'errorcolor'};
+            writeline("  " . $color . "Mines:   " .
+                      $config{'datacolor'} . $sector->{mines} . " deployed by $owner" . $RST, 1);
+        }
+
+        # Empty sector
+        unless ($sector->{base_id} || $sector->{planet_id} || $sector->{fort_id} ||
+                @drones || @players || ($sector->{mines} // 0) > 0) {
+            writeline("  " . $config{'linecolor'} . "(Empty sector)" . $RST, 1);
+        }
+    }
+
+    # Broker: show players also in this sector
+    my @broker_others = door_broker_room_players();
+    if (@broker_others) {
+        my @handles = map { s/^door-mechwars-//r } @broker_others;
+        @handles = grep { $_ ne $player->{handle} } @handles;
+        if (@handles) {
+            writeline("  " . $config{'themecolor'} . "Online:  " .
+                      $config{'datacolor'} . join(", ", @handles) . $RST, 1);
+        }
+    }
+
+    writeline("", 1);
+}
+
+# ============================================================================
+# STATUS BAR
+# ============================================================================
+
+sub _mw_draw_status {
+    my ($player) = @_;
+    my $mech = mw_get_mech($player->{mech_type}) // {};
+
+    # Zone name based on position
+    my $zone = "Core Systems";
+    my $cx   = $player->{x};
+    my $cy   = $player->{y};
+    my $mid  = int(MW_UNIVERSE_SIZE / 2);
+
+    if (abs($cx - $mid) > 50 || abs($cy - $mid) > 50) {
+        $zone = "The Outer Rift";
+    } elsif (abs($cx - $mid) > 30 || abs($cy - $mid) > 30) {
+        $zone = "Frontier Zone";
+    } elsif (abs($cx - $mid) > 15 || abs($cy - $mid) > 15) {
+        $zone = "Inner Rim";
+    }
+
+    # Shield % for coloring
+    my $shpct = $player->{max_shields} > 0
+        ? $player->{shields} / $player->{max_shields}
+        : 0;
+    my $shcolor = $shpct > 0.5 ? $config{'systemcolor'} :
+                  $shpct > 0.25 ? $config{'promptcolor'} : $config{'errorcolor'};
+
+    writeline("  " . $config{'themecolor'} . $mech->{type} . " L" . ($player->{level} // 1) .
+              $config{'datacolor'} . "  |  " .
+              $config{'themecolor'} . "SH:" . $shcolor . $player->{shields} .
+              $config{'themecolor'} . "/" . $player->{max_shields} .
+              $config{'datacolor'} . "  " .
+              $config{'themecolor'} . "EN:" . $config{'datacolor'} . $player->{energy} .
+              $config{'themecolor'} . "/" . $player->{max_energy} .
+              $config{'datacolor'} . "  " .
+              $config{'themecolor'} . "SV:" . $config{'datacolor'} . $player->{starvacs} .
+              $config{'datacolor'} . "  |  " .
+              $config{'linecolor'} . $zone . $RST, 1);
+}
+
+# ============================================================================
+# MINI-MAP (for movement prompt, 9x9 around player)
+# ============================================================================
+
+sub mw_draw_mini_map {
+    my ($player) = @_;
+
+    my $uni = mw_universe_ref();
+    my $px  = $player->{x};
+    my $py  = $player->{y};
+
+    writeline($config{'datacolor'} . "  Sector Map  [" . $px . "," . $py . "]" . $RST, 1);
+    writeline("", 1);
+
+    my $range = 4;  # 9x9 grid
+
+    for my $row (reverse(($py - $range) .. ($py + $range))) {
+        my $line = "  ";
+        for my $col ($px - $range .. $px + $range) {
+            if ($col == $px && $row == $py) {
+                $line .= $config{'usercolor'} . "*" . $RST;  # Player
+            } elsif (!mw_valid_coords($col, $row)) {
+                $line .= $config{'linecolor'} . "+" . $RST;  # Out of bounds
+            } else {
+                my $s = $uni->{"$col,$row"};
+                if (!$s) {
+                    $line .= ".";
+                } elsif (@{$s->{drones} // []}) {
+                    $line .= $config{'errorcolor'} . "D" . $RST;
+                } elsif ($s->{base_id}) {
+                    $line .= $config{'systemcolor'} . "B" . $RST;
+                } elsif ($s->{planet_id}) {
+                    $line .= $config{'promptcolor'} . "o" . $RST;
+                } elsif ($s->{fort_id}) {
+                    $line .= $config{'usercolor'} . "F" . $RST;
+                } elsif (@{$s->{players} // []}) {
+                    $line .= $config{'themecolor'} . "P" . $RST;
+                } elsif (($s->{mines} // 0) > 0) {
+                    $line .= $config{'errorcolor'} . "x" . $RST;
+                } else {
+                    $line .= $config{'linecolor'} . "." . $RST;
+                }
+            }
+            $line .= " ";
+        }
+        writeline($line, 1);
+    }
+
+    writeline("", 1);
+    writeline($config{'datacolor'} . "  * =You  D=Drone  B=Base  o=Planet  F=Fort  P=Pilot  x=Mines" . $RST, 1);
+}
+
+# ============================================================================
+# LONG RANGE SCANNER (11x11, more detail)
+# ============================================================================
+
+sub mw_show_scanner {
+    my ($player) = @_;
+
+    door_header("Long Range Scanner");
+
+    mw_draw_mini_map($player);
+
+    # Nearby object summary
+    my $uni   = mw_universe_ref();
+    my $px    = $player->{x};
+    my $py    = $player->{y};
+    my $range = 10;
+
+    my ($bases, $planets, $forts, $hostile_sectors, $players) = (0,0,0,0,0);
+    for my $dx (-$range .. $range) {
+        for my $dy (-$range .. $range) {
+            my ($sx, $sy) = ($px + $dx, $py + $dy);
+            next unless mw_valid_coords($sx, $sy);
+            my $s = $uni->{"$sx,$sy"};
+            next unless $s;
+            $bases++  if $s->{base_id};
+            $planets++ if $s->{planet_id};
+            $forts++  if $s->{fort_id};
+            $hostile_sectors++ if @{$s->{drones} // []};
+            $players++ if scalar(grep { $_ ne $player->{handle} } @{$s->{players} // []});
+        }
+    }
+
+    writeline($config{'datacolor'} . "  Within 10 sectors:" . $RST, 1);
+    writeline("    " . $config{'themecolor'} . "Trading Bases:   " .
+              $config{'datacolor'} . $bases . $RST, 1);
+    writeline("    " . $config{'themecolor'} . "Planets:         " .
+              $config{'datacolor'} . $planets . $RST, 1);
+    writeline("    " . $config{'themecolor'} . "Fortresses:      " .
+              $config{'datacolor'} . $forts . $RST, 1);
+    writeline("    " . $config{'themecolor'} . "Hostile sectors: " .
+              $config{'datacolor'} . $hostile_sectors . $RST, 1);
+    writeline("    " . $config{'themecolor'} . "Other pilots:    " .
+              $config{'datacolor'} . $players . $RST, 1);
+    writeline("", 1);
+}
+
+# ============================================================================
+# MENU BAR (shown at bottom of sector display)
+# ============================================================================
+
+sub mw_draw_menu_bar {
+    my ($player) = @_;
+    door_hrule(70);
+
+    my $sector = mw_get_sector($player->{x}, $player->{y});
+    my $has_base   = $sector && $sector->{base_id};
+    my $has_planet = $sector && $sector->{planet_id};
+    my $has_drones = $sector && @{$sector->{drones} // []};
+    my $has_foes   = $has_drones || (scalar(grep { $_ ne $player->{handle} } @{$sector->{players} // []}) > 0);
+
+    # Row 1: navigation + context-sensitive combat/dock
+    my @row1;
+    push @row1, $config{'promptcolor'} . "M" . $config{'themecolor'} . "=Move";
+    push @row1, $config{'promptcolor'} . "A" . $config{'themecolor'} . "=Attack" if $has_foes;
+    push @row1, $config{'promptcolor'} . "P" . $config{'themecolor'} . "=Port"   if $has_base;
+    push @row1, $config{'promptcolor'} . "L" . $config{'themecolor'} . "=Land"   if $has_planet;
+    push @row1, $config{'promptcolor'} . "F" . $config{'themecolor'} . "=Fold";
+    push @row1, $config{'promptcolor'} . "S" . $config{'themecolor'} . "=Scan";
+    push @row1, $config{'promptcolor'} . "N" . $config{'themecolor'} . "=Mines";
+    push @row1, $config{'promptcolor'} . "B" . $config{'themecolor'} . "=Build";
+
+    # Row 2: info + social + meta
+    my @row2;
+    push @row2, $config{'promptcolor'} . "G" . $config{'themecolor'} . "=Guild";
+    push @row2, $config{'promptcolor'} . "I" . $config{'themecolor'} . "=Info";
+    push @row2, $config{'promptcolor'} . "R" . $config{'themecolor'} . "=Rank";
+    push @row2, $config{'promptcolor'} . "H" . $config{'themecolor'} . "=Chat";
+    push @row2, $config{'promptcolor'} . "?" . $config{'themecolor'} . "=Help";
+    push @row2, $config{'promptcolor'} . "Q" . $config{'themecolor'} . "=Quit";
+
+    writeline("  " . join("  ", @row1) . $RST, 1);
+    writeline("  " . join("  ", @row2) . $RST, 1);
+}
+
+1;

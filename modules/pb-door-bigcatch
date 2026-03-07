@@ -295,6 +295,21 @@ sub _bc_title_screen {
   writeline($config{'systemcolor'} . "  Caught:  " . $config{'datacolor'} . "$g->{total_caught} lifetime" . $RST, 1);
   writeline($config{'systemcolor'} . "  Biggest: " . $config{'datacolor'} . sprintf("%.1f lbs", $g->{biggest}) . $RST, 1);
   writeline("", 1);
+
+  # Show who else is fishing
+  my @online = door_get_online_players($DOOR_NAME);
+  if (@online) {
+    my $others = join(", ", map { $config{'usercolor'} . $_ . $RST } @online);
+    writeline($config{'datacolor'} . "  Also fishing: " . $others, 1);
+    writeline("", 1);
+  }
+
+  # Show lake chat
+  my @chat = door_chat_poll($DOOR_NAME);
+  for my $m (@chat) {
+    writeline($config{'linecolor'} . $m . $RST, 1);
+  }
+
   door_pause();
 }
 
@@ -482,7 +497,7 @@ sub _bc_display {
     $config{'systemcolor'} . " Bottom:" . $config{'datacolor'} . " $bn" .
     $config{'systemcolor'} . " Lure:" . $config{'datacolor'} . " $lure" . $RST, 1);
   writeline($config{'linecolor'} . " WASD=move C=cast T=tackle L=livewell F=finder S=shop" . $RST, 1);
-  writeline($config{'linecolor'} . " H=scores R=tournament N=chat Q=quit" . $RST, 1);
+  writeline($config{'linecolor'} . " H=scores R=tournament V=duel N=chat Q=quit" . $RST, 1);
 
   # Show any incoming lake chat
   my @chat = door_chat_poll($DOOR_NAME);
@@ -573,6 +588,7 @@ sub _bc_command {
   elsif ($cmd eq 's') { _bc_shop($g); }
   elsif ($cmd eq 'h') { _bc_scores($g); }
   elsif ($cmd eq 'r') { _bc_join_tournament($g); }
+  elsif ($cmd eq 'v') { _bc_fishing_duel($g); }
   elsif ($cmd eq 'n') { door_chat_input($DOOR_NAME); }
   elsif ($cmd eq 'q') {
     writeline($config{'systemcolor'} . " Quit fishing? (Y/N) " . $RST);
@@ -826,6 +842,9 @@ sub _bc_strike {
       door_submit_score($DOOR_NAME, int($fish->{weight} * 100),
         { species => $sp->{name}, weight => sprintf("%.2f lbs", $fish->{weight}) });
     }
+    if ($fish->{weight} >= $sp->{maxw} * 0.7) {
+      door_log_activity($DOOR_NAME, sprintf("%s caught a %s (%.2f lbs)", $info{'handle'}, $sp->{name}, $fish->{weight}));
+    }
     if ($fish->{weight} >= $sp->{maxw} * 0.8) {
       door_broadcast($DOOR_NAME,
         sprintf("%s caught a trophy %s (%.2f lbs)!", $info{'handle'}, $sp->{name}, $fish->{weight}));
@@ -888,8 +907,7 @@ sub _bc_show_livewell {
     if ($cmd eq 's') { _bc_sell_catch($g); }
     elsif ($cmd eq 'r') {
       writeline("", 1);
-      writeline($config{'systemcolor'} . " Release which? (0 cancel) " . $RST);
-      my $ch = int(getline('text', 2, "", 1));
+      my $ch = door_getnum("Release which (0 cancel):", scalar @{$g->{bucket}});
       if ($ch >= 1 && $ch <= @{$g->{livewell}}) {
         my $rel = splice(@{$g->{livewell}}, $ch - 1, 1);
         writeline($config{'usercolor'} . " Released $rel->{species}." . $RST, 1);
@@ -1149,6 +1167,182 @@ sub _bc_join_tournament {
       writeline($config{'usercolor'} . " Joined! Good luck!" . $RST, 1);
     }
   }
+  door_pause();
+}
+
+# Fishing duel - quick head-to-head competition
+sub _bc_fishing_duel {
+  my ($g) = @_;
+
+  # Check for existing duel sessions to join
+  my $sessions = door_session_list($DOOR_NAME);
+  my @joinable;
+  for my $s (@$sessions) {
+    next if lc($s->{host}) eq lc($info{'handle'});
+    next unless ($s->{game_state}{type} // '') eq 'fishing_duel';
+    push @joinable, $s;
+  }
+
+  if (@joinable) {
+    writeline("", 1);
+    writeline($config{'usercolor'} . " " . $joinable[0]{host} . " wants a fishing duel!" . $RST, 1);
+    if (door_yesno("Accept the challenge?")) {
+      my $session = door_session_join($DOOR_NAME, $joinable[0]{id});
+      if ($session) {
+        _bc_duel_run($g, $session, $joinable[0]{host});
+        return;
+      }
+      writeline($config{'errorcolor'} . " Couldn't join - they may have cancelled." . $RST, 1);
+      door_pause();
+      return;
+    }
+  }
+
+  # Create a new duel
+  my @online = door_get_online_players($DOOR_NAME);
+  my @others = grep { lc($_) ne lc($info{'handle'}) } @online;
+
+  unless (@others) {
+    writeline($config{'systemcolor'} . " No other anglers on the lake." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  my $bet = 50;
+  if ($g->{money} < $bet) {
+    writeline($config{'errorcolor'} . " Need at least " . _bc_money($bet) . " for the duel bet." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline("", 1);
+  writeline($config{'systemcolor'} . " Fishing Duel: 5 casts each, biggest fish wins!" . $RST, 1);
+  writeline($config{'systemcolor'} . " Bet: " . $config{'datacolor'} . _bc_money($bet) . $RST, 1);
+  writeline("", 1);
+
+  unless (door_yesno("Create a duel? (" . _bc_money($bet) . " bet)")) { return; }
+
+  $g->{money} -= $bet;
+
+  my $session = door_session_create($DOOR_NAME, {
+    max_players => 2,
+    game_state  => { type => 'fishing_duel', bet => $bet },
+  });
+
+  unless ($session) {
+    $g->{money} += $bet;
+    writeline($config{'errorcolor'} . " Couldn't create duel." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  door_broadcast($DOOR_NAME, "$info{'handle'} is looking for a fishing duel! (" . _bc_money($bet) . " bet)");
+  writeline($config{'systemcolor'} . " Waiting for a challenger..." . $RST, 1);
+  writeline($config{'datacolor'} . " Press Q to cancel, A to duel AI." . $RST, 1);
+
+  my $result = door_session_wait($DOOR_NAME, $session->{id}, {
+    timeout => 45, max_cycles => 2,
+  });
+
+  unless ($result && scalar @{$result->{players}} >= 2) {
+    $g->{money} += $bet;
+    writeline($config{'systemcolor'} . " No challenger. Bet refunded." . $RST, 1);
+    door_session_destroy($DOOR_NAME, $session->{id});
+    door_pause();
+    return;
+  }
+
+  my $opponent = $result->{players}[1]{name};
+  _bc_duel_run($g, $result, $opponent);
+}
+
+sub _bc_duel_run {
+  my ($g, $session, $opponent) = @_;
+  my $bet = $session->{game_state}{bet} // 50;
+  my $casts = 5;
+
+  iamat($info{'handle'}, "Fishing duel vs $opponent");
+
+  door_clear();
+  writeline($config{'errorcolor'} . " FISHING DUEL!" . $RST, 1);
+  writeline($config{'systemcolor'} . " $info{'handle'} vs " . $config{'usercolor'} . $opponent . $RST, 1);
+  writeline($config{'systemcolor'} . " $casts casts - biggest single fish wins!" . $RST, 1);
+  writeline($config{'systemcolor'} . " Bet: " . $config{'datacolor'} . _bc_money($bet) . $RST, 1);
+  writeline("", 1);
+  door_pause("Press any key to start fishing...");
+
+  my $my_best = 0;
+  my $my_best_name = "nothing";
+
+  for my $cast_num (1 .. $casts) {
+    door_clear();
+    writeline($config{'themecolor'} . " Duel Cast $cast_num/$casts" . $RST, 1);
+    writeline($config{'systemcolor'} . " Your best: " . $config{'datacolor'} .
+      sprintf("%.1f lbs (%s)", $my_best, $my_best_name) . $RST, 1);
+    door_hrule(40);
+    writeline("", 1);
+
+    writeline($config{'systemcolor'} . " Casting..." . $RST, 1);
+    sleep(1);
+
+    # Simulate a catch attempt using lake conditions
+    my $catch_chance = 40 + ($g->{rod_power} * 10) + ($g->{fish_finder} ? 15 : 0);
+    $catch_chance += $g->{weather}{modifier} // 0;
+
+    if (rand(100) < $catch_chance) {
+      # Caught something - pick a random species from current lake
+      my $lake = $LAKES[$g->{lake_idx}];
+      my $species = $lake->{species}[int(rand(scalar @{$lake->{species}}))];
+      my $sp = $SPECIES{$species};
+      my $weight = $sp->{min_wt} + rand($sp->{max_wt} - $sp->{min_wt});
+      $weight *= (0.8 + rand(0.4));  # Some variation
+
+      writeline($config{'usercolor'} . " Caught: " . $config{'datacolor'} . $species .
+        " - " . sprintf("%.1f lbs", $weight) . "!" . $RST, 1);
+
+      if ($weight > $my_best) {
+        $my_best = $weight;
+        $my_best_name = $species;
+        writeline($config{'usercolor'} . " New best catch!" . $RST, 1);
+      }
+    } else {
+      writeline($config{'linecolor'} . " Nothing biting this cast." . $RST, 1);
+    }
+    writeline("", 1);
+    door_pause("Next cast...") unless $cast_num == $casts;
+  }
+
+  # Simulate opponent's best catch (based on time/randomness)
+  my $opp_best = rand(15) + rand(10);  # Random 0-25 lbs
+  my $opp_species = "Unknown Catch";
+
+  writeline("", 1);
+  door_hrule(40);
+  writeline($config{'themecolor'} . " DUEL RESULTS" . $RST, 1);
+  writeline($config{'usercolor'} . " $info{'handle'}: " . $config{'datacolor'} .
+    sprintf("%.1f lbs (%s)", $my_best, $my_best_name) . $RST, 1);
+  writeline($config{'errorcolor'} . " $opponent: " . $config{'datacolor'} .
+    sprintf("%.1f lbs", $opp_best) . $RST, 1);
+  writeline("", 1);
+
+  if ($my_best > $opp_best) {
+    $g->{money} += $bet * 2;
+    writeline($config{'usercolor'} . " YOU WIN! +" . _bc_money($bet) . "!" . $RST, 1);
+    door_send_message($DOOR_NAME, $opponent,
+      "$info{'handle'} beat you in a fishing duel! Their best: " . sprintf("%.1f lbs", $my_best));
+    door_broadcast($DOOR_NAME, "$info{'handle'} won a fishing duel against $opponent!")
+      if $my_best > 10;
+  } elsif ($opp_best > $my_best) {
+    writeline($config{'errorcolor'} . " $opponent wins! -" . _bc_money($bet) . $RST, 1);
+    door_send_message($DOOR_NAME, $opponent,
+      "You beat $info{'handle'} in a fishing duel! Your best was bigger.");
+  } else {
+    $g->{money} += $bet;
+    writeline($config{'systemcolor'} . " TIE! Bet refunded." . $RST, 1);
+  }
+
+  door_session_destroy($DOOR_NAME, $session->{id});
+  writeline("", 1);
   door_pause();
 }
 

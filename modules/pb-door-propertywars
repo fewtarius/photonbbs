@@ -1,0 +1,1898 @@
+#!/usr/bin/perl
+#
+# PhotonBBS Door: Property Wars
+# A multiplayer property trading board game
+#
+# Inspired by BSD Games monop (BSD 3-clause license)
+# Original: Copyright (c) 1980, 1993 The Regents of the University of California
+# PhotonBBS adaptation: Original Perl implementation for BBS door game system
+#
+# 2-6 players, roll dice, buy property, build houses, collect rent.
+# Last player standing wins. Supports live multiplayer via sessions.
+#
+
+my $DOOR_NAME = "propertywars";
+
+# ============================================================================
+# BOARD DATA
+# ============================================================================
+
+# Square types
+my $SQ_GO      = 0;
+my $SQ_PROP    = 1;
+my $SQ_RR      = 2;
+my $SQ_UTIL    = 3;
+my $SQ_CHEST   = 4;
+my $SQ_CHANCE  = 5;
+my $SQ_TAX     = 6;
+my $SQ_GOTOJAIL= 7;
+my $SQ_JAIL    = 8;
+my $SQ_PARKING = 9;
+
+# Color groups
+my @COLORS = ('Purple','Lt Blue','Violet','Orange','Red','Yellow','Green','Dk Blue');
+my @COLOR_CODES;
+
+# House costs per color group (index matches @COLORS)
+my @HOUSE_COST = (50, 50, 100, 100, 150, 150, 200, 200);
+
+# Player tokens for board display
+my @TOKENS = ('1', '2', '3', '4', '5', '6');
+
+# Board: 40 squares
+# [name, type, group_idx(-1=none), cost, rent[0..5] (0houses,1h,2h,3h,4h,hotel)]
+my @BOARD = (
+  ["GO",                 $SQ_GO,      -1,   0, []],
+  ["Mediterranean Ave",  $SQ_PROP,     0,  60, [2,10,30,90,160,250]],
+  ["Community Chest",    $SQ_CHEST,   -1,   0, []],
+  ["Baltic Ave",         $SQ_PROP,     0,  60, [4,20,60,180,320,450]],
+  ["Income Tax",         $SQ_TAX,     -1, 200, []],
+  ["Reading Railroad",   $SQ_RR,      -1, 200, []],
+  ["Oriental Ave",       $SQ_PROP,     1, 100, [6,30,90,270,400,550]],
+  ["Chance",             $SQ_CHANCE,  -1,   0, []],
+  ["Vermont Ave",        $SQ_PROP,     1, 100, [6,30,90,270,400,550]],
+  ["Connecticut Ave",    $SQ_PROP,     1, 120, [8,40,100,300,450,600]],
+  ["Just Visiting",      $SQ_JAIL,    -1,   0, []],
+  ["St. Charles Place",  $SQ_PROP,     2, 140, [10,50,150,450,625,750]],
+  ["Electric Company",   $SQ_UTIL,    -1, 150, []],
+  ["States Ave",         $SQ_PROP,     2, 140, [10,50,150,450,625,750]],
+  ["Virginia Ave",       $SQ_PROP,     2, 160, [12,60,180,500,700,900]],
+  ["Pennsylvania RR",    $SQ_RR,      -1, 200, []],
+  ["St. James Place",    $SQ_PROP,     3, 180, [14,70,200,550,750,950]],
+  ["Community Chest",    $SQ_CHEST,   -1,   0, []],
+  ["Tennessee Ave",      $SQ_PROP,     3, 180, [14,70,200,550,750,950]],
+  ["New York Ave",       $SQ_PROP,     3, 200, [16,80,220,600,800,1000]],
+  ["Free Parking",       $SQ_PARKING, -1,   0, []],
+  ["Kentucky Ave",       $SQ_PROP,     4, 220, [18,90,250,700,875,1050]],
+  ["Chance",             $SQ_CHANCE,  -1,   0, []],
+  ["Indiana Ave",        $SQ_PROP,     4, 220, [18,90,250,700,875,1050]],
+  ["Illinois Ave",       $SQ_PROP,     4, 240, [20,100,300,750,925,1100]],
+  ["B&O Railroad",       $SQ_RR,      -1, 200, []],
+  ["Atlantic Ave",       $SQ_PROP,     5, 260, [22,110,330,800,975,1150]],
+  ["Ventnor Ave",        $SQ_PROP,     5, 260, [22,110,330,800,975,1150]],
+  ["Water Works",        $SQ_UTIL,    -1, 150, []],
+  ["Marvin Gardens",     $SQ_PROP,     5, 280, [24,120,360,850,1025,1200]],
+  ["Go To Jail",         $SQ_GOTOJAIL,-1,   0, []],
+  ["Pacific Ave",        $SQ_PROP,     6, 300, [26,130,390,900,1100,1275]],
+  ["N. Carolina Ave",    $SQ_PROP,     6, 300, [26,130,390,900,1100,1275]],
+  ["Community Chest",    $SQ_CHEST,   -1,   0, []],
+  ["Pennsylvania Ave",   $SQ_PROP,     6, 320, [28,150,450,1000,1200,1400]],
+  ["Short Line RR",      $SQ_RR,      -1, 200, []],
+  ["Chance",             $SQ_CHANCE,  -1,   0, []],
+  ["Park Place",         $SQ_PROP,     7, 350, [35,175,500,1100,1300,1500]],
+  ["Luxury Tax",         $SQ_TAX,     -1, 100, []],
+  ["Boardwalk",          $SQ_PROP,     7, 400, [50,200,600,1400,1700,2000]],
+);
+
+# Which squares belong to each color group
+my @GROUP_SQUARES = (
+  [1, 3],          # Purple
+  [6, 8, 9],       # Lt Blue
+  [11, 13, 14],    # Violet
+  [16, 18, 19],    # Orange
+  [21, 23, 24],    # Red
+  [26, 27, 29],    # Yellow
+  [31, 32, 34],    # Green
+  [37, 39],        # Dk Blue
+);
+
+# Railroad squares
+my @RR_SQUARES = (5, 15, 25, 35);
+
+# Utility squares
+my @UTIL_SQUARES = (12, 28);
+
+# Short names for board display (max 4 chars)
+my @SHORT_NAMES = (
+  "GO", "Med", "CC", "Blt", "Tax", "RdR", "Ori", "Ch?", "Vmt", "Cnt",
+  "Jal", "StC", "Elc", "Sta", "Vir", "PnR", "StJ", "CC", "Ten", "NYA",
+  "FP", "Ken", "Ch?", "Ind", "Ill", "BOR", "Atl", "Ven", "Wtr", "Mar",
+  "GTJ", "Pac", "NCa", "CC", "Pnn", "ShR", "Ch?", "Prk", "Lux", "Bwk",
+);
+
+# 2-char abbreviations for board cells (every square gets a unique label)
+my @SQ_ABBREV = (
+  "GO","MA","CC","BA","Tx","RR","OR","Ch","VT","CT",
+  "JL","SC","EC","SA","VA","RR","SJ","CC","TN","NY",
+  "FP","KY","Ch","IN","IL","RR","AT","VN","WW","MG",
+  "GJ","PA","NC","CC","PN","RR","Ch","PP","Lx","BW",
+);
+
+# Community Chest cards: [message, action, value]
+my @CHEST_CARDS = (
+  ["Bank error in your favor. Collect \$200.",          "money",   200],
+  ["Doctor's fee. Pay \$50.",                           "money",   -50],
+  ["Go to Jail. Go directly to Jail.",                  "jail",      0],
+  ["Holiday fund matures. Receive \$100.",              "money",   100],
+  ["Income tax refund. Collect \$20.",                  "money",    20],
+  ["Life insurance matures. Collect \$100.",            "money",   100],
+  ["Pay hospital fees of \$100.",                       "money",  -100],
+  ["Pay school fees of \$50.",                          "money",   -50],
+  ["Receive \$25 consultancy fee.",                     "money",    25],
+  ["You are assessed for street repair.\n  \$40 per house. \$115 per hotel.", "tax", 40],
+  ["You have won second prize in a beauty contest.\n  Collect \$10.", "money", 10],
+  ["You inherit \$100.",                                "money",   100],
+  ["Advance to GO. Collect \$200.",                     "move",      0],
+  ["Get Out of Jail Free.",                             "gojf",      0],
+  ["Grand Opera Night. Collect \$50 from each player.", "collect",  50],
+  ["Sale of stock. You get \$50.",                      "money",    50],
+);
+
+# Chance cards
+my @CHANCE_CARDS = (
+  ["Advance to GO. Collect \$200.",                     "move",      0],
+  ["Advance to Illinois Ave.",                          "move",     24],
+  ["Advance to St. Charles Place.",                     "move",     11],
+  ["Advance to nearest Railroad.\n  Pay owner twice the rental.", "nearrr", 0],
+  ["Advance to nearest Railroad.\n  Pay owner twice the rental.", "nearrr", 0],
+  ["Advance to nearest Utility.\n  Pay 10x dice if owned.",       "nearutil", 0],
+  ["Bank pays you dividend of \$50.",                   "money",    50],
+  ["Get Out of Jail Free.",                             "gojf",      0],
+  ["Go back 3 spaces.",                                 "back",      3],
+  ["Go to Jail. Go directly to Jail.",                  "jail",      0],
+  ["Pay each player \$50.",                             "payall",   50],
+  ["Pay poor tax of \$15.",                             "money",   -15],
+  ["Take a trip to Reading Railroad.",                  "move",      5],
+  ["Take a walk on the Boardwalk.",                     "move",     39],
+  ["You are assessed for street repair.\n  \$25 per house. \$100 per hotel.", "tax", 25],
+  ["Your building loan matures. Collect \$150.",        "money",   150],
+);
+
+# ============================================================================
+# ACTION LOG
+# ============================================================================
+
+sub _pw_log {
+  my ($g, $msg) = @_;
+  push @{$g->{action_log}}, $msg;
+  # Keep last 30 entries
+  if (@{$g->{action_log}} > 30) {
+    splice @{$g->{action_log}}, 0, @{$g->{action_log}} - 30;
+  }
+}
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+sub propertywars_main {
+  iamat($info{'handle'}, "Playing Property Wars");
+  door_broker_connect($DOOR_NAME, "door-$DOOR_NAME-lobby");
+
+  # Init color codes (must happen after config is loaded)
+  # Match classic board game colors using raw ANSI codes
+  @COLOR_CODES = (
+    $MAG,  # Purple (Mediterranean, Baltic) - dark magenta/brown
+    $BCN,  # Lt Blue (Oriental, Vermont, Connecticut)
+    $BMG,  # Violet/Pink (St. Charles, States, Virginia)
+    $YLW,  # Orange (St. James, Tennessee, New York)
+    $BRD,  # Red (Kentucky, Indiana, Illinois)
+    $BYL,  # Yellow (Atlantic, Ventnor, Marvin Gardens)
+    $BGN,  # Green (Pacific, N. Carolina, Pennsylvania)
+    $BBL,  # Dark Blue (Park Place, Boardwalk)
+  );
+
+  my $playing = 1;
+  while ($playing) {
+    door_clear();
+    writeline("", 1);
+    writeline($config{'themecolor'} . "         P R O P E R T Y   W A R S" . $RST, 1);
+    writeline($config{'linecolor'}  . "       -----------------------------------" . $RST, 1);
+    writeline($config{'systemcolor'} . "     Roll dice, buy property, bankrupt your rivals!" . $RST, 1);
+    writeline("", 1);
+
+    door_show_messages($DOOR_NAME);
+
+    # Show incoming lobby chat
+    my @chat = door_chat_poll($DOOR_NAME);
+    for my $m (@chat) {
+      writeline($config{'linecolor'} . "  " . $m . $RST, 1);
+    }
+
+    my @online = door_get_online_players($DOOR_NAME);
+    if (@online) {
+      my $others = join(", ", map { $config{'usercolor'} . $_ . $RST } @online);
+      writeline($config{'datacolor'} . "  Also here: " . $others, 1);
+      writeline("", 1);
+    }
+
+    # Check for sessions to join
+    my $sessions = door_session_list($DOOR_NAME);
+    if ($sessions && @$sessions) {
+      writeline($config{'themecolor'} . "  Open games:" . $RST, 1);
+      for my $s (@$sessions) {
+        my $pcount = scalar @{$s->{players} // []};
+        writeline("  " . $config{'datacolor'} . "  $s->{host}'s game ($pcount/$s->{data}{max_players} players)" . $RST, 1);
+      }
+      writeline("", 1);
+    }
+
+    my $choice = door_menu([
+      ['N', 'New Game (solo + AI)'],
+      ['M', 'Multiplayer Game'],
+      ['J', 'Join Game'],
+      ['S', 'High Scores'],
+      ['C', 'Lobby Chat'],
+      ['Q', 'Quit'],
+    ], "What'll it be");
+
+    if ($choice eq 'N') {
+      _pw_new_game(0);
+    } elsif ($choice eq 'M') {
+      _pw_new_game(1);
+    } elsif ($choice eq 'J') {
+      _pw_join_game();
+    } elsif ($choice eq 'S') {
+      door_show_scores($DOOR_NAME, "Property Wars Moguls", "Net Worth");
+      door_pause();
+    } elsif ($choice eq 'C') {
+      door_chat_input($DOOR_NAME);
+    } elsif ($choice eq 'Q') {
+      $playing = 0;
+    }
+  }
+
+  door_broker_disconnect();
+  iamat($info{'handle'}, "Left Property Wars");
+}
+
+# ============================================================================
+# GAME SETUP
+# ============================================================================
+
+sub _pw_new_game {
+  my ($multiplayer) = @_;
+
+  door_clear();
+  writeline($config{'themecolor'} . " New Game Setup" . $RST, 1);
+  door_hrule(40);
+  writeline("", 1);
+
+  my $num = door_getnum("How many total players (2-6):", 6);
+  $num = 2 if $num < 2;
+  $num = 6 if $num > 6;
+
+  my $num_humans = 1;
+  my $session_id;
+
+  if ($multiplayer) {
+    $num_humans = door_getnum("How many human players (1-$num):", $num);
+    $num_humans = 1 if $num_humans < 1;
+  }
+
+  # Initialize game state
+  my %game;
+  $game{num_players} = $num;
+  $game{current}     = 0;
+  $game{turn_num}    = 0;
+  $game{doubles}     = 0;
+  $game{over}        = 0;
+  $game{action_log}  = [];
+  $game{session_id}  = undef;
+
+  # Initialize players
+  $game{players} = [];
+  $game{players}[0] = {
+    name     => $info{'handle'},
+    type     => 'human',
+    money    => 1500,
+    loc      => 0,
+    in_jail  => 0,
+    gojf     => 0,
+    bankrupt => 0,
+    props    => {},
+  };
+
+  # Wait for human players if multiplayer
+  if ($multiplayer && $num_humans > 1) {
+    my $session = door_session_create($DOOR_NAME, {
+      max_players => $num_humans,
+      game_state  => { game_size => $num },
+    });
+    unless ($session) {
+      writeline($config{'errorcolor'} . " Could not create game session." . $RST, 1);
+      door_pause();
+      return;
+    }
+    $game{session_id} = $session->{id};
+
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " Waiting for " . ($num_humans - 1) .
+      " player(s) to join..." . $RST, 1);
+    writeline($config{'datacolor'} . " Press A to fill with AI, Q to cancel." . $RST, 1);
+    writeline("", 1);
+
+    my $result = door_session_wait($DOOR_NAME, $session->{id}, {
+      min_players => $num_humans,
+      timeout     => 120,
+      fill_key    => 'A',
+      cancel_key  => 'Q',
+    });
+
+    if (!$result || $result->{cancelled}) {
+      door_session_destroy($DOOR_NAME, $session->{id});
+      return;
+    }
+
+    # Add joined humans
+    my @joined = @{$result->{players} // []};
+    for my $i (1 .. $#joined) {
+      $game{players}[$i] = {
+        name     => $joined[$i],
+        type     => 'human',
+        money    => 1500,
+        loc      => 0,
+        in_jail  => 0,
+        gojf     => 0,
+        bankrupt => 0,
+        props    => {},
+      };
+    }
+    $num_humans = scalar @joined;
+  }
+
+  # Fill remaining with AI
+  my @ai_names = ('Morgan', 'Carnegie', 'Rockefeller', 'Vanderbilt', 'Astor');
+  my $ai_idx = 0;
+  for my $i (scalar @{$game{players}} .. $num - 1) {
+    $game{players}[$i] = {
+      name     => $ai_names[$ai_idx++ % scalar @ai_names],
+      type     => 'ai',
+      money    => 1500,
+      loc      => 0,
+      in_jail  => 0,
+      gojf     => 0,
+      bankrupt => 0,
+      props    => {},
+    };
+  }
+
+  # Initialize board ownership
+  $game{owners} = {};    # square_idx => player_idx
+  $game{houses} = {};    # square_idx => num_houses (5=hotel)
+  $game{mortgaged} = {}; # square_idx => 1
+
+  # Shuffle card decks
+  $game{chest_deck} = [_pw_shuffle(0 .. $#CHEST_CARDS)];
+  $game{chance_deck} = [_pw_shuffle(0 .. $#CHANCE_CARDS)];
+  $game{chest_idx} = 0;
+  $game{chance_idx} = 0;
+
+  # Determine play order by dice roll
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Rolling for play order..." . $RST, 1);
+  my @rolls;
+  for my $i (0 .. $num - 1) {
+    my $r = int(rand(6)) + 1 + int(rand(6)) + 1;
+    push @rolls, [$i, $r];
+    my $name = $game{players}[$i]{name};
+    writeline("  " . $config{'datacolor'} . "$name rolled $r" . $RST, 1);
+  }
+  @rolls = sort { $b->[1] <=> $a->[1] } @rolls;
+  $game{play_order} = [map { $_->[0] } @rolls];
+  $game{current} = $game{play_order}[0];
+
+  writeline("", 1);
+  writeline($config{'usercolor'} . " $game{players}[$game{current}]{name} goes first!" . $RST, 1);
+  _pw_log(\%game, "$game{players}[$game{current}]{name} goes first (rolled $rolls[0][1])");
+  door_pause();
+
+  # Track which player index is THIS human (for rendering during AI turns)
+  $game{human_pidx} = 0;
+  $game{num_humans} = $num_humans;
+
+  # Join game-specific broker room for multiplayer sync
+  if ($game{session_id} && $num_humans > 1) {
+    door_game_room_join($DOOR_NAME, $game{session_id});
+    # Broadcast initial state so joiners can initialize
+    _pw_broadcast_state(\%game);
+  }
+
+  # Start game loop
+  _pw_game_loop(\%game);
+
+  # Clean up session
+  if ($game{session_id}) {
+    door_session_destroy($DOOR_NAME, $game{session_id});
+  }
+}
+
+sub _pw_join_game {
+  my $sessions = door_session_list($DOOR_NAME);
+  if (!$sessions || !@$sessions) {
+    writeline($config{'systemcolor'} . " No open games to join." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline("", 1);
+  my $idx = 1;
+  for my $s (@$sessions) {
+    my $pcount = scalar @{$s->{players} // []};
+    my $game_size = $s->{game_state}{game_size} // $s->{max_players} // '?';
+    writeline("  " . $config{'promptcolor'} . "$idx" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "$s->{host}'s game ($pcount humans, $game_size total)" . $RST, 1);
+    $idx++;
+  }
+  writeline("", 1);
+  my $pick = door_getnum("Join which game (0=cancel):", scalar @$sessions);
+  return if $pick <= 0 || $pick > scalar @$sessions;
+
+  my $session = $sessions->[$pick - 1];
+  my $joined = door_session_join($DOOR_NAME, $session->{id});
+  unless ($joined) {
+    writeline($config{'errorcolor'} . " Couldn't join - game may have started." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline($config{'usercolor'} . " Joined $session->{host}'s game!" . $RST, 1);
+  writeline($config{'systemcolor'} . " Waiting for game to start..." . $RST, 1);
+
+  # Wait for game to start (host broadcasts initial state)
+  door_game_room_join($DOOR_NAME, $session->{id});
+
+  my $game_state;
+  my $timeout = 180;
+  my $deadline = time() + $timeout;
+  while (time() < $deadline) {
+    my ($states, $chats) = door_game_state_recv($DOOR_NAME);
+    for my $c (@$chats) {
+      writeline($config{'linecolor'} . " $c" . $RST, 1);
+    }
+    if (@$states) {
+      $game_state = $states->[-1];  # Take latest
+      last;
+    }
+    # Also poll session file for status change
+    my $s = door_session_poll($DOOR_NAME, $session->{id});
+    if ($s && $s->{status} eq 'playing' && $s->{game_state}) {
+      $game_state = $s->{game_state};
+      last;
+    }
+    select(undef, undef, undef, 1);
+  }
+
+  unless ($game_state) {
+    writeline($config{'errorcolor'} . " Game didn't start in time." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  # Build local game hash from received state
+  my %game;
+  $game{session_id} = $session->{id};
+  $game{over} = 0;
+
+  # Find our player index
+  my $my_name = lc($info{'handle'});
+  my $my_pidx = 0;
+  for my $i (0 .. $#{$game_state->{players}}) {
+    if (lc($game_state->{players}[$i]{name}) eq $my_name) {
+      $my_pidx = $i;
+      last;
+    }
+  }
+  $game{human_pidx} = $my_pidx;
+  $game{num_humans} = scalar grep { $_->{type} eq 'human' } @{$game_state->{players}};
+
+  # Initialize player objects
+  $game{players} = [];
+  for my $sp (@{$game_state->{players}}) {
+    push @{$game{players}}, {
+      name     => $sp->{name},
+      type     => $sp->{type},
+      money    => $sp->{money} // 1500,
+      loc      => $sp->{loc} // 0,
+      in_jail  => $sp->{in_jail} // 0,
+      gojf     => $sp->{gojf} // 0,
+      bankrupt => $sp->{bankrupt} // 0,
+      props    => $sp->{props} // {},
+    };
+  }
+
+  $game{num_players} = scalar @{$game{players}};
+  $game{current}     = $game_state->{current} // 0;
+  $game{turn_num}    = $game_state->{turn_num} // 0;
+  $game{doubles}     = $game_state->{doubles} // 0;
+  $game{action_log}  = $game_state->{action_log} // [];
+  $game{owners}      = $game_state->{owners} // {};
+  $game{houses}      = $game_state->{houses} // {};
+  $game{mortgaged}   = $game_state->{mortgaged} // {};
+  $game{play_order}  = $game_state->{play_order} // [0 .. $game{num_players} - 1];
+
+  # Card decks (host manages, joiner doesn't need them)
+  $game{chest_deck}  = [_pw_shuffle(0 .. $#CHEST_CARDS)];
+  $game{chance_deck} = [_pw_shuffle(0 .. $#CHANCE_CARDS)];
+  $game{chest_idx}   = 0;
+  $game{chance_idx}  = 0;
+
+  # Enter the game loop
+  _pw_game_loop(\%game);
+}
+
+# ============================================================================
+# GAME LOOP
+# ============================================================================
+
+sub _pw_game_loop {
+  my ($g) = @_;
+  my $is_mp = $g->{session_id} && $g->{num_humans} > 1;
+  my $my_pidx = $g->{human_pidx} // 0;
+
+  while (!$g->{over}) {
+    my $pidx = $g->{current};
+    my $p = $g->{players}[$pidx];
+
+    # Skip bankrupt players
+    if ($p->{bankrupt}) {
+      _pw_next_player($g);
+      next;
+    }
+
+    $g->{turn_num}++;
+
+    if ($p->{type} eq 'human') {
+      if ($is_mp && $pidx != $my_pidx) {
+        # Another human's turn - wait for state update
+        _pw_draw_status($g, $my_pidx);
+        writeline($config{'systemcolor'} . " Waiting for " . $p->{name} . "..." . $RST, 1);
+        my $updated = _pw_wait_for_state($g);
+        if ($updated) {
+          # Merge updated state
+          _pw_merge_state($g, $updated);
+        }
+      } else {
+        # Our turn
+        _pw_human_turn($g, $pidx);
+        # Broadcast state in multiplayer
+        _pw_broadcast_state($g) if $is_mp;
+      }
+    } else {
+      # AI turn - only host (player 0) runs AI
+      if (!$is_mp || $my_pidx == 0) {
+        _pw_ai_turn($g, $pidx);
+        _pw_broadcast_state($g) if $is_mp;
+      } else {
+        # Non-host waits for state update from host
+        my $updated = _pw_wait_for_state($g);
+        _pw_merge_state($g, $updated) if $updated;
+      }
+      # Show board after AI turn so human can see what happened
+      _pw_draw_status($g, $my_pidx);
+      writeline($config{'linecolor'} . " " . $p->{name} . "'s turn..." . $RST, 1);
+      select(undef, undef, undef, 1.2);
+    }
+
+    # Check for winner
+    my @alive = grep { !$g->{players}[$_]{bankrupt} } 0 .. $#{$g->{players}};
+    if (@alive == 1) {
+      $g->{over} = 1;
+      my $winner = $g->{players}[$alive[0]];
+      door_clear();
+      writeline("", 1);
+      writeline($config{'usercolor'} . " $winner->{name} WINS Property Wars!" . $RST, 1);
+      writeline("", 1);
+      my $net = _pw_net_worth($g, $alive[0]);
+      writeline($config{'datacolor'} . " Net worth: " . door_money($net) . $RST, 1);
+      writeline("", 1);
+      if ($winner->{type} eq 'human') {
+        door_submit_score($DOOR_NAME, $net, { turns => $g->{turn_num} });
+        door_log_activity($DOOR_NAME, "$winner->{name} won Property Wars with " . door_money($net));
+        door_broadcast($DOOR_NAME, "$winner->{name} won Property Wars with " . door_money($net) . "!");
+      }
+      door_pause();
+      last;
+    }
+
+    # Safety valve: max 500 turns
+    if ($g->{turn_num} > 500) {
+      $g->{over} = 1;
+      writeline($config{'systemcolor'} . " Game ended after 500 turns." . $RST, 1);
+      my @sorted = sort { _pw_net_worth($g, $b) <=> _pw_net_worth($g, $a) } @alive;
+      my $winner = $g->{players}[$sorted[0]];
+      my $net = _pw_net_worth($g, $sorted[0]);
+      writeline($config{'usercolor'} . " $winner->{name} wins by net worth (" . door_money($net) . ")!" . $RST, 1);
+      if ($winner->{type} eq 'human') {
+        door_submit_score($DOOR_NAME, $net, { turns => $g->{turn_num} });
+        door_log_activity($DOOR_NAME, "$winner->{name} won Property Wars with " . door_money($net));
+      }
+      door_pause();
+      last;
+    }
+
+    _pw_next_player($g) unless $g->{over};
+  }
+}
+
+# ============================================================================
+# MULTIPLAYER STATE SYNC
+# ============================================================================
+
+# Serialize game state for transmission
+sub _pw_serialize_state {
+  my ($g) = @_;
+  # Extract only the essential game state (skip non-serializable stuff)
+  return {
+    current    => $g->{current},
+    turn_num   => $g->{turn_num},
+    doubles    => $g->{doubles},
+    over       => $g->{over},
+    action_log => $g->{action_log},
+    owners     => $g->{owners},
+    houses     => $g->{houses},
+    mortgaged  => $g->{mortgaged},
+    players    => [map {{
+      name     => $_->{name},
+      type     => $_->{type},
+      money    => $_->{money},
+      loc      => $_->{loc},
+      in_jail  => $_->{in_jail},
+      gojf     => $_->{gojf},
+      bankrupt => $_->{bankrupt},
+      props    => $_->{props},
+    }} @{$g->{players}}],
+    play_order => $g->{play_order},
+  };
+}
+
+# Broadcast game state to all players via broker
+sub _pw_broadcast_state {
+  my ($g) = @_;
+  return unless $g->{session_id};
+  my $state = _pw_serialize_state($g);
+  door_game_state_send($DOOR_NAME, $state);
+  # Also save to session file as backup
+  door_session_update($DOOR_NAME, $g->{session_id}, { game_state => $state });
+}
+
+# Wait for a state update from another player (blocking with timeout)
+# Returns the new state hashref or undef on timeout
+sub _pw_wait_for_state {
+  my ($g) = @_;
+  my $timeout = 120;
+  my $deadline = time() + $timeout;
+  my $my_pidx = $g->{human_pidx} // 0;
+  my $last_turn = $g->{turn_num};
+
+  while (time() < $deadline) {
+    my ($states, $chats) = door_game_state_recv($DOOR_NAME);
+
+    # Show chat
+    for my $c (@$chats) {
+      writeline($config{'linecolor'} . " $c" . $RST, 1);
+    }
+
+    # Check for state updates
+    for my $s (@$states) {
+      # Accept any state update that advances the game
+      if ($s->{turn_num} > $last_turn || $s->{current} != $g->{current} || $s->{over}) {
+        return $s;
+      }
+    }
+
+    # Brief sleep with input check for chat
+    my $key = "";
+    eval {
+      local $SIG{ALRM} = sub { die "timeout\n"; };
+      alarm(1);
+      $key = waitkey("", 1);
+      alarm(0);
+    };
+    alarm(0);
+
+    if ($key && lc($key) eq 'c') {
+      door_chat_input($DOOR_NAME);
+      # Redraw status
+      _pw_draw_status($g, $my_pidx);
+      writeline($config{'systemcolor'} . " Waiting..." . $RST, 1);
+    }
+  }
+
+  return undef;  # timeout
+}
+
+# Merge received state into local game state
+sub _pw_merge_state {
+  my ($g, $state) = @_;
+  return unless $state;
+  $g->{current}    = $state->{current}    if defined $state->{current};
+  $g->{turn_num}   = $state->{turn_num}   if defined $state->{turn_num};
+  $g->{doubles}    = $state->{doubles}    if defined $state->{doubles};
+  $g->{over}       = $state->{over}       if defined $state->{over};
+  $g->{action_log} = $state->{action_log} if $state->{action_log};
+  $g->{owners}     = $state->{owners}     if $state->{owners};
+  $g->{houses}     = $state->{houses}     if $state->{houses};
+  $g->{mortgaged}  = $state->{mortgaged}  if $state->{mortgaged};
+  $g->{play_order} = $state->{play_order} if $state->{play_order};
+
+  # Update player data
+  if ($state->{players}) {
+    for my $i (0 .. $#{$state->{players}}) {
+      my $sp = $state->{players}[$i];
+      my $gp = $g->{players}[$i];
+      next unless $sp && $gp;
+      $gp->{money}    = $sp->{money};
+      $gp->{loc}      = $sp->{loc};
+      $gp->{in_jail}  = $sp->{in_jail};
+      $gp->{gojf}     = $sp->{gojf};
+      $gp->{bankrupt} = $sp->{bankrupt};
+      $gp->{props}    = $sp->{props} if $sp->{props};
+    }
+  }
+}
+
+sub _pw_next_player {
+  my ($g) = @_;
+  my $order = $g->{play_order};
+  my $cur_idx;
+  for my $i (0 .. $#$order) {
+    if ($order->[$i] == $g->{current}) {
+      $cur_idx = $i;
+      last;
+    }
+  }
+
+  for my $tries (1 .. scalar @$order) {
+    $cur_idx = ($cur_idx + 1) % scalar @$order;
+    my $next = $order->[$cur_idx];
+    unless ($g->{players}[$next]{bankrupt}) {
+      $g->{current} = $next;
+      $g->{doubles} = 0;
+      return;
+    }
+  }
+}
+
+# ============================================================================
+# DISPLAY - BOARD VISUALIZATION
+# ============================================================================
+
+sub _pw_draw_status {
+  my ($g, $pidx) = @_;
+
+  door_clear();
+
+  my $h  = boxchar('horizontal');
+  my $vl = $config{'linecolor'} . boxchar('vertical') . $RST;
+  my $FW = 60;
+
+  # Line 1: Title + turn + current player's money
+  my $cp = $g->{players}[$pidx];
+  writeline($config{'themecolor'} . " Property Wars" .
+    $config{'systemcolor'} . "  Turn " .
+    $config{'datacolor'} . $g->{turn_num} .
+    $config{'systemcolor'} . "  " . door_money($cp->{money}) .
+    ($cp->{in_jail} > 0 ? $config{'errorcolor'} . "  JAIL" : "") . $RST, 1);
+  door_hrule($FW);
+
+  # Player summary: one line per player, compact
+  for my $i (0 .. $#{$g->{players}}) {
+    my $p = $g->{players}[$i];
+    next if $p->{bankrupt};
+    my $marker = ($i == $pidx) ? ">" : " ";
+    my $nc = ($i == $pidx) ? $config{'usercolor'} : $config{'datacolor'};
+    my $loc_name = $BOARD[$p->{loc}][0];
+    $loc_name = substr($loc_name, 0, 16) if length($loc_name) > 16;
+    my $nprops = scalar keys %{$p->{props}};
+    my $houses = 0; my $hotels = 0;
+    for my $s (keys %{$p->{props}}) {
+      my $hc = $g->{houses}{$s} // 0;
+      if ($hc == 5) { $hotels++; } else { $houses += $hc; }
+    }
+    my $bld = "${nprops}p";
+    $bld .= " ${houses}h" if $houses;
+    $bld .= " ${hotels}H" if $hotels;
+    my $jail = $p->{in_jail} > 0 ? $config{'errorcolor'} . " JAIL" . $RST : "";
+    writeline(sprintf(" %s%s%s%s%-10s %s%-7s %s%-5s %s%s%s",
+      $nc, $marker, $config{'promptcolor'}, $TOKENS[$i],
+      $p->{name},
+      $config{'themecolor'}, door_money($p->{money}),
+      $config{'datacolor'}, $bld,
+      $config{'systemcolor'}, $loc_name,
+      $jail . $RST), 1);
+  }
+  door_hrule($FW);
+
+  # Split layout: Square board on left (22 chars) | menu+actions on right
+  # The board is a 11x11 representation of the 40 squares
+  # Top:    squares 0-10 (GO to Jail)
+  # Right:  squares 11-19 (right side going down)
+  # Bottom: squares 20-30 (Free Parking to Go To Jail, reversed)
+  # Left:   squares 31-39 (left side going up)
+
+  my @board_lines = _pw_render_board($g);
+  my @right_lines;
+
+  # Right side: commands then action log
+  push @right_lines, $config{'promptcolor'} . "[R]" . $config{'usercolor'} . "oll " .
+    $config{'promptcolor'} . "[P]" . $config{'usercolor'} . "rops " .
+    $config{'promptcolor'} . "[B]" . $config{'usercolor'} . "uild";
+  push @right_lines, $config{'promptcolor'} . "[M]" . $config{'usercolor'} . "ort " .
+    $config{'promptcolor'} . "[T]" . $config{'usercolor'} . "rade " .
+    $config{'promptcolor'} . "[C]" . $config{'usercolor'} . "hat";
+  push @right_lines, $config{'promptcolor'} . "[Q]" . $config{'usercolor'} . "uit";
+  push @right_lines, "";
+
+  # Action log fills remaining right-side lines
+  my @log = @{$g->{action_log} // []};
+  my $log_space = @board_lines - scalar @right_lines;
+  $log_space = 0 if $log_space < 0;
+  my @recent = @log > $log_space ? @log[-$log_space..-1] : @log;
+  for my $entry (@recent) {
+    my $display = length($entry) > 34 ? substr($entry, 0, 31) . "..." : $entry;
+    push @right_lines, $config{'linecolor'} . $display;
+  }
+
+  # Chat
+  my @chat = door_chat_poll($DOOR_NAME);
+  for my $m (@chat) {
+    my $display = length($m) > 34 ? substr($m, 0, 31) . "..." : $m;
+    push @right_lines, $config{'linecolor'} . $display;
+  }
+
+  # Combine board and right columns
+  my $max_lines = @board_lines > @right_lines ? scalar @board_lines : scalar @right_lines;
+  for my $i (0 .. $max_lines - 1) {
+    my $lpart = $board_lines[$i] // ("  " . (" " x 22));
+    my $rpart = $right_lines[$i] // "";
+    writeline($lpart . " " . $vl . " " . $rpart . $RST, 1);
+  }
+
+  writeline("", 1);
+}
+
+sub _pw_render_board {
+  my ($g) = @_;
+  # Render a square board: 11 columns x 11 rows
+  # Each cell is 2 chars wide
+  # Top row:    squares 0(GO), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10(Jail)
+  # Right col:  squares 11, 12, 13, 14, 15, 16, 17, 18, 19
+  # Bottom row: squares 20(FP), (reversed) 29, 28, 27, 26, 25, 24, 23, 22, 21, 30(GTJ)
+  # Left col:   (reversed) 39, 38, 37, 36, 35, 34, 33, 32, 31
+
+  my @lines;
+
+  # Top row: GO 1 2 3 4 5 6 7 8 9 JL
+  my $top = " ";
+  for my $sq (0 .. 10) {
+    $top .= _pw_sq_cell($g, $sq);
+  }
+  push @lines, $top;
+
+  # Middle rows: left square | spaces | right square
+  # Left side goes 39, 38, 37, 36, 35, 34, 33, 32, 31 (top to bottom)
+  # Right side goes 11, 12, 13, 14, 15, 16, 17, 18, 19 (top to bottom)
+  for my $row (0 .. 8) {
+    my $left_sq  = 39 - $row;  # 39, 38, 37, ...
+    my $right_sq = 11 + $row;  # 11, 12, 13, ...
+    my $line = " " . _pw_sq_cell($g, $left_sq);
+    $line .= "                  "; # 18 spaces for 9 empty cells
+    $line .= _pw_sq_cell($g, $right_sq);
+    push @lines, $line;
+  }
+
+  # Bottom row: FP 29 28 27 26 25 24 23 22 21 GTJ
+  my $bot = " ";
+  $bot .= _pw_sq_cell($g, 20); # Free Parking
+  for my $i (reverse 21 .. 29) {
+    $bot .= _pw_sq_cell($g, $i);
+  }
+  $bot .= _pw_sq_cell($g, 30); # Go To Jail
+  push @lines, $bot;
+
+  return @lines;
+}
+
+sub _pw_sq_cell {
+  my ($g, $sq) = @_;
+  # 2-char cell for each square
+  # Check for player tokens first
+  for my $i (0 .. $#{$g->{players}}) {
+    next if $g->{players}[$i]{bankrupt};
+    if ($g->{players}[$i]{loc} == $sq) {
+      return $config{'promptcolor'} . $TOKENS[$i] . " " . $RST;
+    }
+  }
+
+  my $type = $BOARD[$sq][1];
+  my $abbr = $SQ_ABBREV[$sq];
+
+  # Owned property: show ownership indicator
+  if ($type == $SQ_PROP || $type == $SQ_RR || $type == $SQ_UTIL) {
+    if (exists $g->{owners}{$sq}) {
+      my $oi = $g->{owners}{$sq};
+      my $c = ($oi == 0) ? $config{'usercolor'} : $config{'errorcolor'};
+      my $hc = $g->{houses}{$sq} // 0;
+      if ($hc == 5) { return $c . "HH" . $RST; }
+      if ($hc > 0)  { return $c . $hc . "h" . $RST; }
+      return $c . lc($abbr) . $RST;
+    }
+  }
+
+  # Color for special square types
+  if ($type == $SQ_GO)       { return $BGN . $abbr . $RST; }
+  if ($type == $SQ_JAIL)     { return $WHT . $abbr . $RST; }
+  if ($type == $SQ_PARKING)  { return $WHT . $abbr . $RST; }
+  if ($type == $SQ_GOTOJAIL) { return $BRD . $abbr . $RST; }
+  if ($type == $SQ_TAX)      { return $BWH . $abbr . $RST; }
+  if ($type == $SQ_CHEST)    { return $CYN . $abbr . $RST; }
+  if ($type == $SQ_CHANCE)   { return $RED . $abbr . $RST; }
+  if ($type == $SQ_RR)       { return $BWH . $abbr . $RST; }
+  if ($type == $SQ_UTIL)     { return $BWH . $abbr . $RST; }
+
+  # Unowned property: show abbreviation in group color
+  my $gi = $BOARD[$sq][2];
+  if ($gi >= 0) {
+    return $COLOR_CODES[$gi] . $abbr . $RST;
+  }
+  return $config{'linecolor'} . $abbr . $RST;
+}
+
+# ============================================================================
+# HUMAN TURN
+# ============================================================================
+
+sub _pw_human_turn {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+
+  my $turn_done = 0;
+  while (!$turn_done && !$g->{over}) {
+    _pw_draw_status($g, $pidx);
+
+    # In jail?
+    if ($p->{in_jail} > 0) {
+      $turn_done = _pw_jail_turn($g, $pidx);
+      next;
+    }
+
+    # Commands shown in board display, single-key input
+    writeline($config{'promptcolor'} . " > " . $RST);
+    my $cmd = uc(waitkey(""));
+    writeline("", 1);
+
+    if ($cmd eq 'R') {
+      $turn_done = _pw_roll_and_move($g, $pidx);
+    } elsif ($cmd eq 'P') {
+      _pw_show_properties($g, $pidx);
+      door_pause();
+    } elsif ($cmd eq 'B') {
+      _pw_buy_houses($g, $pidx);
+    } elsif ($cmd eq 'M') {
+      _pw_mortgage_menu($g, $pidx);
+    } elsif ($cmd eq 'T') {
+      _pw_trade_menu($g, $pidx);
+    } elsif ($cmd eq 'C') {
+      door_chat_input($DOOR_NAME);
+    } elsif ($cmd eq 'Q') {
+      if (door_yesno("Really quit? You'll go bankrupt.")) {
+        $p->{bankrupt} = 1;
+        _pw_liquidate($g, $pidx, -1);
+        _pw_log($g, "$p->{name} resigned from the game");
+        $turn_done = 1;
+      }
+    }
+  }
+}
+
+# ============================================================================
+# AI TURN (with narration)
+# ============================================================================
+
+sub _pw_ai_turn {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+
+  # Jail handling
+  if ($p->{in_jail} > 0) {
+    if ($p->{gojf} > 0) {
+      $p->{gojf}--;
+      $p->{in_jail} = 0;
+      _pw_log($g, "$p->{name} used Get Out of Jail Free card");
+    } elsif ($p->{money} >= 50 && ($p->{in_jail} >= 3 || $p->{money} > 500)) {
+      $p->{money} -= 50;
+      $p->{in_jail} = 0;
+      _pw_log($g, "$p->{name} paid \$50 bail");
+    } else {
+      my ($r1, $r2) = (int(rand(6))+1, int(rand(6))+1);
+      if ($r1 == $r2) {
+        $p->{in_jail} = 0;
+        _pw_log($g, "$p->{name} rolled doubles ($r1+$r2) to escape jail");
+        _pw_do_move($g, $pidx, $r1 + $r2);
+        _pw_ai_land($g, $pidx);
+      } else {
+        $p->{in_jail}++;
+        if ($p->{in_jail} > 3) {
+          $p->{money} -= 50;
+          $p->{in_jail} = 0;
+          _pw_log($g, "$p->{name} forced to pay \$50 bail (3 turns)");
+        } else {
+          _pw_log($g, "$p->{name} failed to roll doubles in jail");
+        }
+      }
+      return;
+    }
+  }
+
+  # Roll and move
+  my ($r1, $r2) = (int(rand(6))+1, int(rand(6))+1);
+  my $total = $r1 + $r2;
+  my $doubles = ($r1 == $r2);
+  $g->{doubles} = $doubles ? $g->{doubles} + 1 : 0;
+
+  if ($g->{doubles} >= 3) {
+    _pw_goto_jail($g, $pidx);
+    _pw_log($g, "$p->{name} rolled 3 doubles - Go to Jail!");
+    return;
+  }
+
+  my $old_loc = $p->{loc};
+  _pw_do_move($g, $pidx, $total);
+  my $sq = $BOARD[$p->{loc}];
+  _pw_log($g, "$p->{name} rolled $total -> $sq->[0]" .
+    ($doubles ? " (doubles!)" : ""));
+
+  # Handle landing
+  _pw_ai_land($g, $pidx);
+
+  # AI auto-buy if affordable (keep $200 reserve)
+  my $sq_idx = $p->{loc};
+  $sq = $BOARD[$sq_idx];
+  if (($sq->[1] == $SQ_PROP || $sq->[1] == $SQ_RR || $sq->[1] == $SQ_UTIL) &&
+      !exists $g->{owners}{$sq_idx} && $p->{money} > $sq->[3] + 200) {
+    $g->{owners}{$sq_idx} = $pidx;
+    $p->{money} -= $sq->[3];
+    $p->{props}{$sq_idx} = 1;
+    _pw_log($g, "$p->{name} bought $sq->[0] for " . door_money($sq->[3]));
+  }
+
+  # AI build houses if has monopoly and money
+  my $built = _pw_ai_build($g, $pidx);
+
+  # Roll again on doubles
+  if ($doubles && !$p->{bankrupt} && $p->{in_jail} == 0) {
+    _pw_ai_turn($g, $pidx);
+  }
+}
+
+sub _pw_ai_land {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+  my $sq_idx = $p->{loc};
+  my $sq = $BOARD[$sq_idx];
+  my $type = $sq->[1];
+
+  if ($type == $SQ_PROP || $type == $SQ_RR || $type == $SQ_UTIL) {
+    if (exists $g->{owners}{$sq_idx} && $g->{owners}{$sq_idx} != $pidx && !$g->{mortgaged}{$sq_idx}) {
+      my $rent = _pw_calc_rent($g, $sq_idx);
+      my $owner = $g->{players}[$g->{owners}{$sq_idx}];
+      _pw_pay($g, $pidx, $g->{owners}{$sq_idx}, $rent);
+      _pw_log($g, "$p->{name} paid " . door_money($rent) . " rent to $owner->{name}");
+    }
+  } elsif ($type == $SQ_TAX) {
+    my $tax = $sq->[3];
+    $p->{money} -= $tax;
+    _pw_log($g, "$p->{name} paid " . door_money($tax) . " tax");
+    _pw_check_bankrupt($g, $pidx, -1);
+  } elsif ($type == $SQ_GOTOJAIL) {
+    _pw_goto_jail($g, $pidx);
+    _pw_log($g, "$p->{name} sent to Jail!");
+  } elsif ($type == $SQ_CHEST) {
+    _pw_ai_draw_card($g, $pidx, 'chest');
+  } elsif ($type == $SQ_CHANCE) {
+    _pw_ai_draw_card($g, $pidx, 'chance');
+  }
+}
+
+sub _pw_ai_draw_card {
+  my ($g, $pidx, $deck_type) = @_;
+  my $p = $g->{players}[$pidx];
+
+  my ($cards, $idx_key);
+  if ($deck_type eq 'chest') {
+    $cards = \@CHEST_CARDS;
+    $idx_key = 'chest_idx';
+  } else {
+    $cards = \@CHANCE_CARDS;
+    $idx_key = 'chance_idx';
+  }
+
+  my $deck = $deck_type eq 'chest' ? $g->{chest_deck} : $g->{chance_deck};
+  my $card_idx = $deck->[$g->{$idx_key}];
+  $g->{$idx_key} = ($g->{$idx_key} + 1) % scalar @$deck;
+  my $card = $cards->[$card_idx];
+
+  my $msg = $card->[0];
+  $msg =~ s/\n.*//s; # First line only for log
+  _pw_log($g, "$p->{name}: $msg");
+
+  _pw_apply_card($g, $pidx, $card, $deck_type);
+}
+
+sub _pw_ai_build {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+  my $total_built = 0;
+
+  for my $gi (0 .. $#GROUP_SQUARES) {
+    next unless _pw_has_monopoly($g, $pidx, $gi);
+    my $hcost = $HOUSE_COST[$gi];
+    my @sqs = @{$GROUP_SQUARES[$gi]};
+    my $built = 1;
+    while ($built && $p->{money} > $hcost + 200) {
+      $built = 0;
+      my $min_h = 5;
+      for my $s (@sqs) {
+        my $h = $g->{houses}{$s} // 0;
+        $min_h = $h if $h < $min_h;
+      }
+      for my $s (@sqs) {
+        my $h = $g->{houses}{$s} // 0;
+        if ($h < 5 && $h <= $min_h && $p->{money} > $hcost + 200) {
+          $g->{houses}{$s} = $h + 1;
+          $p->{money} -= $hcost;
+          $built = 1;
+          $total_built++;
+          my $what = ($h + 1 == 5) ? "hotel" : "house";
+          _pw_log($g, "$p->{name} built $what on $BOARD[$s][0]");
+          last;
+        }
+      }
+    }
+  }
+  return $total_built;
+}
+
+# ============================================================================
+# MOVEMENT & LANDING (Human)
+# ============================================================================
+
+sub _pw_roll_and_move {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+
+  my $r1 = int(rand(6)) + 1;
+  my $r2 = int(rand(6)) + 1;
+  my $doubles = ($r1 == $r2);
+  $g->{doubles} = $doubles ? $g->{doubles} + 1 : 0;
+
+  writeline("", 1);
+  writeline($config{'datacolor'} . " Rolled: $r1 + $r2 = " .
+    $config{'usercolor'} . ($r1+$r2) .
+    ($doubles ? $config{'errorcolor'} . " DOUBLES!" : "") . $RST, 1);
+
+  if ($g->{doubles} >= 3) {
+    writeline($config{'errorcolor'} . " Three doubles! Go to Jail!" . $RST, 1);
+    _pw_goto_jail($g, $pidx);
+    _pw_log($g, "$p->{name} rolled 3 doubles - Go to Jail!");
+    door_pause();
+    return 1;
+  }
+
+  _pw_do_move($g, $pidx, $r1 + $r2);
+  _pw_land_on($g, $pidx);
+  _pw_log($g, "$p->{name} rolled " . ($r1+$r2) . " -> " . $BOARD[$p->{loc}][0]);
+
+  if ($p->{bankrupt}) { return 1; }
+
+  # Doubles = roll again
+  if ($doubles && $p->{in_jail} == 0) {
+    writeline($config{'themecolor'} . " Doubles! Roll again." . $RST, 1);
+    door_pause();
+    return 0;
+  }
+
+  door_pause();
+  return 1;
+}
+
+sub _pw_do_move {
+  my ($g, $pidx, $spaces) = @_;
+  my $p = $g->{players}[$pidx];
+  my $old = $p->{loc};
+  $p->{loc} = ($p->{loc} + $spaces) % 40;
+
+  # Passed GO?
+  if ($p->{loc} < $old && $spaces > 0) {
+    $p->{money} += 200;
+    if ($p->{type} eq 'human') {
+      writeline($config{'usercolor'} . " Passed GO! Collect \$200." . $RST, 1);
+    }
+    _pw_log($g, "$p->{name} passed GO (+\$200)");
+  }
+}
+
+sub _pw_land_on {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+  my $sq_idx = $p->{loc};
+  my $sq = $BOARD[$sq_idx];
+
+  writeline($config{'themecolor'} . " Landed on: " .
+    $config{'usercolor'} . $sq->[0] . $RST, 1);
+
+  my $type = $sq->[1];
+
+  if ($type == $SQ_PROP || $type == $SQ_RR || $type == $SQ_UTIL) {
+    if (!exists $g->{owners}{$sq_idx}) {
+      writeline($config{'datacolor'} . " Price: " . door_money($sq->[3]) . $RST, 1);
+      if ($p->{money} >= $sq->[3]) {
+        if (door_yesno("Buy $sq->[0] for " . door_money($sq->[3]) . "?")) {
+          $g->{owners}{$sq_idx} = $pidx;
+          $p->{money} -= $sq->[3];
+          $p->{props}{$sq_idx} = 1;
+          writeline($config{'usercolor'} . " Purchased!" . $RST, 1);
+          _pw_log($g, "$p->{name} bought $sq->[0] for " . door_money($sq->[3]));
+        }
+      } else {
+        writeline($config{'systemcolor'} . " You can't afford it." . $RST, 1);
+      }
+    } elsif ($g->{owners}{$sq_idx} == $pidx) {
+      writeline($config{'datacolor'} . " You own this." . $RST, 1);
+    } elsif ($g->{mortgaged}{$sq_idx}) {
+      writeline($config{'datacolor'} . " Property is mortgaged. No rent." . $RST, 1);
+    } else {
+      my $rent = _pw_calc_rent($g, $sq_idx);
+      my $owner = $g->{players}[$g->{owners}{$sq_idx}];
+      writeline($config{'errorcolor'} . " Owned by $owner->{name}. Rent: " .
+        door_money($rent) . $RST, 1);
+      _pw_pay($g, $pidx, $g->{owners}{$sq_idx}, $rent);
+      _pw_log($g, "$p->{name} paid " . door_money($rent) . " rent to $owner->{name}");
+    }
+  } elsif ($type == $SQ_TAX) {
+    my $tax = $sq->[3];
+    writeline($config{'errorcolor'} . " Pay tax: " . door_money($tax) . $RST, 1);
+    $p->{money} -= $tax;
+    _pw_log($g, "$p->{name} paid " . door_money($tax) . " tax");
+    _pw_check_bankrupt($g, $pidx, -1);
+  } elsif ($type == $SQ_GOTOJAIL) {
+    writeline($config{'errorcolor'} . " Go to Jail!" . $RST, 1);
+    _pw_goto_jail($g, $pidx);
+    _pw_log($g, "$p->{name} sent to Jail!");
+  } elsif ($type == $SQ_CHEST) {
+    _pw_draw_card($g, $pidx, 'chest');
+  } elsif ($type == $SQ_CHANCE) {
+    _pw_draw_card($g, $pidx, 'chance');
+  }
+}
+
+# ============================================================================
+# RENT CALCULATION
+# ============================================================================
+
+sub _pw_calc_rent {
+  my ($g, $sq_idx) = @_;
+  my $sq = $BOARD[$sq_idx];
+  my $owner_idx = $g->{owners}{$sq_idx};
+
+  if ($sq->[1] == $SQ_PROP) {
+    my $houses = $g->{houses}{$sq_idx} // 0;
+    my $rent = $sq->[4][$houses];
+    if ($houses == 0 && _pw_has_monopoly($g, $owner_idx, $sq->[2])) {
+      $rent *= 2;
+    }
+    return $rent;
+  } elsif ($sq->[1] == $SQ_RR) {
+    my $count = 0;
+    for my $rr (@RR_SQUARES) {
+      $count++ if defined $g->{owners}{$rr} && $g->{owners}{$rr} == $owner_idx;
+    }
+    return 25 * (2 ** ($count - 1));
+  } elsif ($sq->[1] == $SQ_UTIL) {
+    my $count = 0;
+    for my $u (@UTIL_SQUARES) {
+      $count++ if defined $g->{owners}{$u} && $g->{owners}{$u} == $owner_idx;
+    }
+    my $dice = int(rand(6))+1 + int(rand(6))+1;
+    return $count == 2 ? $dice * 10 : $dice * 4;
+  }
+  return 0;
+}
+
+sub _pw_has_monopoly {
+  my ($g, $pidx, $group_idx) = @_;
+  return 0 if $group_idx < 0 || $group_idx > $#GROUP_SQUARES;
+  for my $s (@{$GROUP_SQUARES[$group_idx]}) {
+    return 0 unless defined $g->{owners}{$s} && $g->{owners}{$s} == $pidx;
+    return 0 if $g->{mortgaged}{$s};
+  }
+  return 1;
+}
+
+# ============================================================================
+# CARDS (shared logic)
+# ============================================================================
+
+sub _pw_apply_card {
+  my ($g, $pidx, $card, $deck_type) = @_;
+  my $p = $g->{players}[$pidx];
+  my $action = $card->[1];
+  my $val = $card->[2];
+
+  if ($action eq 'money') {
+    $p->{money} += $val;
+    _pw_check_bankrupt($g, $pidx, -1) if $val < 0;
+  } elsif ($action eq 'move') {
+    my $old = $p->{loc};
+    $p->{loc} = $val;
+    $p->{money} += 200 if $val < $old;
+    if ($p->{type} eq 'human') {
+      _pw_land_on($g, $pidx);
+    } else {
+      _pw_ai_land($g, $pidx);
+    }
+  } elsif ($action eq 'jail') {
+    _pw_goto_jail($g, $pidx);
+  } elsif ($action eq 'gojf') {
+    $p->{gojf}++;
+  } elsif ($action eq 'collect') {
+    for my $i (0 .. $#{$g->{players}}) {
+      next if $i == $pidx || $g->{players}[$i]{bankrupt};
+      $g->{players}[$i]{money} -= $val;
+      $p->{money} += $val;
+    }
+  } elsif ($action eq 'payall') {
+    for my $i (0 .. $#{$g->{players}}) {
+      next if $i == $pidx || $g->{players}[$i]{bankrupt};
+      $p->{money} -= $val;
+      $g->{players}[$i]{money} += $val;
+    }
+    _pw_check_bankrupt($g, $pidx, -1);
+  } elsif ($action eq 'tax') {
+    my $total = 0;
+    my $hotel_cost = ($deck_type eq 'chest') ? 115 : 100;
+    for my $s (keys %{$p->{props}}) {
+      my $h = $g->{houses}{$s} // 0;
+      if ($h == 5) { $total += $hotel_cost; }
+      else { $total += $h * $val; }
+    }
+    if ($p->{type} eq 'human') {
+      writeline($config{'errorcolor'} . " Assessment: " . door_money($total) . $RST, 1);
+    }
+    $p->{money} -= $total;
+    _pw_check_bankrupt($g, $pidx, -1);
+  } elsif ($action eq 'nearrr') {
+    my $loc = $p->{loc};
+    my $nearest;
+    for my $rr (@RR_SQUARES) {
+      if ($rr > $loc) { $nearest = $rr; last; }
+    }
+    $nearest //= $RR_SQUARES[0];
+    my $old = $p->{loc};
+    $p->{loc} = $nearest;
+    $p->{money} += 200 if $nearest < $old;
+    if (exists $g->{owners}{$nearest} && $g->{owners}{$nearest} != $pidx) {
+      my $rent = _pw_calc_rent($g, $nearest) * 2;
+      if ($p->{type} eq 'human') {
+        writeline($config{'errorcolor'} . " Double rent! " . door_money($rent) . $RST, 1);
+      }
+      _pw_pay($g, $pidx, $g->{owners}{$nearest}, $rent);
+      _pw_log($g, "$p->{name} paid double rent " . door_money($rent));
+    } else {
+      if ($p->{type} eq 'human') {
+        _pw_land_on($g, $pidx);
+      } else {
+        _pw_ai_land($g, $pidx);
+      }
+    }
+  } elsif ($action eq 'nearutil') {
+    my $loc = $p->{loc};
+    my $nearest;
+    for my $u (@UTIL_SQUARES) {
+      if ($u > $loc) { $nearest = $u; last; }
+    }
+    $nearest //= $UTIL_SQUARES[0];
+    my $old = $p->{loc};
+    $p->{loc} = $nearest;
+    $p->{money} += 200 if $nearest < $old;
+    if (exists $g->{owners}{$nearest} && $g->{owners}{$nearest} != $pidx) {
+      my $dice = int(rand(6))+1 + int(rand(6))+1;
+      my $rent = $dice * 10;
+      if ($p->{type} eq 'human') {
+        writeline($config{'errorcolor'} . " Utility rent ($dice x 10): " .
+          door_money($rent) . $RST, 1);
+      }
+      _pw_pay($g, $pidx, $g->{owners}{$nearest}, $rent);
+    } else {
+      if ($p->{type} eq 'human') {
+        _pw_land_on($g, $pidx);
+      } else {
+        _pw_ai_land($g, $pidx);
+      }
+    }
+  } elsif ($action eq 'back') {
+    $p->{loc} = ($p->{loc} - $val) % 40;
+    if ($p->{type} eq 'human') {
+      _pw_land_on($g, $pidx);
+    } else {
+      _pw_ai_land($g, $pidx);
+    }
+  }
+}
+
+sub _pw_draw_card {
+  my ($g, $pidx, $deck_type) = @_;
+  my $p = $g->{players}[$pidx];
+
+  my ($cards, $idx_key);
+  if ($deck_type eq 'chest') {
+    $cards = \@CHEST_CARDS;
+    $idx_key = 'chest_idx';
+  } else {
+    $cards = \@CHANCE_CARDS;
+    $idx_key = 'chance_idx';
+  }
+
+  my $deck = $deck_type eq 'chest' ? $g->{chest_deck} : $g->{chance_deck};
+  my $card_idx = $deck->[$g->{$idx_key}];
+  $g->{$idx_key} = ($g->{$idx_key} + 1) % scalar @$deck;
+  my $card = $cards->[$card_idx];
+
+  writeline("", 1);
+  door_hrule(50);
+  writeline($config{'themecolor'} . " " . ($deck_type eq 'chest' ? "Community Chest" : "Chance") . ":" . $RST, 1);
+  writeline($config{'datacolor'} . " $card->[0]" . $RST, 1);
+  door_hrule(50);
+
+  my $msg = $card->[0];
+  $msg =~ s/\n.*//s;
+  _pw_log($g, "$p->{name}: $msg");
+
+  _pw_apply_card($g, $pidx, $card, $deck_type);
+}
+
+# ============================================================================
+# JAIL
+# ============================================================================
+
+sub _pw_goto_jail {
+  my ($g, $pidx) = @_;
+  $g->{players}[$pidx]{loc} = 10;
+  $g->{players}[$pidx]{in_jail} = 1;
+  $g->{doubles} = 0;
+}
+
+sub _pw_jail_turn {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+
+  writeline($config{'errorcolor'} . " You are in Jail (turn $p->{in_jail}/3)" . $RST, 1);
+  writeline("", 1);
+
+  my @opts;
+  push @opts, ['P', 'Pay $50 Fine'] if $p->{money} >= 50;
+  push @opts, ['C', 'Use Get Out of Jail Free Card'] if $p->{gojf} > 0;
+  push @opts, ['R', 'Roll for Doubles'];
+
+  my $cmd = door_menu(\@opts, "How to escape");
+
+  if ($cmd eq 'P') {
+    $p->{money} -= 50;
+    $p->{in_jail} = 0;
+    writeline($config{'usercolor'} . " Paid \$50. You're free!" . $RST, 1);
+    _pw_log($g, "$p->{name} paid \$50 bail");
+    door_pause();
+    return 0;
+  } elsif ($cmd eq 'C') {
+    $p->{gojf}--;
+    $p->{in_jail} = 0;
+    writeline($config{'usercolor'} . " Used card. You're free!" . $RST, 1);
+    _pw_log($g, "$p->{name} used Get Out of Jail Free card");
+    door_pause();
+    return 0;
+  } elsif ($cmd eq 'R') {
+    my $r1 = int(rand(6))+1;
+    my $r2 = int(rand(6))+1;
+    writeline($config{'datacolor'} . " Rolled: $r1 + $r2" . $RST, 1);
+    if ($r1 == $r2) {
+      writeline($config{'usercolor'} . " Doubles! You're free!" . $RST, 1);
+      $p->{in_jail} = 0;
+      _pw_log($g, "$p->{name} rolled doubles to escape jail");
+      _pw_do_move($g, $pidx, $r1 + $r2);
+      _pw_land_on($g, $pidx);
+    } else {
+      $p->{in_jail}++;
+      if ($p->{in_jail} > 3) {
+        writeline($config{'errorcolor'} . " 3 turns up. Forced to pay \$50." . $RST, 1);
+        $p->{money} -= 50;
+        $p->{in_jail} = 0;
+        _pw_log($g, "$p->{name} forced to pay \$50 bail");
+        _pw_check_bankrupt($g, $pidx, -1);
+      } else {
+        writeline($config{'systemcolor'} . " No doubles. Stay in jail." . $RST, 1);
+        _pw_log($g, "$p->{name} stuck in jail");
+      }
+    }
+    door_pause();
+    return 1;
+  }
+  return 1;
+}
+
+# ============================================================================
+# PAYMENT & BANKRUPTCY
+# ============================================================================
+
+sub _pw_pay {
+  my ($g, $from_idx, $to_idx, $amount) = @_;
+  my $from = $g->{players}[$from_idx];
+  my $to = ($to_idx >= 0) ? $g->{players}[$to_idx] : undef;
+
+  if ($from->{money} >= $amount) {
+    $from->{money} -= $amount;
+    $to->{money} += $amount if $to;
+  } else {
+    _pw_force_raise($g, $from_idx, $amount - $from->{money});
+    if ($from->{money} >= $amount) {
+      $from->{money} -= $amount;
+      $to->{money} += $amount if $to;
+    } else {
+      my $paid = $from->{money};
+      $to->{money} += $paid if $to;
+      $from->{money} = 0;
+      $from->{bankrupt} = 1;
+      _pw_log($g, "$from->{name} is BANKRUPT!");
+      if ($from->{type} eq 'human') {
+        writeline($config{'errorcolor'} . " $from->{name} is BANKRUPT!" . $RST, 1);
+      }
+      _pw_liquidate($g, $from_idx, $to_idx);
+    }
+  }
+}
+
+sub _pw_check_bankrupt {
+  my ($g, $pidx, $creditor) = @_;
+  my $p = $g->{players}[$pidx];
+  if ($p->{money} < 0) {
+    _pw_force_raise($g, $pidx, -$p->{money});
+    if ($p->{money} < 0) {
+      $p->{bankrupt} = 1;
+      _pw_log($g, "$p->{name} is BANKRUPT!");
+      if ($p->{type} eq 'human') {
+        writeline($config{'errorcolor'} . " $p->{name} is BANKRUPT!" . $RST, 1);
+      }
+      _pw_liquidate($g, $pidx, $creditor);
+    }
+  }
+}
+
+sub _pw_force_raise {
+  my ($g, $pidx, $needed) = @_;
+  my $p = $g->{players}[$pidx];
+  for my $s (sort { ($BOARD[$a][3] // 0) <=> ($BOARD[$b][3] // 0) } keys %{$p->{props}}) {
+    last if $p->{money} >= $needed;
+    next if $g->{mortgaged}{$s};
+    if (($g->{houses}{$s} // 0) > 0) {
+      my $gi = $BOARD[$s][2];
+      my $sell_price = $HOUSE_COST[$gi] / 2;
+      while (($g->{houses}{$s} // 0) > 0 && $p->{money} < $needed) {
+        $g->{houses}{$s}--;
+        $p->{money} += $sell_price;
+        _pw_log($g, "$p->{name} sold house on $BOARD[$s][0]");
+      }
+    }
+    if ($p->{money} < $needed && !$g->{mortgaged}{$s}) {
+      $g->{mortgaged}{$s} = 1;
+      $p->{money} += int($BOARD[$s][3] / 2);
+      _pw_log($g, "$p->{name} mortgaged $BOARD[$s][0]");
+    }
+  }
+}
+
+sub _pw_liquidate {
+  my ($g, $pidx, $to_idx) = @_;
+  my $p = $g->{players}[$pidx];
+  for my $s (keys %{$p->{props}}) {
+    if ($to_idx >= 0) {
+      $g->{owners}{$s} = $to_idx;
+      $g->{players}[$to_idx]{props}{$s} = 1;
+      _pw_log($g, "$g->{players}[$to_idx]{name} seized $BOARD[$s][0]");
+    } else {
+      delete $g->{owners}{$s};
+      delete $g->{houses}{$s};
+      delete $g->{mortgaged}{$s};
+    }
+    delete $p->{props}{$s};
+  }
+}
+
+# ============================================================================
+# BUILDING HOUSES
+# ============================================================================
+
+sub _pw_buy_houses {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+
+  my @monops;
+  for my $gi (0 .. $#GROUP_SQUARES) {
+    if (_pw_has_monopoly($g, $pidx, $gi)) {
+      my $can_build = 0;
+      for my $s (@{$GROUP_SQUARES[$gi]}) {
+        $can_build = 1 if ($g->{houses}{$s} // 0) < 5;
+      }
+      push @monops, $gi if $can_build;
+    }
+  }
+
+  if (!@monops) {
+    writeline($config{'systemcolor'} . " No monopolies with room to build." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  door_clear();
+  writeline($config{'themecolor'} . " Build Houses" . $RST, 1);
+  door_hrule(50);
+
+  my $idx = 1;
+  my @choices;
+  for my $gi (@monops) {
+    my $color = $COLORS[$gi];
+    my $cost = $HOUSE_COST[$gi];
+    writeline("  " . $config{'promptcolor'} . "$idx" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "$color" .
+      $config{'datacolor'} . " (\$$cost/house)" . $RST, 1);
+    for my $s (@{$GROUP_SQUARES[$gi]}) {
+      my $h = $g->{houses}{$s} // 0;
+      my $hstr = $h == 5 ? "HOTEL" : "$h houses";
+      writeline("      " . $config{'datacolor'} . "$BOARD[$s][0]: $hstr" . $RST, 1);
+    }
+    push @choices, $gi;
+    $idx++;
+  }
+
+  writeline("", 1);
+  my $pick = door_getnum("Build on which group (0=done):", scalar @choices);
+  return if $pick <= 0 || $pick > scalar @choices;
+
+  my $gi = $choices[$pick - 1];
+  my @sqs = @{$GROUP_SQUARES[$gi]};
+  my $hcost = $HOUSE_COST[$gi];
+
+  for my $s (@sqs) {
+    my $h = $g->{houses}{$s} // 0;
+    next if $h >= 5;
+    my $max_add = 5 - $h;
+    my $afford = int($p->{money} / $hcost);
+    $max_add = $afford if $afford < $max_add;
+    next if $max_add <= 0;
+
+    my $add = door_getnum("$BOARD[$s][0] ($h houses). Add how many (0-$max_add):", $max_add);
+    next if $add <= 0;
+    $add = $max_add if $add > $max_add;
+
+    $g->{houses}{$s} = $h + $add;
+    $p->{money} -= $add * $hcost;
+    my $type = ($h + $add == 5) ? "hotel" : ($add == 1 ? "house" : "houses");
+    writeline($config{'usercolor'} . " Built $add $type on $BOARD[$s][0]." . $RST, 1);
+    _pw_log($g, "$p->{name} built $add $type on $BOARD[$s][0]");
+  }
+  door_pause();
+}
+
+# ============================================================================
+# MORTGAGE
+# ============================================================================
+
+sub _pw_mortgage_menu {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+
+  my @owned = sort { $a <=> $b } keys %{$p->{props}};
+  if (!@owned) {
+    writeline($config{'systemcolor'} . " You don't own any property." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  door_clear();
+  writeline($config{'themecolor'} . " Mortgage/Unmortgage" . $RST, 1);
+  door_hrule(50);
+
+  my $idx = 1;
+  for my $s (@owned) {
+    my $name = $BOARD[$s][0];
+    my $mval = int($BOARD[$s][3] / 2);
+    my $status = $g->{mortgaged}{$s} ? $config{'errorcolor'} . "[MORTGAGED]" :
+                 $config{'datacolor'} . "value " . door_money($mval);
+    writeline("  " . $config{'promptcolor'} . "$idx" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . "$name " . $status . $RST, 1);
+    $idx++;
+  }
+
+  writeline("", 1);
+  my $pick = door_getnum("Toggle which property (0=done):", scalar @owned);
+  return if $pick <= 0 || $pick > scalar @owned;
+
+  my $s = $owned[$pick - 1];
+  if ($g->{mortgaged}{$s}) {
+    my $cost = int($BOARD[$s][3] / 2 * 1.1);
+    if ($p->{money} >= $cost) {
+      $p->{money} -= $cost;
+      delete $g->{mortgaged}{$s};
+      writeline($config{'usercolor'} . " Unmortgaged $BOARD[$s][0] for " .
+        door_money($cost) . $RST, 1);
+      _pw_log($g, "$p->{name} unmortgaged $BOARD[$s][0]");
+    } else {
+      writeline($config{'errorcolor'} . " Can't afford " . door_money($cost) . $RST, 1);
+    }
+  } else {
+    if (($g->{houses}{$s} // 0) > 0) {
+      writeline($config{'errorcolor'} . " Sell houses first!" . $RST, 1);
+    } else {
+      my $val = int($BOARD[$s][3] / 2);
+      $g->{mortgaged}{$s} = 1;
+      $p->{money} += $val;
+      writeline($config{'usercolor'} . " Mortgaged $BOARD[$s][0] for " .
+        door_money($val) . $RST, 1);
+      _pw_log($g, "$p->{name} mortgaged $BOARD[$s][0]");
+    }
+  }
+  door_pause();
+}
+
+# ============================================================================
+# TRADING
+# ============================================================================
+
+sub _pw_trade_menu {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+
+  my @targets;
+  for my $i (0 .. $#{$g->{players}}) {
+    next if $i == $pidx || $g->{players}[$i]{bankrupt};
+    push @targets, $i;
+  }
+
+  if (!@targets) {
+    writeline($config{'systemcolor'} . " No one to trade with." . $RST, 1);
+    door_pause();
+    return;
+  }
+
+  writeline("", 1);
+  my $idx = 1;
+  for my $ti (@targets) {
+    writeline("  " . $config{'promptcolor'} . "$idx" . $config{'themecolor'} . " ... " .
+      $config{'usercolor'} . $g->{players}[$ti]{name} . $RST, 1);
+    $idx++;
+  }
+  my $pick = door_getnum("Trade with whom (0=cancel):", scalar @targets);
+  return if $pick <= 0 || $pick > scalar @targets;
+  my $other_idx = $targets[$pick - 1];
+  my $other = $g->{players}[$other_idx];
+
+  _pw_show_properties($g, $pidx);
+  my $give_sq = door_getnum("Give which property (square # or 0):", 39);
+
+  _pw_show_properties($g, $other_idx);
+  my $want_sq = door_getnum("Want which property (square # or 0):", 39);
+
+  my $cash = door_getamount("Cash to include (+give, -receive):", $p->{money});
+
+  if ($give_sq > 0 && !$p->{props}{$give_sq}) {
+    writeline($config{'errorcolor'} . " You don't own that!" . $RST, 1);
+    door_pause(); return;
+  }
+  if ($want_sq > 0 && !$other->{props}{$want_sq}) {
+    writeline($config{'errorcolor'} . " They don't own that!" . $RST, 1);
+    door_pause(); return;
+  }
+
+  my $accepted = 0;
+  if ($other->{type} eq 'ai') {
+    my $give_val = $give_sq > 0 ? $BOARD[$give_sq][3] : 0;
+    my $want_val = $want_sq > 0 ? $BOARD[$want_sq][3] : 0;
+    $accepted = ($give_val + $cash >= $want_val * 0.8);
+  } else {
+    # Human multiplayer: send trade offer via session
+    $accepted = door_yesno("$other->{name}: Accept trade?");
+  }
+
+  if ($accepted) {
+    if ($give_sq > 0) {
+      delete $p->{props}{$give_sq};
+      $g->{owners}{$give_sq} = $other_idx;
+      $other->{props}{$give_sq} = 1;
+    }
+    if ($want_sq > 0) {
+      delete $other->{props}{$want_sq};
+      $g->{owners}{$want_sq} = $pidx;
+      $p->{props}{$want_sq} = 1;
+    }
+    $p->{money} -= $cash;
+    $other->{money} += $cash;
+    writeline($config{'usercolor'} . " Trade completed!" . $RST, 1);
+    my $gave = $give_sq > 0 ? $BOARD[$give_sq][0] : "nothing";
+    my $got = $want_sq > 0 ? $BOARD[$want_sq][0] : "nothing";
+    _pw_log($g, "$p->{name} traded $gave for $got with $other->{name}");
+  } else {
+    writeline($config{'systemcolor'} . " Trade declined." . $RST, 1);
+  }
+  door_pause();
+}
+
+# ============================================================================
+# DISPLAY
+# ============================================================================
+
+sub _pw_show_properties {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+  my @owned = sort { $a <=> $b } keys %{$p->{props}};
+
+  writeline("", 1);
+  writeline($config{'themecolor'} . " $p->{name}'s Properties:" . $RST, 1);
+
+  if (!@owned) {
+    writeline($config{'systemcolor'} . "  None" . $RST, 1);
+    return;
+  }
+
+  for my $s (@owned) {
+    my $sq = $BOARD[$s];
+    my $h = $g->{houses}{$s} // 0;
+    my $hstr = "";
+    if ($sq->[1] == $SQ_PROP) {
+      $hstr = $h == 5 ? " [HOTEL]" : $h > 0 ? " [$h houses]" : "";
+    }
+    my $mstr = $g->{mortgaged}{$s} ? " (MORTGAGED)" : "";
+    my $gi = $sq->[2];
+    my $color = ($gi >= 0) ? $COLOR_CODES[$gi] : $config{'datacolor'};
+    writeline("  " . $config{'promptcolor'} . sprintf("%2d", $s) . " " .
+      $color . $sq->[0] . $config{'datacolor'} . $hstr . $mstr . $RST, 1);
+  }
+  writeline("", 1);
+}
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+sub _pw_net_worth {
+  my ($g, $pidx) = @_;
+  my $p = $g->{players}[$pidx];
+  my $worth = $p->{money};
+  for my $s (keys %{$p->{props}}) {
+    $worth += $BOARD[$s][3];
+    my $h = $g->{houses}{$s} // 0;
+    if ($h > 0 && $BOARD[$s][2] >= 0) {
+      $worth += $h * $HOUSE_COST[$BOARD[$s][2]];
+    }
+  }
+  return $worth;
+}
+
+sub _pw_shuffle {
+  my @arr = @_;
+  for my $i (reverse 1 .. $#arr) {
+    my $j = int(rand($i + 1));
+    @arr[$i, $j] = @arr[$j, $i];
+  }
+  return @arr;
+}
+
+1;

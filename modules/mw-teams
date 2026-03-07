@@ -1,0 +1,515 @@
+#!/usr/bin/perl
+#
+# mw-teams - MechWars Guild System
+# Guild creation, management, membership, war declarations
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# Shared guild state
+my %_MW_GUILDS;
+my $_MW_GUILDS_LOADED = 0;
+
+use constant {
+    MW_GUILD_CREATE_COST => 2000,   # SV to create a guild
+    MW_GUILD_MAX_MEMBERS => 20,
+};
+
+# ============================================================================
+# LOAD / SAVE
+# ============================================================================
+
+sub mw_teams_load {
+    return if $_MW_GUILDS_LOADED;
+    my $data = door_load_shared('mechwars', 'guilds.dat');
+    if ($data && ref($data) eq 'HASH') {
+        %_MW_GUILDS = %$data;
+    }
+    $_MW_GUILDS_LOADED = 1;
+}
+
+sub mw_teams_save {
+    door_save_shared('mechwars', 'guilds.dat', \%_MW_GUILDS);
+}
+
+# ============================================================================
+# GUILD MENU
+# ============================================================================
+
+sub mw_guild_menu {
+    my ($player) = @_;
+
+    while (1) {
+        door_header("Guild Operations");
+
+        if ($player->{guild} && $_MW_GUILDS{$player->{guild}}) {
+            my $g       = $_MW_GUILDS{$player->{guild}};
+            my $is_lead = ($g->{leader} // '') eq $player->{handle};
+
+            writeline("  " . $config{'usercolor'} . $g->{name} . $RST, 1);
+            writeline("  " . $config{'themecolor'} . "Leader:  " .
+                      $config{'datacolor'} . $g->{leader} . $RST, 1);
+            writeline("  " . $config{'themecolor'} . "Members: " .
+                      $config{'datacolor'} . scalar(@{$g->{members}}) . "/" .
+                      MW_GUILD_MAX_MEMBERS . $RST, 1);
+
+            if (@{$g->{members}}) {
+                writeline("  " . $config{'datacolor'} . join(", ", @{$g->{members}}) . $RST, 1);
+            }
+
+            if (@{$g->{at_war} // []}) {
+                writeline("  " . $config{'errorcolor'} . "At war with: " .
+                          join(", ", @{$g->{at_war}}) . $RST, 1);
+            }
+
+            writeline("", 1);
+            writeline("  " . $config{'promptcolor'} . "M" .
+                      $config{'themecolor'} . " ... Send guild message", 1);
+
+            if ($is_lead) {
+                writeline("  " . $config{'promptcolor'} . "I" .
+                          $config{'themecolor'} . " ... Invite player to guild", 1);
+                writeline("  " . $config{'promptcolor'} . "K" .
+                          $config{'themecolor'} . " ... Kick member", 1);
+                writeline("  " . $config{'promptcolor'} . "W" .
+                          $config{'themecolor'} . " ... Declare war on a guild", 1);
+                writeline("  " . $config{'promptcolor'} . "P" .
+                          $config{'themecolor'} . " ... Make peace with a guild", 1);
+                writeline("  " . $config{'promptcolor'} . "T" .
+                          $config{'themecolor'} . " ... Transfer leadership", 1);
+            }
+
+            writeline("  " . $config{'promptcolor'} . "L" .
+                      $config{'themecolor'} . " ... Leave guild", 1);
+        } else {
+            # Not in a guild
+            writeline("  " . $config{'linecolor'} . "You are not in a guild." . $RST, 1);
+            writeline("", 1);
+            _mw_list_guilds();
+            writeline("  " . $config{'promptcolor'} . "C" .
+                      $config{'themecolor'} . " ... Create guild (" .
+                      $config{'datacolor'} . MW_GUILD_CREATE_COST . " SV" .
+                      $config{'themecolor'} . ")", 1);
+            writeline("  " . $config{'promptcolor'} . "J" .
+                      $config{'themecolor'} . " ... Join existing guild", 1);
+        }
+
+        writeline("  " . $config{'promptcolor'} . "S" .
+                  $config{'themecolor'} . " ... Guild standings / leaderboard", 1);
+        writeline("  " . $config{'promptcolor'} . "Q" .
+                  $config{'themecolor'} . " ... Back", 1);
+        writeline("", 1);
+        writeline($config{'promptcolor'} . "  Command: " . $RST);
+        my $cmd = uc(waitkey(""));
+        writeline("", 1);
+
+        if ($cmd eq 'Q') { last; }
+        elsif ($cmd eq 'C' && !$player->{guild}) { _mw_create_guild($player); }
+        elsif ($cmd eq 'J' && !$player->{guild}) { _mw_join_guild($player); }
+        elsif ($cmd eq 'L' && $player->{guild})  { _mw_leave_guild($player); last if !$player->{guild}; }
+        elsif ($cmd eq 'M' && $player->{guild})  { _mw_guild_message($player); }
+        elsif ($cmd eq 'S')                       { _mw_guild_standings(); door_pause(); }
+
+        if ($player->{guild} && $_MW_GUILDS{$player->{guild}}) {
+            my $g = $_MW_GUILDS{$player->{guild}};
+            my $is_lead = ($g->{leader} // '') eq $player->{handle};
+            if ($is_lead) {
+                if    ($cmd eq 'I') { _mw_invite_member($player, $g); }
+                elsif ($cmd eq 'K') { _mw_kick_member($player, $g); }
+                elsif ($cmd eq 'W') { _mw_declare_war($player, $g); }
+                elsif ($cmd eq 'P') { _mw_make_peace($player, $g); }
+                elsif ($cmd eq 'T') { _mw_transfer_lead($player, $g); }
+            }
+        }
+
+        mw_teams_save();
+    }
+}
+
+# ============================================================================
+# GUILD MANAGEMENT
+# ============================================================================
+
+sub _mw_create_guild {
+    my ($player) = @_;
+
+    if ($player->{starvacs} < MW_GUILD_CREATE_COST) {
+        writeline($config{'errorcolor'} . " Need " . MW_GUILD_CREATE_COST . " SV to form a guild." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    writeline($config{'systemcolor'} . " Guild name: " . $RST);
+    my $name = getline('text', 25, '', 1);
+    return unless $name && length($name) >= 2;
+    $name =~ s/[^a-zA-Z0-9 _'-]//g;
+
+    my $gid = lc($name);
+    $gid =~ s/\s+/-/g;
+    $gid =~ s/[^a-z0-9-]//g;
+
+    if ($_MW_GUILDS{$gid}) {
+        writeline($config{'errorcolor'} . " Guild name already taken." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    $player->{starvacs} -= MW_GUILD_CREATE_COST;
+    $_MW_GUILDS{$gid} = {
+        id      => $gid,
+        name    => $name,
+        leader  => $player->{handle},
+        members => [$player->{handle}],
+        created => time(),
+        at_war  => [],
+        msg_board => [],
+    };
+
+    $player->{guild}      = $gid;
+    $player->{guild_name} = $name;
+
+    mw_teams_save();
+    writeline($config{'systemcolor'} . " Guild '$name' founded!" . $RST, 1);
+    door_broadcast('mechwars',
+        $player->{handle} . " founded the " . $name . " guild!");
+    door_log_activity('mechwars',
+        $player->{handle} . " created guild: $name");
+    door_pause();
+}
+
+sub _mw_join_guild {
+    my ($player) = @_;
+
+    my @gids = sort keys %_MW_GUILDS;
+    unless (@gids) {
+        writeline($config{'linecolor'} . " No guilds exist yet." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my $num = 1;
+    for my $gid (@gids) {
+        my $g = $_MW_GUILDS{$gid};
+        writeline("  " . $config{'promptcolor'} . $num .
+                  $config{'themecolor'} . " ... " .
+                  $config{'usercolor'} . $g->{name} .
+                  $config{'datacolor'} . " (leader: " . $g->{leader} . ", " .
+                  scalar(@{$g->{members}}) . " members)" . $RST, 1);
+        $num++;
+    }
+
+    writeline("", 1);
+    writeline($config{'systemcolor'} . " Join which guild? [1-" . scalar(@gids) . ", Q]: " . $RST);
+    my $choice = waitkey("");
+    writeline("", 1);
+    return if uc($choice) eq 'Q';
+    return unless $choice =~ /^\d+$/ && $choice >= 1 && $choice <= scalar(@gids);
+
+    my $gid = $gids[$choice - 1];
+    my $g   = $_MW_GUILDS{$gid};
+
+    if (scalar(@{$g->{members}}) >= MW_GUILD_MAX_MEMBERS) {
+        writeline($config{'errorcolor'} . " Guild is full." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    push @{$g->{members}}, $player->{handle};
+    $player->{guild}      = $gid;
+    $player->{guild_name} = $g->{name};
+
+    mw_teams_save();
+    writeline($config{'systemcolor'} . " Joined " . $g->{name} . "!" . $RST, 1);
+    door_broadcast('mechwars',
+        $player->{handle} . " joined the " . $g->{name} . " guild!");
+    door_pause();
+}
+
+sub _mw_leave_guild {
+    my ($player) = @_;
+
+    return unless $player->{guild} && $_MW_GUILDS{$player->{guild}};
+    return unless door_noyes("Leave " . $_MW_GUILDS{$player->{guild}}{name} . "?");
+
+    my $gid = $player->{guild};
+    my $g   = $_MW_GUILDS{$gid};
+    $g->{members} = [grep { $_ ne $player->{handle} } @{$g->{members}}];
+
+    if (scalar(@{$g->{members}}) == 0) {
+        delete $_MW_GUILDS{$gid};
+        writeline($config{'systemcolor'} . " Guild disbanded (no members left)." . $RST, 1);
+    } elsif (($g->{leader} // '') eq $player->{handle}) {
+        $g->{leader} = $g->{members}[0];
+        writeline($config{'datacolor'} . " Leadership passed to " . $g->{leader} . "." . $RST, 1);
+    }
+
+    $player->{guild}      = undef;
+    $player->{guild_name} = '';
+    mw_teams_save();
+
+    writeline($config{'systemcolor'} . " You have left the guild." . $RST, 1);
+    door_pause();
+}
+
+sub _mw_invite_member {
+    my ($player, $g) = @_;
+
+    writeline($config{'systemcolor'} . " Player handle to invite: " . $RST);
+    my $handle = getline('text', 25, '', 1);
+    return unless $handle && $handle =~ /\S/;
+    $handle =~ s/^\s+|\s+$//g;
+
+    # Check if they exist
+    my $tdata = door_load('mechwars', $handle);
+    unless ($tdata) {
+        writeline($config{'errorcolor'} . " Player not found." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    if ($tdata->{guild}) {
+        writeline($config{'errorcolor'} . " Player is already in a guild." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    if (scalar(@{$g->{members}}) >= MW_GUILD_MAX_MEMBERS) {
+        writeline($config{'errorcolor'} . " Guild is full." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    # Send invitation message
+    door_chat_send('mechwars',
+        "!!! " . $player->{handle} . " invites " . $handle . " to join " . $g->{name} . "!");
+    writeline($config{'systemcolor'} . " Invitation sent to " . $handle . "." . $RST, 1);
+    writeline($config{'datacolor'} . " They can use [J]oin guild to accept." . $RST, 1);
+    door_pause();
+}
+
+sub _mw_kick_member {
+    my ($player, $g) = @_;
+
+    my @members = grep { $_ ne $player->{handle} } @{$g->{members}};
+    unless (@members) {
+        writeline($config{'linecolor'} . " No other members to kick." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my $num = 1;
+    for my $m (@members) {
+        writeline("  " . $config{'promptcolor'} . $num .
+                  $config{'themecolor'} . " ... " . $config{'datacolor'} . $m . $RST, 1);
+        $num++;
+    }
+
+    writeline($config{'systemcolor'} . " Kick which member? [1-" . scalar(@members) . ", Q]: " . $RST);
+    my $choice = waitkey("");
+    writeline("", 1);
+    return if uc($choice) eq 'Q';
+    return unless $choice =~ /^\d+$/ && $choice >= 1 && $choice <= scalar(@members);
+
+    my $target = $members[$choice - 1];
+    $g->{members} = [grep { $_ ne $target } @{$g->{members}}];
+
+    # Clear guild from their save
+    my $tdata = door_load('mechwars', $target);
+    if ($tdata) {
+        $tdata->{guild}      = undef;
+        $tdata->{guild_name} = '';
+        door_save('mechwars', $tdata, $target);
+    }
+
+    mw_teams_save();
+    writeline($config{'systemcolor'} . " $target removed from guild." . $RST, 1);
+    door_pause();
+}
+
+sub _mw_declare_war {
+    my ($player, $g) = @_;
+
+    my @enemies = grep { $_ ne $player->{guild} } keys %_MW_GUILDS;
+    unless (@enemies) {
+        writeline($config{'linecolor'} . " No other guilds to war with." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my $num = 1;
+    for my $eid (@enemies) {
+        my $eg = $_MW_GUILDS{$eid};
+        writeline("  " . $config{'promptcolor'} . $num .
+                  $config{'themecolor'} . " ... " . $config{'datacolor'} . $eg->{name} . $RST, 1);
+        $num++;
+    }
+
+    writeline($config{'systemcolor'} . " Declare war on [1-" . scalar(@enemies) . ", Q]: " . $RST);
+    my $choice = waitkey("");
+    writeline("", 1);
+    return if uc($choice) eq 'Q';
+    return unless $choice =~ /^\d+$/ && $choice >= 1 && $choice <= scalar(@enemies);
+
+    my $target_gid  = $enemies[$choice - 1];
+    my $target_guild = $_MW_GUILDS{$target_gid};
+
+    push @{$g->{at_war}}, $target_gid
+        unless grep { $_ eq $target_gid } @{$g->{at_war}};
+    push @{$target_guild->{at_war}}, $player->{guild}
+        unless grep { $_ eq $player->{guild} } @{$target_guild->{at_war}};
+
+    mw_teams_save();
+    writeline($config{'errorcolor'} . " War declared against " . $target_guild->{name} . "!" . $RST, 1);
+    door_broadcast('mechwars',
+        $g->{name} . " has declared war on " . $target_guild->{name} . "!");
+    door_pause();
+}
+
+sub _mw_make_peace {
+    my ($player, $g) = @_;
+
+    my @wars = @{$g->{at_war} // []};
+    unless (@wars) {
+        writeline($config{'systemcolor'} . " No active wars." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my $num = 1;
+    for my $eid (@wars) {
+        my $eg = $_MW_GUILDS{$eid};
+        writeline("  " . $config{'promptcolor'} . $num .
+                  $config{'themecolor'} . " ... " . $config{'datacolor'} .
+                  ($eg ? $eg->{name} : $eid) . $RST, 1);
+        $num++;
+    }
+
+    writeline($config{'systemcolor'} . " Make peace with [1-" . scalar(@wars) . ", Q]: " . $RST);
+    my $choice = waitkey("");
+    writeline("", 1);
+    return if uc($choice) eq 'Q';
+    return unless $choice =~ /^\d+$/ && $choice >= 1 && $choice <= scalar(@wars);
+
+    my $target_gid = $wars[$choice - 1];
+    $g->{at_war}   = [grep { $_ ne $target_gid } @{$g->{at_war}}];
+    if ($_MW_GUILDS{$target_gid}) {
+        $_MW_GUILDS{$target_gid}{at_war} =
+            [grep { $_ ne $player->{guild} } @{$_MW_GUILDS{$target_gid}{at_war}}];
+    }
+
+    mw_teams_save();
+    writeline($config{'systemcolor'} . " Peace treaty signed." . $RST, 1);
+    door_broadcast('mechwars',
+        $g->{name} . " and " . ($_MW_GUILDS{$target_gid}{name} // $target_gid) . " are at peace.");
+    door_pause();
+}
+
+sub _mw_transfer_lead {
+    my ($player, $g) = @_;
+
+    my @others = grep { $_ ne $player->{handle} } @{$g->{members}};
+    unless (@others) {
+        writeline($config{'linecolor'} . " No other members." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    my $num = 1;
+    for my $m (@others) {
+        writeline("  " . $config{'promptcolor'} . $num .
+                  $config{'themecolor'} . " ... " . $config{'datacolor'} . $m . $RST, 1);
+        $num++;
+    }
+
+    writeline($config{'systemcolor'} . " Transfer to [1-" . scalar(@others) . ", Q]: " . $RST);
+    my $choice = waitkey("");
+    writeline("", 1);
+    return if uc($choice) eq 'Q';
+    return unless $choice =~ /^\d+$/ && $choice >= 1 && $choice <= scalar(@others);
+
+    $g->{leader} = $others[$choice - 1];
+    mw_teams_save();
+    writeline($config{'systemcolor'} . " Leadership transferred to " . $g->{leader} . "." . $RST, 1);
+    door_pause();
+}
+
+sub _mw_guild_message {
+    my ($player) = @_;
+
+    return unless $player->{guild} && $_MW_GUILDS{$player->{guild}};
+    my $g = $_MW_GUILDS{$player->{guild}};
+
+    writeline($config{'promptcolor'} . " Guild message: " . $RST);
+    my $msg = getline('text', 70, '', 1);
+    return unless $msg && $msg =~ /\S/;
+
+    door_chat_send('mechwars',
+        "[" . $g->{name} . "] " . $player->{handle} . ": $msg");
+
+    # Store in guild message board
+    push @{$g->{msg_board}}, {
+        from => $player->{handle},
+        msg  => $msg,
+        time => time(),
+    };
+    # Keep last 20 messages
+    while (scalar(@{$g->{msg_board}}) > 20) {
+        shift @{$g->{msg_board}};
+    }
+
+    mw_teams_save();
+    writeline($config{'systemcolor'} . " Message sent to guild." . $RST, 1);
+    door_pause();
+}
+
+sub _mw_list_guilds {
+    my @gids = sort keys %_MW_GUILDS;
+    if (@gids) {
+        writeline("  " . $config{'datacolor'} . "Active Guilds:" . $RST, 1);
+        for my $gid (@gids) {
+            my $g = $_MW_GUILDS{$gid};
+            writeline("    " . $config{'usercolor'} . $g->{name} .
+                      $config{'themecolor'} . " - Leader: " .
+                      $config{'datacolor'} . $g->{leader} .
+                      $config{'themecolor'} . " (" . scalar(@{$g->{members}}) . " members)" . $RST, 1);
+        }
+        writeline("", 1);
+    }
+}
+
+sub _mw_guild_standings {
+    door_header("Guild Standings");
+
+    my @gids = sort keys %_MW_GUILDS;
+    if (!@gids) {
+        writeline($config{'linecolor'} . " No guilds formed yet." . $RST, 1);
+        return;
+    }
+
+    # Count member kills per guild
+    for my $gid (@gids) {
+        my $g   = $_MW_GUILDS{$gid};
+        my $kills = 0;
+        for my $member (@{$g->{members}}) {
+            my $pd = door_load('mechwars', $member);
+            $kills += ($pd->{kills} // 0) if $pd;
+        }
+        $g->{_total_kills} = $kills;
+    }
+
+    @gids = sort { ($_MW_GUILDS{$b}{_total_kills} // 0) <=> ($_MW_GUILDS{$a}{_total_kills} // 0) } @gids;
+
+    my $rank = 1;
+    for my $gid (@gids) {
+        my $g = $_MW_GUILDS{$gid};
+        writeline("  " . $config{'promptcolor'} . "#$rank" .
+                  $config{'themecolor'} . " ... " .
+                  $config{'usercolor'} . $g->{name} .
+                  $config{'datacolor'} . " (Kills: " . ($g->{_total_kills} // 0) .
+                  ", Members: " . scalar(@{$g->{members}}) . ")" . $RST, 1);
+        $rank++;
+        last if $rank > 10;
+    }
+}
+
+1;

@@ -112,12 +112,14 @@ my $EXPENSIVE_MULT = 4;   # prices multiplied by this when expensive
 # MAIN ENTRY POINT
 # ============================================================================
 
+my $DOOR_NAME = "druglord";
+
 sub druglord_main {
   # Load door library
   # Set iamat for who's online
   iamat($info{'handle'}, "Playing DrugLord");
 
-  door_broker_connect("druglord", "door-druglord-streets");
+  door_broker_connect($DOOR_NAME, "door-druglord-streets");
 
   # Show title screen
   _dl_title_screen();
@@ -202,13 +204,13 @@ sub _dl_init_game {
 # Load/save shared economy state
 sub _dl_load_economy {
   my ($g) = @_;
-  my $econ = door_load_shared("druglord", "economy.dat");
+  my $econ = door_load_shared($DOOR_NAME, "economy.dat");
   $g->{economy} = $econ // { trades => {}, kingpin => "", kingpin_score => 0, turf => {} };
 }
 
 sub _dl_save_economy {
   my ($g) = @_;
-  door_save_shared("druglord", "economy.dat", $g->{economy});
+  door_save_shared($DOOR_NAME, "economy.dat", $g->{economy});
 }
 
 # ============================================================================
@@ -310,6 +312,11 @@ sub _dl_show_status {
     writeline($ev, 1);
   }
   writeline("", 1) if @{$g->{events}};
+  # Show incoming chat from other dealers
+  my @chat = door_chat_poll($DOOR_NAME);
+  for my $m (@chat) {
+    writeline($config{'linecolor'} . "  " . $m . $RST, 1);
+  }
 
   # Drug price list
   writeline($config{'systemcolor'} . sprintf("  %-4s %-12s %10s %8s", "#", "Drug", "Price", "Owned") . $RST, 1);
@@ -771,13 +778,13 @@ sub _dl_trade_menu {
     } elsif ($choice eq 'I') {
       _dl_show_inventory($g);
     } elsif ($choice eq 'C') {
-      door_chat_input("druglord");
+      door_chat_input($DOOR_NAME);
     } elsif ($choice eq 'N') {
       _dl_street_news($g);
     } elsif ($choice eq 'R') {
       _dl_rob_player($g);
     } elsif ($choice eq 'H') {
-      door_show_scores("druglord", "DrugLord High Scores", "Net Worth");
+      door_show_scores($DOOR_NAME, "DrugLord High Scores", "Net Worth");
       door_pause();
       _dl_show_status($g);
     } elsif ($choice eq 'Q') {
@@ -1000,12 +1007,12 @@ sub _dl_jet {
 
 sub _dl_post_news {
   my ($msg) = @_;
-  my $news = door_load_shared("druglord", "news.dat") // { items => [] };
+  my $news = door_load_shared($DOOR_NAME, "news.dat") // { items => [] };
   push @{$news->{items}}, $msg;
   if (scalar @{$news->{items}} > 20) {
     splice @{$news->{items}}, 0, scalar(@{$news->{items}}) - 20;
   }
-  door_save_shared("druglord", "news.dat", $news);
+  door_save_shared($DOOR_NAME, "news.dat", $news);
 }
 
 sub _dl_street_news {
@@ -1015,7 +1022,7 @@ sub _dl_street_news {
   door_hrule(38);
   writeline("", 1);
 
-  my $news = door_load_shared("druglord", "news.dat") // { items => [] };
+  my $news = door_load_shared($DOOR_NAME, "news.dat") // { items => [] };
   my @items = @{$news->{items}};
 
   if (@items) {
@@ -1029,14 +1036,14 @@ sub _dl_street_news {
 
   # Also show who's playing right now
   writeline("", 1);
-  my @online = door_get_online_players("druglord");
+  my @online = door_get_online_players($DOOR_NAME);
   if (@online) {
     writeline($config{'systemcolor'} . "  Active dealers: " .
       join(", ", map { $config{'usercolor'} . $_ . $RST } @online), 1);
   }
 
   # Check for messages from players who robbed/were robbed
-  door_show_messages("druglord");
+  door_show_messages($DOOR_NAME);
 
   writeline("", 1);
   door_pause();
@@ -1056,9 +1063,11 @@ sub _dl_rob_player {
     return;
   }
 
-  # Get list of other players from the all-player list
-  my @all = door_get_all_players("druglord");
+  # Get list of other players - mark who's online
+  my @all = door_get_all_players($DOOR_NAME);
   @all = grep { $_ ne $info{'handle'} } @all;
+  my @online = door_get_online_players($DOOR_NAME);
+  my %online_map = map { lc($_) => 1 } @online;
 
   unless (@all) {
     writeline($config{'errorcolor'} . "  No other dealers to rob." . $RST, 1);
@@ -1073,7 +1082,8 @@ sub _dl_rob_player {
   writeline($config{'systemcolor'} . "  Known dealers on the street:" . $RST, 1);
   my $i = 1;
   for my $p (@all) {
-    writeline($config{'datacolor'} . "  $i. " . $config{'usercolor'} . $p . $RST, 1);
+    my $status = $online_map{lc($p)} ? $config{'usercolor'} . " [ONLINE]" : "";
+    writeline($config{'datacolor'} . "  $i. " . $config{'usercolor'} . $p . $status . $RST, 1);
     $i++;
   }
   writeline("", 1);
@@ -1082,6 +1092,17 @@ sub _dl_rob_player {
   return if $num == 0;
 
   my $target = $all[$num - 1];
+
+  # If target is online, offer live confrontation
+  if ($online_map{lc($target)}) {
+    writeline("", 1);
+    writeline($config{'errorcolor'} . "  $target is on the street right now!" . $RST, 1);
+    if (door_yesno("  Confront them face to face?")) {
+      _dl_live_confrontation($g, $target);
+      return;
+    }
+    writeline($config{'systemcolor'} . "  Going for the sneak attack instead..." . $RST, 1);
+  }
 
   writeline("", 1);
   writeline($config{'systemcolor'} . "  Attempting to rob " . $config{'usercolor'} . $target . $config{'systemcolor'} . "..." . $RST, 1);
@@ -1100,12 +1121,12 @@ sub _dl_rob_player {
     writeline($config{'usercolor'} . "  Score! You grabbed " . door_money($stolen) . " from $target!" . $RST, 1);
 
     # Notify the victim
-    door_send_message("druglord", $target,
+    door_send_message($DOOR_NAME, $target,
       "$info{'handle'} hit you on the street and grabbed " . door_money($stolen) . ". Get them back!");
 
     # Post to street news
     _dl_post_news("$info{'handle'} robbed $target for " . door_money($stolen) . ".");
-    door_broadcast("druglord", "$info{'handle'} hit $target on the street!")
+    door_broadcast($DOOR_NAME, "$info{'handle'} hit $target on the street!")
       if $stolen > 1500;
 
     # Risky business - small health cost
@@ -1123,7 +1144,7 @@ sub _dl_rob_player {
       if ($lost > 0 && $lost <= $g->{cash}) {
         $g->{cash} -= $lost;
         writeline($config{'errorcolor'} . "  They grabbed " . door_money($lost) . " off you!" . $RST, 1);
-        door_send_message("druglord", $target,
+        door_send_message($DOOR_NAME, $target,
           "$info{'handle'} tried to rob you but failed - you took " . door_money($lost) . " from them!");
         _dl_post_news("$info{'handle'} tried to rob $target and got stomped.");
       } else {
@@ -1135,6 +1156,127 @@ sub _dl_rob_player {
   }
 
   $g->{health} = 0 if $g->{health} < 0;
+  door_pause();
+}
+
+# Live confrontation - face-to-face robbery with choices
+sub _dl_live_confrontation {
+  my ($g, $target) = @_;
+
+  iamat($info{'handle'}, "Confronting $target");
+
+  my $session = door_session_create($DOOR_NAME, {
+    max_players => 2,
+    game_state  => {
+      attacker => $info{'handle'},
+      target   => $target,
+      type     => 'confrontation',
+    },
+  });
+
+  door_send_message($DOOR_NAME, $target,
+    "$info{'handle'} is confronting you on the street! Watch your back!");
+
+  my $guns = scalar @{$g->{guns}};
+  my $att_power = $guns * 25 + 30;
+
+  door_clear();
+  writeline($config{'errorcolor'} . "  STREET CONFRONTATION" . $RST, 1);
+  door_hrule(35);
+  writeline($config{'systemcolor'} . "  You step up to " .
+    $config{'usercolor'} . $target . $config{'systemcolor'} . "..." . $RST, 1);
+  writeline("", 1);
+
+  my $round = 0;
+  my $total_stolen = 0;
+  my $total_lost_health = 0;
+
+  while ($round < 3 && $g->{health} > 0) {
+    $round++;
+    writeline($config{'themecolor'} . "  Round $round" . $RST, 1);
+    writeline("", 1);
+
+    my $choice = door_menu([
+      ['G', 'Grab their cash'],
+      ['S', 'Steal their stash'],
+      ['I', 'Intimidate (demand tribute)'],
+      ['R', 'Run away'],
+    ], "Action");
+
+    if ($choice eq 'R') {
+      writeline($config{'systemcolor'} . "  You back off and disappear into the crowd." . $RST, 1);
+      last;
+    }
+
+    # Each action has a success/fail with consequences
+    my $roll = int(rand(100));
+    my $threshold = $att_power + int(rand(20));
+
+    if ($choice eq 'G') {
+      if ($roll < $threshold) {
+        my $grabbed = 500 + int(rand(3000 + $g->{turn} * 100));
+        $g->{cash} += $grabbed;
+        $total_stolen += $grabbed;
+        writeline($config{'usercolor'} . "  Snatched " . door_money($grabbed) . "!" . $RST, 1);
+      } else {
+        my $dmg = 10 + int(rand(20));
+        $g->{health} -= $dmg;
+        $total_lost_health += $dmg;
+        writeline($config{'errorcolor'} . "  They fought back! -$dmg health" . $RST, 1);
+      }
+    } elsif ($choice eq 'S') {
+      if ($roll < $threshold - 10) {
+        # Steal a random drug
+        my $drug_idx = int(rand(scalar @DRUGS));
+        my $amount = 1 + int(rand(5));
+        my $space = 100 - _dl_total_drugs($g);
+        $amount = $space if $amount > $space;
+        if ($amount > 0) {
+          $g->{trenchcoat}[$drug_idx] += $amount;
+          writeline($config{'usercolor'} . "  Grabbed $amount " . $DRUGS[$drug_idx]{name} . "!" . $RST, 1);
+        } else {
+          writeline($config{'systemcolor'} . "  No room in your trenchcoat!" . $RST, 1);
+        }
+      } else {
+        my $dmg = 15 + int(rand(25));
+        $g->{health} -= $dmg;
+        $total_lost_health += $dmg;
+        writeline($config{'errorcolor'} . "  Caught! They stabbed you. -$dmg health" . $RST, 1);
+      }
+    } elsif ($choice eq 'I') {
+      if ($roll < $threshold + 10) {
+        my $tribute = 1000 + int(rand(5000));
+        $g->{cash} += $tribute;
+        $total_stolen += $tribute;
+        writeline($config{'usercolor'} . "  They handed over " . door_money($tribute) . " in tribute!" . $RST, 1);
+        last;  # Intimidation ends the confrontation
+      } else {
+        writeline($config{'errorcolor'} . "  They laughed at you and pulled a knife!" . $RST, 1);
+        my $dmg = 20 + int(rand(30));
+        $g->{health} -= $dmg;
+        $total_lost_health += $dmg;
+        writeline($config{'errorcolor'} . "  -$dmg health" . $RST, 1);
+      }
+    }
+    writeline("", 1);
+  }
+
+  $g->{health} = 0 if $g->{health} < 0;
+
+  writeline("", 1);
+  if ($total_stolen > 0) {
+    writeline($config{'usercolor'} . "  Total take: " . door_money($total_stolen) . $RST, 1);
+    door_send_message($DOOR_NAME, $target,
+      "$info{'handle'} robbed you face to face for " . door_money($total_stolen) . "!");
+    _dl_post_news("$info{'handle'} confronted $target and took " . door_money($total_stolen) . ".");
+    door_broadcast($DOOR_NAME, "$info{'handle'} confronted $target on the street!")
+      if $total_stolen > 3000;
+  }
+  if ($total_lost_health > 0) {
+    writeline($config{'errorcolor'} . "  Health lost: $total_lost_health" . $RST, 1);
+  }
+
+  door_session_destroy($DOOR_NAME, $session->{id}) if $session;
   door_pause();
 }
 
@@ -1176,7 +1318,7 @@ sub _dl_game_over {
   writeline("", 1);
 
   # Submit high score
-  my $scores = door_submit_score("druglord", $net, { days => $g->{turn} - 1 });
+  my $scores = door_submit_score($DOOR_NAME, $net, { days => $g->{turn} - 1 });
 
   # Find player's rank
   my $rank = 0;
@@ -1202,21 +1344,21 @@ sub _dl_game_over {
     my $bc;
     if ($old_kingpin && $old_kingpin ne $info{'handle'}) {
       $bc = "$info{'handle'} has dethroned $old_kingpin as the Kingpin of Drug Lord!";
-      door_broadcast("druglord", $bc);
-      door_send_message("druglord", $old_kingpin, "$info{'handle'} has taken your Kingpin title with " . door_money($net) . " net worth!");
+      door_broadcast($DOOR_NAME, $bc);
+      door_send_message($DOOR_NAME, $old_kingpin, "$info{'handle'} has taken your Kingpin title with " . door_money($net) . " net worth!");
     } else {
       $bc = "$info{'handle'} is the Kingpin of Drug Lord with " . door_money($net) . " net worth!";
-      door_broadcast("druglord", $bc);
+      door_broadcast($DOOR_NAME, $bc);
     }
     _dl_post_news($bc);
   }
 
   # Log to activity feed
-  door_log_activity("druglord", $info{'handle'} . " finished DrugLord with " . door_money($net) . " net worth");
+  door_log_activity($DOOR_NAME, $info{'handle'} . " finished DrugLord with " . door_money($net) . " net worth");
 
   writeline("", 1);
   if (door_yesno("View high scores?")) {
-    door_show_scores("druglord", "DrugLord High Scores", "Net Worth");
+    door_show_scores($DOOR_NAME, "DrugLord High Scores", "Net Worth");
   }
 
   door_pause("Press any key to return to the BBS...");

@@ -1,0 +1,157 @@
+#!/usr/bin/perl
+#
+# mw-bases - MechWars Trading Base Management
+# 1000 trading bases scattered across the 125x125 universe
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# Shared bases state
+my %_MW_BASES;
+my $_MW_BASES_LOADED = 0;
+
+# ============================================================================
+# EMBEDDED BASE NAME LIST (no external file dependency)
+# ============================================================================
+
+my @_MW_BASE_NAMES = (
+    # Prefix words
+    "Alpha", "Beta", "Gamma", "Delta", "Epsilon",
+    "Vega", "Sirius", "Nova", "Proxima", "Sol",
+    "Rigel", "Altair", "Deneb", "Castor", "Pollux",
+    "Arcturus", "Spica", "Antares", "Aldebaran", "Fomalhaut",
+    "Hadar", "Mimosa", "Acrux", "Canopus", "Achernar",
+
+    # Compound names (used as-is)
+    "Starlight Station", "Iron Frontier", "Deep Space Depot",
+    "Nova Trading Post", "Outer Rim Exchange", "Galactic Hub",
+    "The Waystation", "Central Processing", "Mining Outpost 7",
+    "Farpoint Depot", "Crossroads Market", "The Black Market",
+    "Neutron Dock", "Plasma Junction", "Quantum Exchange",
+    "Stardust Trading", "Nebula Port", "Hyperspace Hub",
+    "Void Traders", "Eclipse Station", "Midnight Depot",
+    "Sunrise Market", "Iron Cross Base", "Silver Star Port",
+    "Golden Gate Depot", "The Bazaar", "Frontier Market",
+    "Outer Colony Trade", "Deep Rift Station", "Warp Point Alpha",
+    "Cargo Bay 9", "Supply Depot Zeta", "Merchant's Rest",
+    "The Emporium", "Fuel Depot 7", "Resource Exchange",
+    "Sector Base Prime", "Transit Hub", "Relay Station",
+    "Rogue Base", "Pirate Den", "Black Hole Market",
+);
+
+# Suffixes for generated names
+my @_MW_NAME_SUFFIXES = (
+    "Station", "Depot", "Hub", "Port", "Market", "Exchange",
+    "Outpost", "Base", "Post", "Trading Co.", "Industries",
+    "Yards", "Works", "Center", "Point", "Junction",
+);
+
+# Roman numerals
+my @_MW_NUMERALS = ("", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X");
+
+# ============================================================================
+# LOAD / SAVE
+# ============================================================================
+
+sub mw_bases_load {
+    return if $_MW_BASES_LOADED;
+    my $data = door_load_shared('mechwars', 'bases.dat');
+    if ($data && ref($data) eq 'HASH' && scalar(keys %$data) > 0) {
+        %_MW_BASES = %$data;
+        $_MW_BASES_LOADED = 1;
+        return;
+    }
+    _mw_bases_init();
+    $_MW_BASES_LOADED = 1;
+}
+
+sub mw_bases_save {
+    door_save_shared('mechwars', 'bases.dat', \%_MW_BASES);
+}
+
+sub _mw_bases_init {
+    writeline($config{'systemcolor'} . " Placing trading bases..." . $RST, 1);
+    %_MW_BASES = ();
+
+    my $universe = mw_universe_ref();
+    my %placed;
+
+    for my $id (1 .. MW_MAX_BASES) {
+        my ($x, $y) = mw_random_empty_sector();
+        my $key = "$x,$y";
+
+        # Avoid duplicates
+        my $tries = 0;
+        while ($placed{$key} && $tries < 100) {
+            ($x, $y) = mw_random_empty_sector();
+            $key = "$x,$y";
+            $tries++;
+        }
+        $placed{$key} = 1;
+
+        my $name = _mw_generate_base_name($id);
+
+        $_MW_BASES{$id} = {
+            id     => $id,
+            name   => $name,
+            x      => $x,
+            y      => $y,
+            prices => _mw_generate_prices(),
+        };
+
+        # Mark sector
+        my $sec = $universe->{"$x,$y"};
+        $sec->{base_id} = $id if $sec;
+    }
+
+    writeline($config{'datacolor'} . " Placed " . MW_MAX_BASES . " trading bases." . $RST, 1);
+    mw_bases_save();
+    mw_universe_save();
+}
+
+sub _mw_generate_base_name {
+    my ($id) = @_;
+    # Use compound names for the first batch, then generate
+    if ($id <= scalar(@_MW_BASE_NAMES)) {
+        return $_MW_BASE_NAMES[$id - 1];
+    }
+
+    # Generate: pick prefix + suffix or numeral
+    my @prefixes = qw(Alpha Beta Gamma Delta Epsilon Zeta Eta Theta
+                      Iota Kappa Lambda Mu Nu Xi Omicron Pi Rho
+                      Sigma Tau Upsilon Phi Chi Psi Omega);
+    my $prefix = $prefixes[($id - 1) % scalar(@prefixes)];
+    my $suffix = $_MW_NAME_SUFFIXES[int(rand(scalar(@_MW_NAME_SUFFIXES)))];
+    my $num    = int(rand(99)) + 1;
+    return "$prefix-$num $suffix";
+}
+
+sub _mw_generate_prices {
+    # Prices fluctuate +/- 30% from base
+    return {
+        lithium_buy   => int(rand(40)) + 90,    # 90-129
+        lithium_sell  => int(rand(30)) + 70,    # 70-99
+        titanium_buy  => int(rand(50)) + 130,   # 130-179
+        titanium_sell => int(rand(40)) + 100,   # 100-139
+        alloyis_buy   => int(rand(60)) + 160,   # 160-219
+        alloyis_sell  => int(rand(50)) + 120,   # 120-169
+    };
+}
+
+# ============================================================================
+# BASE ACCESS
+# ============================================================================
+
+sub mw_get_base {
+    my ($id) = @_;
+    return $_MW_BASES{$id};
+}
+
+sub mw_update_base_prices {
+    for my $id (keys %_MW_BASES) {
+        $_MW_BASES{$id}{prices} = _mw_generate_prices();
+    }
+    mw_bases_save();
+}
+
+1;

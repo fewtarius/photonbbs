@@ -198,6 +198,13 @@ The `pb-doorlib` module provides these functions:
 | `door_menu(\@items, $prompt)` | Display menu and get selection |
 | `door_money($amount)` | Format number as currency |
 | `door_log_activity($game, $msg)` | Log to activity feed |
+| `door_header($title)` | Clear screen + title + horizontal rule |
+| `door_hrule($width)` | Draw horizontal rule |
+| `door_getline($prompt, $maxlen)` | Text input with prompt |
+| `door_broker_connect($game, $room)` | Connect to broker for multiplayer |
+| `door_broker_move($room)` | Move to different broker room |
+| `door_broker_disconnect()` | Disconnect from broker |
+| `door_broker_room_players()` | List players in current broker room |
 
 ### Multiplayer Patterns
 
@@ -248,10 +255,19 @@ Register your game's shared files in `sbin/photonbbs-dooredit` under the `shared
 
 ### Existing Games
 
-See `modules/pb-door-*` for working examples. Key patterns:
+See `modules/pb-door-*` for working examples. The 12 native games cover patterns for:
+- **Single-player with turns**: Red Dragon, Star Trader, Drug Lord, Star Trek, Big Catch, Atlantis
+- **Multiplayer sessions**: 1000 Miles, Sea Battle, Property Wars, Dice Shake
+- **Persistent shared world**: MechWars (uses 12 `mw-*` engine modules)
+- **Multiple sub-games**: Casino (5 games in one module)
+
+Key patterns:
 - All games start with `iamat()` to set user status
-- Use `waitkey()` for single-key input, `getline()` for text/numbers
+- Use `door_header()` for consistent sub-screen headers
+- Use `door_getnum()` and `door_getamount()` for numeric input
+- Use `waitkey()` for single-key input, `getline()` for text
 - Use theme colors: `$config{'themecolor'}`, `$config{'datacolor'}`, etc.
+- Multiplayer games use `door_broker_connect()` at start, `door_broker_disconnect()` at exit
 - End all modules with `1;`
 
 ---

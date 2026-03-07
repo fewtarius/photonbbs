@@ -1,0 +1,202 @@
+#!/usr/bin/perl
+#
+# mw-drones - MechWars AI Drone Management
+# ~2000 AI drones that roam the universe and attack players
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# Shared drone state
+my %_MW_DRONES;
+my $_MW_DRONES_LOADED = 0;
+
+# Drone type definitions
+my %_MW_DRONE_TYPES = (
+    SCOUT => {
+        name        => 'Scout Drone',
+        max_shields => 50,
+        damage      => 10,
+        accuracy    => 60,
+        bounty      => 300,
+        xp          => 50,
+    },
+    FIGHTER => {
+        name        => 'Fighter Drone',
+        max_shields => 100,
+        damage      => 20,
+        accuracy    => 65,
+        bounty      => 750,
+        xp          => 100,
+    },
+    HEAVY => {
+        name        => 'Heavy Assault Drone',
+        max_shields => 200,
+        damage      => 35,
+        accuracy    => 70,
+        bounty      => 2000,
+        xp          => 200,
+    },
+    ELITE => {
+        name        => 'Elite Combat Drone',
+        max_shields => 350,
+        damage      => 55,
+        accuracy    => 80,
+        bounty      => 5000,
+        xp          => 500,
+    },
+    BOSS => {
+        name        => 'Sector Boss',
+        max_shields => 800,
+        damage      => 80,
+        accuracy    => 85,
+        bounty      => 15000,
+        xp          => 1500,
+    },
+);
+
+use constant MW_MAX_DRONES => 2000;
+
+# ============================================================================
+# LOAD / SAVE
+# ============================================================================
+
+sub mw_drones_load {
+    return if $_MW_DRONES_LOADED;
+    my $data = door_load_shared('mechwars', 'drones.dat');
+    if ($data && ref($data) eq 'HASH' && scalar(keys %$data) > 0) {
+        %_MW_DRONES = %$data;
+        $_MW_DRONES_LOADED = 1;
+        return;
+    }
+    _mw_drones_init();
+    $_MW_DRONES_LOADED = 1;
+}
+
+sub mw_drones_save {
+    door_save_shared('mechwars', 'drones.dat', \%_MW_DRONES);
+}
+
+sub _mw_drones_init {
+    writeline($config{'systemcolor'} . " Spawning AI drones..." . $RST, 1);
+    %_MW_DRONES = ();
+
+    for my $id (1 .. MW_MAX_DRONES) {
+        my $type = _mw_random_drone_type();
+        my ($x, $y) = mw_random_sector();
+        my $dtype = $_MW_DRONE_TYPES{$type};
+
+        $_MW_DRONES{$id} = {
+            id          => $id,
+            type        => $type,
+            x           => $x,
+            y           => $y,
+            shields     => $dtype->{max_shields},
+            max_shields => $dtype->{max_shields},
+            last_move   => time(),
+        };
+
+        mw_sector_add_drone($x, $y, $id);
+    }
+
+    writeline($config{'datacolor'} . " Spawned " . MW_MAX_DRONES . " drones." . $RST, 1);
+    mw_drones_save();
+    mw_universe_save();
+}
+
+sub _mw_random_drone_type {
+    my $r = rand(100);
+    return 'SCOUT'   if $r < 45;
+    return 'FIGHTER' if $r < 75;
+    return 'HEAVY'   if $r < 92;
+    return 'ELITE'   if $r < 98;
+    return 'BOSS';
+}
+
+# ============================================================================
+# DRONE ACCESS
+# ============================================================================
+
+sub mw_get_drone {
+    my ($id) = @_;
+    return $_MW_DRONES{$id};
+}
+
+sub mw_get_drone_type {
+    my ($type) = @_;
+    return $_MW_DRONE_TYPES{uc($type)};
+}
+
+sub mw_remove_drone {
+    my ($id) = @_;
+    my $drone = $_MW_DRONES{$id};
+    return unless $drone;
+    mw_sector_remove_drone($drone->{x}, $drone->{y}, $id);
+    delete $_MW_DRONES{$id};
+}
+
+# ============================================================================
+# DRONE UPDATE (called by daily maintenance or on session entry)
+# ============================================================================
+
+sub mw_update_drone_positions {
+    my $moved = 0;
+    for my $id (keys %_MW_DRONES) {
+        next if rand() > 0.4;   # 40% chance to move each tick
+        my $drone = $_MW_DRONES{$id};
+        mw_sector_remove_drone($drone->{x}, $drone->{y}, $id);
+        my @adj = mw_adjacent_sectors($drone->{x}, $drone->{y});
+        if (@adj) {
+            my $dest = $adj[int(rand(scalar(@adj)))];
+            $drone->{x} = $dest->{x};
+            $drone->{y} = $dest->{y};
+            $drone->{last_move} = time();
+        }
+        mw_sector_add_drone($drone->{x}, $drone->{y}, $id);
+        $moved++;
+    }
+    return $moved;
+}
+
+# Repopulate drones to target count (called by maintenance)
+sub mw_spawn_drones {
+    my ($target) = @_;
+    $target //= MW_MAX_DRONES;
+    my $current = scalar(keys %_MW_DRONES);
+    return 0 if $current >= $target;
+
+    my $max_id = 0;
+    for my $id (keys %_MW_DRONES) {
+        $max_id = $id if $id > $max_id;
+    }
+
+    my $spawned = 0;
+    while ($current < $target) {
+        $max_id++;
+        my $type = _mw_random_drone_type();
+        my ($x, $y) = mw_random_sector();
+        my $dtype = $_MW_DRONE_TYPES{$type};
+
+        $_MW_DRONES{$max_id} = {
+            id          => $max_id,
+            type        => $type,
+            x           => $x,
+            y           => $y,
+            shields     => $dtype->{max_shields},
+            max_shields => $dtype->{max_shields},
+            last_move   => time(),
+        };
+        mw_sector_add_drone($x, $y, $max_id);
+        $current++;
+        $spawned++;
+    }
+
+    mw_drones_save();
+    return $spawned;
+}
+
+# Drones reference for reading sector contents
+sub mw_drones_ref {
+    return \%_MW_DRONES;
+}
+
+1;

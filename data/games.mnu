@@ -6,13 +6,20 @@
 ########################################################################
 # KEY|DESCRIPTION|SCRIPT_OR_SUB|SECLEVEL|HIDDEN|TYPE|CONCURRENCY
 ########################################################################
+#--- Multiplayer / Online ---
 A|PhotonMUD (Multi-User Dungeon)|photonmud|10|0|external|0
-B|Red Dragon (Fantasy RPG)|reddragon_main|10|0|internal|0
-C|Star Trader (Space Trading)|startrader_main|10|0|internal|0
-D|Casino (Card and Dice Games)|casino_main|10|0|internal|0
-E|Drug Lord (Street Empire)|druglord_main|10|0|internal|0
-F|Sea Battle (Naval Combat)|seabattle_main|10|0|internal|0
-G|Star Trek (Space Exploration)|startrek_main|10|0|internal|0
-H|Big Catch (Fishing)|bigcatch_main|10|0|internal|0
+B|MechWars (Space Combat/Trading)|mechwars_main|10|0|internal|0
+C|Sea Battle (Naval Combat)|seabattle_main|10|0|internal|0
+#--- Strategy / Card / Board ---
+D|1000 Miles (Racing Card Game)|onek_miles_main|10|0|internal|0
+E|Property Wars (Board Game)|propertywars_main|10|0|internal|0
+F|Dice Shake (Dice Game)|diceshake_main|10|0|internal|0
+G|Casino (Card and Dice Games)|casino_main|10|0|internal|0
+#--- RPG / Adventure ---
+H|Red Dragon (Fantasy RPG)|reddragon_main|10|0|internal|0
 I|Atlantis (Underwater Adventure)|atlantis_main|10|0|internal|0
-J|1000 Miles (Racing Card Game)|onek_miles_main|10|0|internal|0
+J|Star Trek (Space Exploration)|startrek_main|10|0|internal|0
+#--- Trading / Simulation ---
+K|Star Trader (Space Trading)|startrader_main|10|0|internal|0
+L|Drug Lord (Street Empire)|druglord_main|10|0|internal|0
+M|Big Catch (Fishing)|bigcatch_main|10|0|internal|0

@@ -75,7 +75,8 @@ photonbbs-client (Perl)
     +-- pb-main (menu system, teleconference)
     +-- pb-doors (external door game integration)
     +-- pb-doorlib (native door game framework)
-    +-- pb-door-* (9 native door games)
+    +-- pb-door-* (12 native door games)
+    +-- mw-* (MechWars game engine - 12 modules)
     +-- pb-security (auth/access control)
     |
     v
@@ -206,6 +207,7 @@ main::writeline($config{'themecolor'}."Text".$RST, 1);
 |--------|---------|----------|
 | `pb-` | BBS core functionality | pb-framework, pb-main, pb-doors, pb-doorlib, pb-security |
 | `pm-` | MUD game logic | pm-combat, pm-rooms, pm-monsters, pm-spells |
+| `mw-` | MechWars game engine | mw-universe, mw-combat, mw-economy, mw-ui |
 
 ### BBS Modules (pb-*)
 
@@ -225,6 +227,9 @@ main::writeline($config{'themecolor'}."Text".$RST, 1);
 | `pb-door-bigcatch` | Big Catch - fishing simulation |
 | `pb-door-atlantis` | Atlantis - underwater adventure |
 | `pb-door-1000miles` | 1000 Miles - racing card game (2-4 players) |
+| `pb-door-propertywars` | Property Wars - multiplayer property trading board game |
+| `pb-door-diceshake` | Dice Shake - multiplayer dice scoring game |
+| `pb-door-mechwars` | MechWars - door game wrapper for mw-* engine |
 | `pb-security` | Authentication, access control |
 | `pb-security-admin` | SysOp security tools |
 | `pb-usertools` | User profile/account tools |
@@ -249,6 +254,23 @@ main::writeline($config{'themecolor'}."Text".$RST, 1);
 | `pm-cache` | Data caching |
 | `pm-utils` | MUD utilities |
 | `pm-broker-client` | Inter-process communication |
+
+### MechWars Modules (mw-*)
+
+| Module | Purpose |
+|--------|---------|
+| `mw-universe` | Universe generation, sector management, coordinate system |
+| `mw-combat` | Drone combat, PvP combat, damage calculation |
+| `mw-economy` | Trading bases, equipment shop, resource trading |
+| `mw-bases` | Trading base definitions and market prices |
+| `mw-drones` | Drone types, spawning, AI behavior |
+| `mw-entities` | Entity placement and management |
+| `mw-fortresses` | Fortress building, upgrading, defense systems |
+| `mw-movement` | Sector movement, hyperspace fold, warp beacons, mine checks |
+| `mw-planets` | Planet colonization, resource harvesting, defenses |
+| `mw-player` | Mech classes, player creation, stats, leveling |
+| `mw-teams` | Guild creation, membership, war declarations, standings |
+| `mw-ui` | Sector display, mini-map, status bar, scanner |
 
 ---
 

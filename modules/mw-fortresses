@@ -1,0 +1,389 @@
+#!/usr/bin/perl
+#
+# mw-fortresses - MechWars Fortress System
+# Player-built defensive structures, turrets, sector control
+#
+# No package declaration - runs in main:: namespace
+# Uses pb-doorlib for persistence
+
+# Shared fortress state
+my %_MW_FORTRESSES;
+my $_MW_FORTS_LOADED = 0;
+my $_MW_FORT_ID_COUNTER = 0;
+
+# Fortress upgrade levels
+my @_MW_FORT_LEVELS = (
+    { level => 1, name => 'Outpost',        defense => 100, build_cost => 10000, upgrade_cost =>     0, desc => 'Basic defensive position' },
+    { level => 2, name => 'Forward Base',   defense => 250, build_cost =>     0, upgrade_cost => 25000, desc => 'Reinforced structure with heavy turrets' },
+    { level => 3, name => 'Battle Station', defense => 500, build_cost =>     0, upgrade_cost => 60000, desc => 'Full military installation' },
+    { level => 4, name => 'Citadel',        defense => 1000,build_cost =>     0, upgrade_cost =>150000, desc => 'Impenetrable fortress, sector control' },
+);
+
+use constant MW_MAX_FORTS_PER_PLAYER => 3;
+
+# ============================================================================
+# LOAD / SAVE
+# ============================================================================
+
+sub mw_fortresses_load {
+    return if $_MW_FORTS_LOADED;
+    my $data = door_load_shared('mechwars', 'fortresses.dat');
+    if ($data && ref($data) eq 'HASH') {
+        if ($data->{forts}) {
+            %_MW_FORTRESSES = %{$data->{forts}};
+        }
+        $_MW_FORT_ID_COUNTER = $data->{next_id} // scalar(keys %_MW_FORTRESSES);
+    }
+    $_MW_FORTS_LOADED = 1;
+}
+
+sub mw_fortresses_save {
+    door_save_shared('mechwars', 'fortresses.dat', {
+        forts   => \%_MW_FORTRESSES,
+        next_id => $_MW_FORT_ID_COUNTER,
+    });
+}
+
+# ============================================================================
+# FORTRESS ACCESS
+# ============================================================================
+
+sub mw_get_fortress {
+    my ($id) = @_;
+    return $_MW_FORTRESSES{$id};
+}
+
+sub _mw_count_player_forts {
+    my ($handle) = @_;
+    return scalar(grep { $_->{owner} eq $handle } values %_MW_FORTRESSES);
+}
+
+# ============================================================================
+# FORTRESS MENU (from main game when in any sector)
+# ============================================================================
+
+sub mw_fortress_menu {
+    my ($player) = @_;
+
+    my $sector   = mw_get_sector($player->{x}, $player->{y});
+    my $fort_id  = $sector ? $sector->{fort_id} : undef;
+    my $fort     = $fort_id ? mw_get_fortress($fort_id) : undef;
+
+    while (1) {
+        door_header("Fortress Operations");
+
+        if ($fort) {
+            # Show current fortress info
+            my $ldef = $_MW_FORT_LEVELS[$fort->{level} - 1];
+            my $is_owner = ($fort->{owner} // '') eq $player->{handle};
+            my $is_guild = ($fort->{guild} // '') && ($player->{guild} // '') &&
+                           $fort->{guild} eq $player->{guild};
+
+            writeline("  " . $config{'themecolor'} . "Name:    " .
+                      $config{'usercolor'} . $fort->{name} . $RST, 1);
+            writeline("  " . $config{'themecolor'} . "Type:    " .
+                      $config{'datacolor'} . $ldef->{name} . $RST, 1);
+            writeline("  " . $config{'themecolor'} . "Owner:   " .
+                      $config{'datacolor'} . ($fort->{owner} // 'Unknown') . $RST, 1);
+            writeline("  " . $config{'themecolor'} . "Defense: " .
+                      $config{'datacolor'} . "$fort->{defense}/$fort->{max_defense}" . $RST, 1);
+            writeline("  " . $config{'themecolor'} . "Level:   " .
+                      $config{'datacolor'} . $fort->{level} . "/4" . $RST, 1);
+            writeline("", 1);
+
+            if ($is_owner || $is_guild) {
+                writeline("  " . $config{'promptcolor'} . "R" .
+                          $config{'themecolor'} . " ... Repair defenses (50 SV/point)", 1);
+                if ($fort->{level} < 4) {
+                    my $next = $_MW_FORT_LEVELS[$fort->{level}];
+                    writeline("  " . $config{'promptcolor'} . "U" .
+                              $config{'themecolor'} . " ... Upgrade to " . $next->{name} .
+                              $config{'datacolor'} . " (" . $next->{upgrade_cost} . " SV)", 1);
+                }
+                if ($is_owner) {
+                    writeline("  " . $config{'promptcolor'} . "G" .
+                              $config{'themecolor'} . " ... Set guild ownership", 1);
+                    writeline("  " . $config{'promptcolor'} . "D" .
+                              $config{'themecolor'} . " ... Demolish fortress", 1);
+                }
+            } else {
+                writeline("  " . $config{'promptcolor'} . "X" .
+                          $config{'themecolor'} . " ... Attack this fortress", 1);
+            }
+        } else {
+            # No fortress here - show build option
+            my $player_fort_count = _mw_count_player_forts($player->{handle});
+            writeline("  " . $config{'datacolor'} . "No fortress in this sector." . $RST, 1);
+            writeline("  " . $config{'themecolor'} . "Your fortresses: " .
+                      $config{'datacolor'} . "$player_fort_count/" . MW_MAX_FORTS_PER_PLAYER . $RST, 1);
+            writeline("", 1);
+
+            if ($player_fort_count < MW_MAX_FORTS_PER_PLAYER) {
+                my $build_cost = $_MW_FORT_LEVELS[0]->{build_cost};
+                writeline("  " . $config{'promptcolor'} . "B" .
+                          $config{'themecolor'} . " ... Build Outpost (" .
+                          $config{'datacolor'} . "$build_cost SV" .
+                          $config{'themecolor'} . ")", 1);
+            } else {
+                writeline("  " . $config{'linecolor'} .
+                          " Fortress limit reached (" . MW_MAX_FORTS_PER_PLAYER . ")." . $RST, 1);
+            }
+        }
+
+        writeline("  " . $config{'promptcolor'} . "L" . $config{'themecolor'} . " ... List my fortresses", 1);
+        writeline("  " . $config{'promptcolor'} . "Q" . $config{'themecolor'} . " ... Back", 1);
+        writeline("", 1);
+        writeline($config{'promptcolor'} . "  Command: " . $RST);
+        my $cmd = uc(waitkey(""));
+        writeline("", 1);
+
+        if ($cmd eq 'Q') { last; }
+        elsif ($cmd eq 'B' && !$fort && _mw_count_player_forts($player->{handle}) < MW_MAX_FORTS_PER_PLAYER) {
+            _mw_build_fortress($player, $sector);
+            $fort_id = $sector->{fort_id};
+            $fort    = $fort_id ? mw_get_fortress($fort_id) : undef;
+        }
+        elsif ($cmd eq 'R' && $fort && (
+               ($fort->{owner} // '') eq $player->{handle} ||
+               (($fort->{guild} // '') && ($player->{guild} // '') && $fort->{guild} eq $player->{guild})
+        )) {
+            _mw_repair_fortress($player, $fort);
+        }
+        elsif ($cmd eq 'U' && $fort && $fort->{level} < 4 && ($fort->{owner} // '') eq $player->{handle}) {
+            _mw_upgrade_fortress($player, $fort);
+        }
+        elsif ($cmd eq 'G' && $fort && ($fort->{owner} // '') eq $player->{handle}) {
+            _mw_set_fort_guild($player, $fort);
+        }
+        elsif ($cmd eq 'D' && $fort && ($fort->{owner} // '') eq $player->{handle}) {
+            if (door_noyes("Demolish " . $fort->{name} . "?")) {
+                _mw_demolish_fortress($player, $fort, $sector);
+                $fort    = undef;
+                $fort_id = undef;
+            }
+        }
+        elsif ($cmd eq 'X' && $fort && ($fort->{owner} // '') ne $player->{handle}) {
+            _mw_attack_fortress($player, $fort);
+            $fort    = $fort_id ? mw_get_fortress($fort_id) : undef;
+        }
+        elsif ($cmd eq 'L') {
+            _mw_list_my_fortresses($player);
+        }
+
+        mw_fortresses_save();
+    }
+}
+
+sub _mw_build_fortress {
+    my ($player, $sector) = @_;
+
+    my $cost = $_MW_FORT_LEVELS[0]->{build_cost};
+
+    if ($player->{starvacs} < $cost) {
+        writeline($config{'errorcolor'} . " Need $cost SV to build." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    writeline($config{'systemcolor'} . " Fortress name: " . $RST);
+    my $fname = getline('text', 25, '', 1);
+    return unless $fname && $fname =~ /\S/;
+    $fname =~ s/[^a-zA-Z0-9 _'-]//g;
+
+    $_MW_FORT_ID_COUNTER++;
+    my $id  = $_MW_FORT_ID_COUNTER;
+    my $lvl = $_MW_FORT_LEVELS[0];
+
+    $_MW_FORTRESSES{$id} = {
+        id          => $id,
+        name        => $fname,
+        x           => $player->{x},
+        y           => $player->{y},
+        owner       => $player->{handle},
+        guild       => $player->{guild} // '',
+        level       => 1,
+        defense     => $lvl->{defense},
+        max_defense => $lvl->{defense},
+        built       => time(),
+    };
+
+    $sector->{fort_id} = $id;
+    $player->{starvacs} -= $cost;
+
+    mw_universe_save();
+    writeline($config{'systemcolor'} . " Outpost '$fname' established!" . $RST, 1);
+    door_broadcast('mechwars',
+        $player->{handle} . " built a fortress at [" . $player->{x} . "," . $player->{y} . "]!");
+    door_pause();
+}
+
+sub _mw_repair_fortress {
+    my ($player, $fort) = @_;
+
+    my $need = $fort->{max_defense} - ($fort->{defense} // 0);
+    if ($need <= 0) {
+        writeline($config{'systemcolor'} . " Defenses at maximum." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    writeline($config{'datacolor'} . " Defense: $fort->{defense}/$fort->{max_defense}" . $RST, 1);
+    writeline($config{'datacolor'} . " Cost: 50 SV per point. Need $need points = " . ($need*50) . " SV" . $RST, 1);
+    writeline($config{'systemcolor'} . " Points to repair (0=full): " . $RST);
+    my $pts = int(getline('text', 6, '', 1) // 0);
+    $pts = $need if $pts <= 0;
+    $pts = $need if $pts > $need;
+
+    my $cost = $pts * 50;
+    if ($cost > $player->{starvacs}) {
+        $pts  = int($player->{starvacs} / 50);
+        $cost = $pts * 50;
+    }
+
+    if ($pts <= 0) {
+        writeline($config{'errorcolor'} . " Not enough SV." . $RST, 1);
+    } else {
+        $player->{starvacs} -= $cost;
+        $fort->{defense}    += $pts;
+        writeline($config{'systemcolor'} . " Repaired $pts points for $cost SV." . $RST, 1);
+    }
+    door_pause();
+}
+
+sub _mw_upgrade_fortress {
+    my ($player, $fort) = @_;
+
+    my $next = $_MW_FORT_LEVELS[$fort->{level}];
+    my $cost = $next->{upgrade_cost};
+
+    if ($player->{starvacs} < $cost) {
+        writeline($config{'errorcolor'} . " Need $cost SV, have $player->{starvacs}." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    $player->{starvacs}   -= $cost;
+    $fort->{level}++;
+    $fort->{max_defense}   = $next->{defense};
+    $fort->{defense}       = $next->{defense};
+
+    writeline($config{'systemcolor'} . " Upgraded to " . $next->{name} . "!" . $RST, 1);
+    door_broadcast('mechwars',
+        $player->{handle} . "'s fortress at [" . $fort->{x} . "," . $fort->{y} .
+        "] upgraded to " . $next->{name} . "!");
+    door_pause();
+}
+
+sub _mw_set_fort_guild {
+    my ($player, $fort) = @_;
+
+    if (!$player->{guild}) {
+        writeline($config{'errorcolor'} . " Not in a guild." . $RST, 1);
+        door_pause();
+        return;
+    }
+
+    $fort->{guild} = $player->{guild};
+    writeline($config{'systemcolor'} . " Fortress control transferred to guild." . $RST, 1);
+    door_pause();
+}
+
+sub _mw_demolish_fortress {
+    my ($player, $fort, $sector) = @_;
+
+    # Refund 25% of value
+    my $refund = int($_MW_FORT_LEVELS[$fort->{level} - 1]->{build_cost} * 0.25);
+    $player->{starvacs} += $refund;
+    delete $_MW_FORTRESSES{$fort->{id}};
+    $sector->{fort_id} = undef;
+    mw_universe_save();
+
+    writeline($config{'systemcolor'} . " Fortress demolished. Refund: $refund SV." . $RST, 1);
+    door_pause();
+}
+
+sub _mw_attack_fortress {
+    my ($player, $fort) = @_;
+
+    door_clear();
+    writeline($config{'errorcolor'} . " Attacking " . $fort->{name} . $RST, 1);
+    door_hrule(50);
+    my $mech = mw_get_mech($player->{mech_type}) // {};
+    my $def  = $fort->{defense} // 0;
+
+    writeline($config{'datacolor'} . " Defense: $def" . $RST, 1);
+    writeline("", 1);
+
+    my $rounds = 5;
+    for my $r (1 .. $rounds) {
+        last if $player->{energy} < MW_ENERGY_PER_SHOT || $def <= 0;
+        $player->{energy} -= MW_ENERGY_PER_SHOT;
+        $player->{turns}   = ($player->{turns} // 1) - 1;
+
+        my $dmg = int(($mech->{shot_damage} // 20) * (0.8 + rand(0.4)));
+        $dmg *= 2 if ($player->{mech_type} // '') eq 'HAVOC';
+        $def -= $dmg;
+        $def  = 0 if $def < 0;
+        writeline($config{'datacolor'} . " Volley $r: $dmg damage. Defense: $def" . $RST, 1);
+
+        # Return fire
+        if ($def > 0) {
+            my $ret = int($fort->{max_defense} * 0.03);
+            $player->{shields} -= $ret;
+            $player->{shields}  = 0 if $player->{shields} < 0;
+            writeline($config{'errorcolor'} . " Turret fire: $ret damage." . $RST, 1);
+        }
+    }
+
+    $fort->{defense} = $def;
+
+    if ($def <= 0) {
+        writeline("", 1);
+        writeline($config{'usercolor'} . " FORTRESS CAPTURED!" . $RST, 1);
+        my $old = $fort->{owner};
+        $fort->{owner}   = $player->{handle};
+        $fort->{guild}   = $player->{guild} // '';
+        $fort->{defense} = int($fort->{max_defense} * 0.1);
+        $player->{xp}    = ($player->{xp} // 0) + 750;
+        $player->{kills} = ($player->{kills} // 0) + 1;
+
+        door_broadcast('mechwars',
+            $player->{handle} . " captured " . $fort->{name} . " from " . $old . "!");
+    } else {
+        writeline("", 1);
+        writeline($config{'systemcolor'} . " Fortress held. Remaining defense: $def." . $RST, 1);
+    }
+
+    if ($player->{shields} <= 0) {
+        mw_player_death($player, $fort->{name} . " defense turrets");
+    }
+
+    mw_fortresses_save();
+    door_pause();
+}
+
+sub _mw_list_my_fortresses {
+    my ($player) = @_;
+
+    door_header("My Fortresses");
+
+    my @mine = grep { ($_->{owner} // '') eq $player->{handle} } values %_MW_FORTRESSES;
+
+    if (!@mine) {
+        writeline($config{'linecolor'} . " No fortresses built." . $RST, 1);
+    } else {
+        for my $f (@mine) {
+            my $ldef = $_MW_FORT_LEVELS[$f->{level} - 1];
+            writeline("  " . $config{'usercolor'} . $f->{name} .
+                      $config{'themecolor'} . " (" . $ldef->{name} . ")" . $RST, 1);
+            writeline("    " . $config{'datacolor'} .
+                      "Location: [" . $f->{x} . "," . $f->{y} . "]  " .
+                      "Defense: " . $f->{defense} . "/" . $f->{max_defense} . $RST, 1);
+        }
+    }
+
+    writeline("", 1);
+    door_pause();
+}
+
+1;

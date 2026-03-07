@@ -1,0 +1,68 @@
+#!/usr/bin/perl
+#
+# Big Catch Daily Maintenance
+# Run from daily.d/ hook at midnight
+#
+# Tasks:
+#   1. Resolve any expired tournaments and announce results
+#   2. Reset daily derby leaderboard for new day
+#   3. Clean up old tournament data
+#
+
+my $PHOTON_HOME = $ENV{PHOTON_HOME} // '/opt/photonbbs';
+my $DOOR_NAME = 'bigcatch';
+
+sub bigcatch_daily {
+    print "[bigcatch] Daily maintenance starting...\n";
+
+    # Load doorlib
+    eval { require_module('pb-doorlib'); };
+    if ($@) {
+        eval { require "$PHOTON_HOME/modules/pb-doorlib"; };
+        if ($@) { print "[bigcatch] Cannot load pb-doorlib: $@\n"; return; }
+    }
+
+    # 1. Resolve expired tournaments
+    my $t = door_load_shared($DOOR_NAME, "tournament.dat");
+    if ($t && $t->{active} && time() > $t->{end_time}) {
+        if (%{$t->{entries} // {}}) {
+            my ($winner) = sort { $t->{entries}{$b} <=> $t->{entries}{$a} }
+                           keys %{$t->{entries}};
+            my $catch = sprintf("%.1f", $t->{entries}{$winner});
+            my $prize = $t->{prize_pool} // 0;
+            print "[bigcatch] Tournament '$t->{name}' resolved: $winner won ($catch lb, \$$prize)\n";
+            # The prize is awarded when the player next logs in via _bc_update_tournament
+            # Just mark it inactive so it doesn't hang
+        } else {
+            print "[bigcatch] Tournament '$t->{name}' expired with no entries.\n";
+        }
+        $t->{active} = 0;
+        door_save_shared($DOOR_NAME, "tournament.dat", $t);
+    } else {
+        print "[bigcatch] No expired tournament to resolve.\n";
+    }
+
+    # 2. Reset daily derby
+    my $derby = door_load_shared($DOOR_NAME, "derby.dat");
+    if ($derby && $derby->{entries} && keys %{$derby->{entries}}) {
+        # Log yesterday's top fisher
+        my @sorted = sort { $derby->{entries}{$b}{biggest} <=> $derby->{entries}{$a}{biggest} }
+                     keys %{$derby->{entries}};
+        if (@sorted) {
+            my $top = $sorted[0];
+            my $biggest = sprintf("%.1f", $derby->{entries}{$top}{biggest});
+            print "[bigcatch] Yesterday's derby winner: $top ($biggest lb)\n";
+        }
+        # Reset for new day
+        $derby->{entries} = {};
+        door_save_shared($DOOR_NAME, "derby.dat", $derby);
+        print "[bigcatch] Derby leaderboard reset.\n";
+    }
+
+    print "[bigcatch] Daily maintenance complete.\n";
+}
+
+# Run if called directly
+bigcatch_daily() unless caller();
+
+1;
