@@ -1,0 +1,8 @@
+.git
+.github
+.gitignore
+.dockerignore
+ai-assisted
+scratch
+*.md
+!data/**/*.md
