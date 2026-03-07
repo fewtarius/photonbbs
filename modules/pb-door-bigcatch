@@ -8,10 +8,13 @@
 # Rebuilt as native Perl for PhotonBBS
 #
 # Features: 27 fish species across 7 families, 8 lure types x 4 sizes,
-# retrieve speed system, fish fighting mini-game (bear down / give line),
+# directional casting (8-point compass, 1-5 cell distance),
+# step-by-step retrieve with real-time speed control,
+# enhanced fish fighting (drag system, line-out tracking, pump technique),
+# skill progression (angler level from lifetime catches),
 # 12 named lakes with structure/depth/bottom types, depth finder display,
 # 4-slot tournament system, weather effects, daily fish restocking,
-# competitive derby leaderboard
+# competitive derby leaderboard, fishing duels
 #
 
 # ============================================================================
@@ -294,6 +297,10 @@ sub _bc_title_screen {
   writeline($config{'systemcolor'} . "  Money:   " . $config{'datacolor'} . _bc_money($g->{money}) . $RST, 1);
   writeline($config{'systemcolor'} . "  Caught:  " . $config{'datacolor'} . "$g->{total_caught} lifetime" . $RST, 1);
   writeline($config{'systemcolor'} . "  Biggest: " . $config{'datacolor'} . sprintf("%.1f lbs", $g->{biggest}) . $RST, 1);
+  my $skill = _bc_skill_level($g);
+  if ($skill > 0) {
+    writeline($config{'systemcolor'} . "  Skill:   " . $config{'datacolor'} . "Level $skill Angler" . $RST, 1);
+  }
   writeline("", 1);
 
   # Show who else is fishing
@@ -497,7 +504,7 @@ sub _bc_display {
     $config{'systemcolor'} . " Bottom:" . $config{'datacolor'} . " $bn" .
     $config{'systemcolor'} . " Lure:" . $config{'datacolor'} . " $lure" . $RST, 1);
   writeline($config{'linecolor'} . " WASD=move C=cast T=tackle L=livewell F=finder S=shop" . $RST, 1);
-  writeline($config{'linecolor'} . " H=scores R=tournament V=duel N=chat Q=quit" . $RST, 1);
+  writeline($config{'linecolor'} . " H=scores R=tournament V=duel N=chat /=cmds Q=quit" . $RST, 1);
 
   # Show any incoming lake chat
   my @chat = door_chat_poll($DOOR_NAME);
@@ -590,6 +597,11 @@ sub _bc_command {
   elsif ($cmd eq 'r') { _bc_join_tournament($g); }
   elsif ($cmd eq 'v') { _bc_fishing_duel($g); }
   elsif ($cmd eq 'n') { door_chat_input($DOOR_NAME); }
+  elsif ($cmd eq '/') {
+    my $result = door_check_command($DOOR_NAME);
+    if ($result && $result eq 'quit') { $g->{quit} = 1; }
+    else { door_pause() unless $result; }
+  }
   elsif ($cmd eq 'q') {
     writeline($config{'systemcolor'} . " Quit fishing? (Y/N) " . $RST);
     my $yn = uc(waitkey("")); writeline("", 1);
@@ -672,8 +684,42 @@ sub _bc_tackle_box {
 }
 
 # ============================================================================
-# CASTING
+# SKILL SYSTEM
 # ============================================================================
+
+sub _bc_skill_level {
+  my ($g) = @_;
+  my $total = $g->{total_caught} // 0;
+  my $skill = int(sqrt($total));
+  return $skill > 30 ? 30 : $skill;
+}
+
+sub _bc_skill_hook_bonus {
+  my ($g) = @_;
+  return _bc_skill_level($g) * 0.01;
+}
+
+sub _bc_skill_fight_bonus {
+  my ($g) = @_;
+  return _bc_skill_level($g) * 0.5;
+}
+
+# ============================================================================
+# CAST DIRECTION AND DISTANCE
+# ============================================================================
+
+my @CAST_DIRS = (
+  { name => "North",     key => 'W', dy => -1, dx =>  0 },
+  { name => "South",     key => 'X', dy =>  1, dx =>  0 },
+  { name => "West",      key => 'A', dy =>  0, dx => -1 },
+  { name => "East",      key => 'D', dy =>  0, dx =>  1 },
+  { name => "NorthWest", key => 'Q', dy => -1, dx => -1 },
+  { name => "NorthEast", key => 'E', dy => -1, dx =>  1 },
+  { name => "SouthWest", key => 'Z', dy =>  1, dx => -1 },
+  { name => "SouthEast", key => 'C', dy =>  1, dx =>  1 },
+);
+
+my @DRAG_NAMES = ("Loose", "Medium", "Tight");
 
 sub _bc_cast {
   my ($g) = @_;
@@ -688,33 +734,362 @@ sub _bc_cast {
     door_pause(); return;
   }
 
-  writeline($config{'systemcolor'} . " Retrieve: [1]Stop [2]Slow [3]Medium [4]Fast " . $RST);
-  my $sc = int(waitkey("") // "3");
-  $sc = 3 if $sc < 1 || $sc > 4;
-  $g->{speed} = $sc - 1;
-
-  my $lt = $LURE_TYPES[$g->{lure_type}];
-  my $lure_depth = $lt->{depths}[$g->{speed}];
-  $lure_depth = $boat_depth if $lure_depth > $boat_depth;
-  $g->{lure_depth} = $lure_depth;
-
-  my $lname = _bc_current_lure_name($g);
   writeline("", 1);
-  writeline($config{'themecolor'} . " Casting $lname... $SPEEDS[$g->{speed}]  Depth: ${lure_depth}ft" . $RST, 1);
+  writeline($config{'themecolor'} . " Cast Direction:" . $RST, 1);
+  writeline($config{'systemcolor'} .
+    "  Q=NW  W=N  E=NE      [0]=Cancel" . $RST, 1);
+  writeline($config{'systemcolor'} .
+    "  A=W    " . $config{'usercolor'} . "@" . $config{'systemcolor'} .
+    "   D=E" . $RST, 1);
+  writeline($config{'systemcolor'} .
+    "  Z=SW  X=S  C=SE" . $RST, 1);
+  writeline($config{'promptcolor'} . " Direction> " . $RST);
+  my $dk = uc(waitkey("")); writeline("", 1);
+  return if $dk eq '0';
 
+  my $dir;
+  for my $d (@CAST_DIRS) { if ($d->{key} eq $dk) { $dir = $d; last; } }
+  unless ($dir) {
+    writeline($config{'errorcolor'} . " Invalid direction." . $RST, 1);
+    door_pause(); return;
+  }
+
+  writeline($config{'systemcolor'} . " Cast distance [1-5]: " . $RST);
+  my $dist_key = waitkey(""); writeline("", 1);
+  my $cast_dist = int($dist_key // 3);
+  $cast_dist = 1 if $cast_dist < 1; $cast_dist = 5 if $cast_dist > 5;
+
+  my $land_y = $g->{boat_y} + ($dir->{dy} * $cast_dist);
+  my $land_x = $g->{boat_x} + ($dir->{dx} * $cast_dist);
+  $land_y = 1 if $land_y < 1; $land_y = $LAKE_H - 2 if $land_y >= $LAKE_H - 1;
+  $land_x = 1 if $land_x < 1; $land_x = $LAKE_W - 2 if $land_x >= $LAKE_W - 1;
+
+  if ($g->{lake}[$land_y][$land_x] < 0) {
+    writeline($config{'errorcolor'} . " Splash! Hit the shore." . $RST, 1);
+    door_pause(); return;
+  }
+
+  _bc_retrieve($g, $land_y, $land_x, $dir);
+}
+
+# ============================================================================
+# FULL-SCREEN RETRIEVE MINI-GAME
+# ============================================================================
+#
+# The player directly controls the retrieve. Each keypress is one reel tick.
+# Speed keys (1-4) set retrieve speed, then each tick advances the lure.
+# Tackle behavior determines what patterns trigger strikes:
+#   Topwater: Stop-and-go (twitch). Strikes on speed changes.
+#   Crankbait/Spinner: Steady medium-fast. Strikes on consistent speed.
+#   Jig: Hop pattern (slow, stop, slow). Strikes on the pause.
+#   Worm: Dead slow or still. Strikes after sitting.
+#   Spoon: Varied speed. Strikes on speed changes.
+#   Minnow: Steady. Strikes similar to crankbait.
+
+# Optimal speeds and patterns per lure behavior
+my %RETRIEVE_PATTERNS = (
+  'top'  => { opt_speeds => [0, 1],    pattern => 'twitch',  # stop-go triggers strikes
+              hint => "Twitch it! Change speed to draw strikes." },
+  'dive' => { opt_speeds => [2, 3],    pattern => 'steady',  # steady fast retrieve
+              hint => "Keep it steady - consistent speed works best." },
+  'sink' => { opt_speeds => [0, 1],    pattern => 'pause',   # pauses trigger strikes
+              hint => "Let it sink, then slowly lift. Pauses get bites." },
+);
+
+sub _bc_retrieve {
+  my ($g, $lure_y, $lure_x, $dir) = @_;
+  my $lt = $LURE_TYPES[$g->{lure_type}];
+  my $ls = $LURE_SIZES[$g->{lure_size}];
+  my $lname = _bc_current_lure_name($g);
+  my $skill = _bc_skill_level($g);
+  my $pat = $RETRIEVE_PATTERNS{$lt->{behavior}} // $RETRIEVE_PATTERNS{'dive'};
+
+  # Build path from landing to boat, then expand for granularity
+  my @raw_path;
+  my ($cy, $cx) = ($lure_y, $lure_x);
+  my $max_steps = 25;
+  while (($cy != $g->{boat_y} || $cx != $g->{boat_x}) && $max_steps-- > 0) {
+    push @raw_path, [$cy, $cx];
+    my $dy = $g->{boat_y} <=> $cy;
+    my $dx = $g->{boat_x} <=> $cx;
+    $cy += $dy; $cx += $dx;
+    last if ($cy < 1 || $cy >= $LAKE_H-1 || $cx < 1 || $cx >= $LAKE_W-1 ||
+             $g->{lake}[$cy][$cx] < 0);
+  }
+
+  if (!@raw_path) {
+    writeline($config{'systemcolor'} . " Too close to cast." . $RST, 1);
+    door_pause(); return;
+  }
+
+  # Expand path: 3 ticks per cell gives us a proper retrieve length
+  # Distance 1 = ~3 ticks, distance 5 = ~15 ticks
+  my @path;
+  my $ticks_per_cell = 3;
+  for my $p (@raw_path) {
+    for (1 .. $ticks_per_cell) { push @path, $p; }
+  }
+
+  # Retrieve state
+  my $speed = 2;       # Current speed 0-3
+  my $prev_speed = 2;  # Last tick's speed (for pattern detection)
+  my $still_ticks = 0; # Ticks at speed 0 (for worm/jig patterns)
+  my $steady_ticks = 0;# Ticks at same speed (for crankbait patterns)
+  my $pi = 0;          # Path index
+  my @events;          # Event message queue
+  my $hooked_fish;     # Set when strike occurs
+
+  while ($pi <= $#path && !$hooked_fish) {
+    my ($py, $px) = @{$path[$pi]};
+    my $depth = $g->{lake}[$py][$px];
+    $depth = 1 if $depth < 1;
+
+    # Calculate lure depth from speed + lure type
+    my $lure_depth = $lt->{depths}[$speed];
+    $lure_depth = $depth if $lure_depth > $depth;
+
+    # Draw full-screen retrieve display
+    _bc_draw_retrieve($g, $lname, $lt, $lure_depth, $depth, $speed,
+                      $pi, scalar(@path), $pat, \@events);
+
+    # Wait for player input (keypress = one reel tick)
+    my $key = waitkey("", 2);  # 2-second timeout = "sitting still"
+
+    if (!defined $key) {
+      # Timeout = player left lure sitting still
+      $prev_speed = $speed;
+      $speed = 0;
+    } else {
+      $key = lc($key);
+      if ($key eq 'q' || $key eq "\e") {
+        # Reel in and quit
+        push @events, "Reeled in.";
+        last;
+      }
+      $prev_speed = $speed;
+      my $nk = ord($key) - ord('0') if $key =~ /^[1-4]$/;
+      if (defined $nk && $nk >= 1 && $nk <= 4) {
+        $speed = $nk - 1;
+      }
+      # Space/enter/other = keep current speed and tick
+    }
+
+    # Track patterns
+    if ($speed == $prev_speed) {
+      $steady_ticks++;
+    } else {
+      $steady_ticks = 0;
+    }
+    if ($speed == 0) {
+      $still_ticks++;
+    } else {
+      $still_ticks = 0;
+    }
+
+    # Calculate strike chance based on tackle pattern
+    my $strike_bonus = _bc_pattern_bonus($pat, $speed, $prev_speed,
+                                          $still_ticks, $steady_ticks);
+
+    # Check for fish at this position
+    my @cands = _bc_find_candidates($g, $py, $px, $lure_depth, $lt, $ls,
+                                     $strike_bonus);
+
+    # Attempt strikes
+    for my $c (sort { $b->{chance} <=> $a->{chance} } @cands) {
+      if (rand(100) < $c->{chance}) {
+        $hooked_fish = $c->{fish};
+        last;
+      }
+    }
+
+    # Near-miss feedback
+    if (!$hooked_fish && @cands && rand(100) < 25) {
+      my @nib;
+      if ($lt->{behavior} eq 'top') {
+        @nib = ("Swirl!", "Splash behind lure!", "Boil!");
+      } elsif ($lt->{behavior} eq 'sink') {
+        @nib = ("...tick...", "...tap...", "Felt that?");
+      } else {
+        @nib = ("...bump...", "...tap...", "Short strike!");
+      }
+      push @events, $nib[int(rand(@nib))];
+      shift @events if @events > 3;
+    }
+
+    # Advance lure position based on speed
+    # Speed 0 = still, 1 = +1 step, 2 = +1 step, 3 = +2 steps
+    if ($speed > 0) {
+      my $advance = ($speed >= 3) ? 2 : 1;
+      $pi += $advance;
+    }
+    # Speed 0 = lure sits still (no advance)
+
+    door_keepalive();
+  }
+
+  if ($hooked_fish) {
+    _bc_strike($g, $hooked_fish);
+  } else {
+    door_clear();
+    my @m = ("Nothing on the retrieve.", "No takers this cast.", "Try a different spot.",
+             "Maybe a different lure?", "They're not biting here.");
+    writeline($config{'systemcolor'} . " " . $m[int(rand(@m))] . $RST, 1);
+    door_pause();
+  }
+}
+
+# Calculate bonus strike chance from retrieve pattern matching
+sub _bc_pattern_bonus {
+  my ($pat, $speed, $prev_speed, $still_ticks, $steady_ticks) = @_;
+  my $bonus = 0;
+  my $pattern = $pat->{pattern};
+
+  # Check if current speed is optimal for this lure
+  my $opt = 0;
+  for my $s (@{$pat->{opt_speeds}}) { if ($speed == $s) { $opt = 1; last; } }
+  $bonus += 10 if $opt;
+
+  if ($pattern eq 'twitch') {
+    # Topwater: speed changes trigger strikes
+    $bonus += 20 if $speed != $prev_speed;
+    $bonus += 10 if $speed == 0 && $prev_speed > 0;  # Just stopped
+  } elsif ($pattern eq 'steady') {
+    # Crankbait/spinner: consistent speed = more strikes
+    $bonus += $steady_ticks * 3 if $steady_ticks > 2;
+    $bonus += 15 if $speed >= 2;  # Faster is better
+  } elsif ($pattern eq 'pause') {
+    # Jig/worm: pauses and slow movement trigger strikes
+    $bonus += 15 if $still_ticks >= 2;  # Sitting still = worm in strike zone
+    $bonus += 25 if $still_ticks >= 3;  # Longer pause = higher chance
+    $bonus += 10 if $speed == 1 && $prev_speed == 0; # Just started moving after pause
+  }
+
+  return $bonus;
+}
+
+# Draw the full-screen retrieve display
+sub _bc_draw_retrieve {
+  my ($g, $lname, $lt, $lure_depth, $water_depth, $speed,
+      $step, $total_steps, $pat, $events) = @_;
+
+  door_clear();
+  my $lake = $LAKES[$g->{lake_idx}];
+
+  # Line 1-2: Header
+  writeline($config{'themecolor'} . " " . $lake->{name} . " - Retrieve" .
+    $config{'systemcolor'} . "    " . $g->{weather}{name} .
+    "    Livewell: " . $config{'datacolor'} . scalar(@{$g->{livewell}}) .
+    "/$LIVEWELL" . $RST, 1);
+  writeline($config{'systemcolor'} . " Lure: " . $config{'usercolor'} . $lname .
+    $config{'systemcolor'} . "   Depth: " . $config{'datacolor'} .
+    "${lure_depth}ft" . $config{'systemcolor'} . "/${water_depth}ft" .
+    "   Speed: " . $config{'datacolor'} . $SPEEDS[$speed] . $RST, 1);
+
+  # Line 3: Separator
+  writeline($config{'linecolor'} . ("-" x 70) . $RST, 1);
+
+  # Lines 4-15: Water column cross-section (12 rows)
+  my $max_d = $water_depth > 50 ? 50 : $water_depth;
+  my $col_rows = 12;
+  my $col_width = 50;
+
+  for my $row (0 .. $col_rows - 1) {
+    my $row_depth = int(($row / $col_rows) * $max_d);
+    my $next_depth = int((($row + 1) / $col_rows) * $max_d);
+
+    # Depth label
+    my $line = sprintf("%s%3dft%s ", $config{'linecolor'}, $row_depth, $RST);
+
+    # Water column visualization
+    my $lure_row = ($max_d > 0) ? int(($lure_depth / $max_d) * $col_rows) : 0;
+    $lure_row = $col_rows - 1 if $lure_row >= $col_rows;
+    my $progress = ($total_steps > 1) ? ($step / ($total_steps - 1)) : 1;
+    my $lure_col = int($progress * ($col_width - 1));
+
+    for my $col (0 .. $col_width - 1) {
+      if ($row == $lure_row && $col == $lure_col) {
+        $line .= $config{'usercolor'} . ">" . $RST;
+      } elsif ($row == $col_rows - 1) {
+        # Bottom
+        my @bc = ('_', '.', '^', '~');
+        $line .= $config{'promptcolor'} . $bc[int(rand(4))] . $RST;
+      } elsif ($row == 0) {
+        # Surface
+        $line .= "\e[34m~" . $RST;
+      } else {
+        # Fish finder: show nearby fish
+        my $show_fish = 0;
+        if ($g->{fish_finder} && rand(100) < 3) {
+          my ($py, $px) = ($g->{boat_y}, $g->{boat_x});
+          for my $f (@{$g->{fish}}) {
+            next unless $f->{active};
+            my $d = abs($f->{y} - $py) + abs($f->{x} - $px);
+            if ($d <= 4 && abs($f->{depth} - $row_depth) < 5) {
+              $show_fish = 1; last;
+            }
+          }
+        }
+        if ($show_fish) {
+          $line .= $config{'errorcolor'} . "o" . $RST;
+        } else {
+          $line .= "\e[34m " . $RST;
+        }
+      }
+    }
+    writeline($line, 1);
+  }
+
+  # Line 16: Bottom depth
+  writeline(sprintf("%s%3dft%s %s%s%s", $config{'linecolor'}, $max_d, $RST,
+    $config{'promptcolor'}, "=" x $col_width, $RST), 1);
+
+  # Line 17: Retrieve progress bar
+  my $bar_len = 40;
+  my $filled = ($total_steps > 1) ? int(($step / ($total_steps - 1)) * $bar_len) : 0;
+  $filled = $bar_len if $filled > $bar_len;
+  my $bar = $config{'datacolor'} . ("=" x $filled) .
+    $config{'linecolor'} . ("-" x ($bar_len - $filled)) . $RST;
+  writeline($config{'systemcolor'} . " Retrieve: [" . $bar .
+    $config{'systemcolor'} . "] " .
+    $config{'datacolor'} . ($total_steps - $step) . " left" . $RST, 1);
+
+  # Line 18: Lure tip
+  writeline($config{'systemcolor'} . " " . $pat->{hint} . $RST, 1);
+
+  # Lines 19-21: Events
+  for my $i (0 .. 2) {
+    my $e = $events->[$i] // "";
+    if ($e ne "") {
+      writeline($config{'datacolor'} . " * $e" . $RST, 1);
+    } else {
+      writeline("", 1);
+    }
+  }
+
+  # Line 22-23: Controls
+  writeline($config{'systemcolor'} .
+    " [1]Stop [2]Slow [3]Med [4]Fast   Wait=pause   Q=reel in" . $RST, 1);
+  writeline($config{'promptcolor'} . " Reel> " . $RST);
+}
+
+# Find fish candidates near a position
+sub _bc_find_candidates {
+  my ($g, $py, $px, $lure_depth, $lt, $ls, $pattern_bonus) = @_;
+  $pattern_bonus //= 0;
+  my $skill = _bc_skill_level($g);
   my @cands;
+
   for my $f (@{$g->{fish}}) {
     next unless $f->{active};
     my $sp = $FISH[$f->{species}];
-    my $dist = abs($f->{y} - $g->{boat_y}) + abs($f->{x} - $g->{boat_x});
-    next if $dist > 4;
-    next if abs($f->{depth} - $lure_depth) > 10;
+    my $dist = abs($f->{y} - $py) + abs($f->{x} - $px);
+    next if $dist > 2;
+    next if abs($f->{depth} - $lure_depth) > 8;
 
     my $ltype = lc($lt->{type});
     my $lmatch = 0;
     for my $p (@{$sp->{lure}}) { if ($ltype =~ /\Q$p\E/i) { $lmatch = 1; last; } }
 
-    my $ls = $LURE_SIZES[$g->{lure_size}];
     next if $f->{weight} < $ls->{minfish} || $f->{weight} > $ls->{maxfish};
 
     my $surface = $g->{surface}[$f->{y}][$f->{x}];
@@ -726,129 +1101,296 @@ sub _bc_cast {
     }
     $smatch = 1 if $sp->{struct} eq 'open' && $surface == 0;
 
-    my $chance = 25 + ($lmatch ? 20 : 0) + ($smatch ? 10 : 0);
-    $chance -= abs($f->{depth} - $lure_depth) * 2;
-    $chance -= $dist * 5;
+    my $chance = 8 + ($lmatch ? 12 : 0) + ($smatch ? 6 : 0);
+    $chance -= abs($f->{depth} - $lure_depth);
+    $chance -= $dist * 3;
     $chance = int($chance * $g->{weather}{bite_mod} * $ls->{strike_mod});
-    $chance = 5 if $chance < 5; $chance = 85 if $chance > 85;
+    $chance += $pattern_bonus;
+    $chance += $skill;
+    $chance = 2 if $chance < 2; $chance = 65 if $chance > 65;
     push @cands, { fish => $f, chance => $chance };
   }
-
-  if (!@cands) {
-    my @m = ("No bites here.", "Nothing interested.", "Try different water.", "No takers.");
-    writeline($config{'systemcolor'} . " " . $m[int(rand(@m))] . $RST, 1);
-    door_pause(); return;
-  }
-
-  for my $c (sort { $b->{chance} <=> $a->{chance} } @cands) {
-    if (rand(100) < $c->{chance}) { _bc_strike($g, $c->{fish}); return; }
-  }
-
-  my @m = ("A nibble... but no hookup.", "Something bumped the lure.", "A swirl, but no strike.");
-  writeline($config{'systemcolor'} . " " . $m[int(rand(@m))] . $RST, 1);
-  door_pause();
+  return @cands;
 }
 
 # ============================================================================
-# STRIKE AND FIGHT
+# STRIKE AND FIGHT (Full-screen)
 # ============================================================================
 
 sub _bc_strike {
   my ($g, $fish) = @_;
   my $sp = $FISH[$fish->{species}];
+  my $skill = _bc_skill_level($g);
+  my $hook_bonus = _bc_skill_hook_bonus($g);
 
+  # Strike notification
+  door_clear();
   writeline("", 1);
-  writeline($config{'usercolor'} . " Strike!" . $RST, 1);
-  writeline($config{'systemcolor'} . " Hit H to hook!" . $RST, 1);
-  writeline($config{'promptcolor'} . " > " . $RST);
-  my $key = lc(waitkey(""));
+  writeline("", 1);
+  writeline("", 1);
+  writeline($config{'usercolor'} .
+    "          * * *  S T R I K E !  * * *" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'systemcolor'} .
+    "              Set the hook! [H]" . $RST, 1);
+  writeline("", 1);
+  writeline($config{'promptcolor'} . "              > " . $RST);
+  my $key = lc(waitkey("", 3));
 
-  if ($key ne 'h') {
-    writeline("", 1);
-    writeline($config{'systemcolor'} . " Too slow! It spit the lure." . $RST, 1);
-    door_pause(); return;
+  if (!defined $key || $key ne 'h') {
+    my @miss = ("Too slow - it spit the lure!", "Missed the hookset!",
+                "The fish got away!");
+    if (rand(1.0) < $hook_bonus) {
+      writeline("", 1);
+      writeline($config{'datacolor'} . " Almost lost it... but you recovered!" . $RST, 1);
+    } else {
+      writeline("", 1);
+      writeline($config{'systemcolor'} . " " . $miss[int(rand(@miss))] . $RST, 1);
+      door_pause(); return;
+    }
   }
 
-  writeline("", 1);
-  writeline($config{'usercolor'} . " Hooked!" . $RST, 1);
+  # Fight screen
+  my $rod_max = $g->{rod_power} * 8 + 6;
+  my $line_out = 15 + int($sp->{fight} * 5 + $fish->{weight} * 2);
+  my $tension = int(rand(10));
+  my $energy = int($sp->{fight} * 4 + $fish->{weight} * 0.8);
+  my $max_energy = $energy;
+  my $max_tension = $rod_max * 3;
+  my $drag = 1;
+  my $fight_bonus = _bc_skill_fight_bonus($g);
+  my @fight_log;
 
-  my $line_test = $g->{rod_power} * 5 + 4;
-  my $tension = int(rand(20));
-  my $energy = int($sp->{fight} * 3 + $fish->{weight} * 0.5);
-  my $distance = 4 + int($sp->{fight} / 2);
-  my $max_t = $line_test * 3;
+  push @fight_log, "HOOKED! Something's pulling...";
 
-  while ($distance > 0 && $tension < $max_t && $energy > 0) {
-    my $pull = int(rand($sp->{fight} * 2)) + int($fish->{weight} * 0.3);
+  while ($line_out > 0 && $tension < $max_tension && $energy > 0) {
+    my $energy_pct = ($max_energy > 0) ? ($energy / $max_energy) : 0;
 
-    if ($pull > $line_test) {
-      writeline($config{'errorcolor'} . " Be careful - pulling the drag!" . $RST, 1);
-    }
-    $tension += $pull;
+    # Fish pulls
+    my $fish_pull = int(rand($sp->{fight} * 2) * $energy_pct) +
+                    int($fish->{weight} * 0.2);
+    my $drag_mult = (0.5, 1.0, 1.8)[$drag];
+    $tension += int($fish_pull * $drag_mult);
 
-    my $pct = $tension * 100 / $max_t;
-    my $fl = int($pct / 100 * 25); $fl = 25 if $fl > 25;
-    my $bar = "[" . ("=" x $fl) . (" " x (25 - $fl)) . "]";
-    my $tc = $pct > 75 ? $config{'errorcolor'} : $pct > 40 ? $config{'promptcolor'} : $config{'usercolor'};
+    # Draw fight screen
+    _bc_draw_fight($g, $sp, $fish, $line_out, $tension, $max_tension,
+                   $energy, $max_energy, $drag, \@fight_log);
 
-    writeline($config{'systemcolor'} . " Line: " . $tc . $bar .
-      $config{'systemcolor'} . " Dist:" . $config{'datacolor'} . "$distance" .
-      $config{'systemcolor'} . " Energy:" . $config{'datacolor'} . "$energy" . $RST, 1);
-    writeline($config{'systemcolor'} . " [R]eel  [B]ear Down  [G]ive 'em Line " . $RST);
     my $action = lc(waitkey(""));
     writeline("", 1);
 
     if ($action eq 'r') {
-      $distance--; $tension += int(rand(5)) + 2; $energy -= 1;
+      my $reel_gain = 2 + int($drag);
+      $line_out -= $reel_gain;
+      $tension += int(rand(4)) + 1;
+      $energy -= 1 + int($fight_bonus * 0.3);
+      push @fight_log, "Reeling... -${reel_gain}ft";
     } elsif ($action eq 'b') {
-      $tension += int(rand($sp->{fight})) + 3; $energy -= 3;
-      $distance-- if rand(100) < 40;
+      $tension += int(rand($sp->{fight})) + 3 + $drag;
+      $energy -= 3 + int($fight_bonus * 0.5);
+      if (rand(100) < 50) { $line_out -= 1; push @fight_log, "Bearing down - gaining!"; }
+      else { push @fight_log, "Bearing down..."; }
     } elsif ($action eq 'g') {
-      $tension -= int(rand(15)) + 10; $tension = 0 if $tension < 0;
-      $distance++ if rand(100) < 30; $energy -= 1;
+      $tension -= int(rand(20)) + 10; $tension = 0 if $tension < 0;
+      my $give = int(rand(3)) + 1;
+      $line_out += $give;
+      $energy -= 1;
+      push @fight_log, "Gave line +${give}ft - tension drops";
+    } elsif ($action eq 'p') {
+      my $pump_skill = 30 + $skill * 2;
+      if (rand(100) < $pump_skill) {
+        $line_out -= 3;
+        $tension += int(rand(3));
+        $energy -= 2 + int($fight_bonus * 0.4);
+        push @fight_log, "Good pump! -3ft";
+      } else {
+        $tension += int(rand(8)) + 2;
+        push @fight_log, "Bad timing on the pump!";
+      }
+    } elsif ($action eq '1') {
+      $drag = 0; push @fight_log, "Drag -> Loose"; next;
+    } elsif ($action eq '2') {
+      $drag = 1; push @fight_log, "Drag -> Medium"; next;
+    } elsif ($action eq '3') {
+      $drag = 2; push @fight_log, "Drag -> Tight"; next;
     } else {
-      $tension -= int(rand(8)); $tension = 0 if $tension < 0;
+      $tension -= int(rand(5)); $tension = 0 if $tension < 0;
     }
 
-    if ($energy > 0 && rand(100) < 15) {
-      my @ev = ("The fish jumps!", "Making a run!", "Diving deep!");
-      writeline($config{'datacolor'} . " " . $ev[int(rand(@ev))] . $RST, 1);
-      $tension += int(rand(10));
+    $line_out = 0 if $line_out < 0;
+
+    # Fish events
+    if ($energy > 0) {
+      my $run_chance = 10 + int($sp->{fight} * 2 * $energy_pct);
+      if (rand(100) < $run_chance) {
+        my @ev;
+        if ($sp->{fight} >= 8) {
+          @ev = ("POWERFUL RUN! Line screaming!", "Heading for open water!",
+                 "Tail-walking!");
+        } elsif ($sp->{fight} >= 5) {
+          @ev = ("Making a run!", "Diving deep!", "Shaking its head!");
+        } else {
+          @ev = ("Short run.", "Circling.", "Pulling steady.");
+        }
+        my $run_dist = int(rand($sp->{fight})) + 1;
+        $line_out += $run_dist;
+        $tension += int(rand($sp->{fight})) + int($fish->{weight} * 0.2);
+        $energy -= int($run_dist * 0.5);
+        push @fight_log, $ev[int(rand(@ev))] . " +${run_dist}ft";
+      }
     }
+
+    if ($energy <= 3 && $energy > 0) {
+      push @fight_log, "It's tiring out...";
+    }
+
+    # Trim log to last 5 entries
+    shift @fight_log while @fight_log > 5;
+
+    door_keepalive();
   }
 
-  if ($tension >= $max_t) {
+  # Result
+  door_clear();
+  writeline("", 1);
+  if ($tension >= $max_tension) {
+    my @snap = ("SNAP! The line broke!", "Too much pressure!",
+                "The line gave way!");
+    writeline($config{'errorcolor'} . " " . $snap[int(rand(@snap))] . $RST, 1);
     writeline("", 1);
-    writeline($config{'errorcolor'} . " He snapped the line!" . $RST, 1);
     door_pause(); return;
   }
 
-  if ($distance <= 0 || $energy <= 0) {
-    writeline("", 1);
-    writeline($config{'usercolor'} . " You caught a $sp->{name}!" . $RST, 1);
-    writeline($config{'datacolor'} . " Weight: " . sprintf("%.2f", $fish->{weight}) . " lbs" . $RST, 1);
+  if ($line_out <= 0 || $energy <= 0) {
+    _bc_land_fish($g, $fish);
+  }
+}
 
-    push @{$g->{livewell}}, {
-      species => $sp->{name}, weight => $fish->{weight}, price => $sp->{price},
-    };
-    $g->{total_caught}++;
-    $g->{biggest} = $fish->{weight} if $fish->{weight} > $g->{biggest};
-    $g->{species_caught}{$sp->{name}} = ($g->{species_caught}{$sp->{name}} // 0) + 1;
+# Draw full-screen fight display
+sub _bc_draw_fight {
+  my ($g, $sp, $fish, $line_out, $tension, $max_tension,
+      $energy, $max_energy, $drag, $log) = @_;
 
-    $g->{fish} = [grep { $_ != $fish } @{$g->{fish}}];
-    _bc_spawn_one($g);
+  door_clear();
 
-    if ($fish->{weight} >= $sp->{maxw} * 0.7) {
-      door_submit_score($DOOR_NAME, int($fish->{weight} * 100),
-        { species => $sp->{name}, weight => sprintf("%.2f lbs", $fish->{weight}) });
+  # Line 1: Header
+  writeline($config{'themecolor'} . " FISH ON!" .
+    $config{'systemcolor'} . "   Rod: " . $config{'datacolor'} .
+    $g->{rod_power} . "lb test" .
+    $config{'systemcolor'} . "   Drag: " . $config{'datacolor'} .
+    $DRAG_NAMES[$drag] . $RST, 1);
+
+  # Line 2: Separator
+  writeline($config{'linecolor'} . ("-" x 60) . $RST, 1);
+
+  # Line 3-4: Tension bar (large, prominent)
+  my $tpct = ($max_tension > 0) ? ($tension * 100 / $max_tension) : 0;
+  my $tbar_len = 50;
+  my $tfill = int($tpct / 100 * $tbar_len); $tfill = $tbar_len if $tfill > $tbar_len;
+  my $tc = $tpct > 75 ? $config{'errorcolor'} :
+           $tpct > 40 ? $config{'promptcolor'} : $config{'datacolor'};
+  writeline($config{'systemcolor'} . " LINE TENSION" . $RST, 1);
+  writeline(" " . $tc . "[" . ("=" x $tfill) . (" " x ($tbar_len - $tfill)) . "]" .
+    $config{'systemcolor'} . sprintf(" %d%%", int($tpct)) . $RST, 1);
+
+  if ($tpct > 75) {
+    writeline($config{'errorcolor'} . "   !! LINE IS SCREAMING - GIVE LINE !!" . $RST, 1);
+  } elsif ($tpct > 50) {
+    writeline($config{'promptcolor'} . "   Careful - heavy pressure" . $RST, 1);
+  } else {
+    writeline($config{'datacolor'} . "   Line looks good" . $RST, 1);
+  }
+
+  # Line 6-7: Fish stamina bar
+  my $epct = ($max_energy > 0) ? ($energy * 100 / $max_energy) : 0;
+  my $ebar_len = 50;
+  my $efill = int($epct / 100 * $ebar_len); $efill = $ebar_len if $efill > $ebar_len;
+  my $ec = $epct < 25 ? $config{'usercolor'} :
+           $epct < 50 ? $config{'promptcolor'} : $config{'errorcolor'};
+  writeline($config{'systemcolor'} . " FISH STAMINA" . $RST, 1);
+  writeline(" " . $ec . "[" . ("=" x $efill) . (" " x ($ebar_len - $efill)) . "]" .
+    $config{'systemcolor'} . sprintf(" %d%%", int($epct)) . $RST, 1);
+
+  # Line 8: blank
+  writeline("", 1);
+
+  # Line 9: Line out
+  my $line_bar_len = 50;
+  my $line_max = 60 + int($sp->{fight} * 5 + $fish->{weight} * 2);
+  my $lfill = ($line_max > 0) ? int(($line_out / $line_max) * $line_bar_len) : 0;
+  $lfill = $line_bar_len if $lfill > $line_bar_len;
+  $lfill = 0 if $lfill < 0;
+  writeline($config{'systemcolor'} . " LINE OUT: " . $config{'datacolor'} .
+    sprintf("%3dft ", $line_out) .
+    $config{'linecolor'} . "[" . ("~" x $lfill) . (" " x ($line_bar_len - $lfill)) .
+    "]" . $RST, 1);
+
+  # Line 10: blank
+  writeline("", 1);
+
+  # Lines 11-15: Action log (last 5 events)
+  writeline($config{'systemcolor'} . " Action:" . $RST, 1);
+  for my $i (0 .. 4) {
+    my $idx = @$log - 5 + $i;
+    if ($idx >= 0 && $idx < @$log) {
+      writeline($config{'datacolor'} . "   " . $log->[$idx] . $RST, 1);
+    } else {
+      writeline("", 1);
     }
-    if ($fish->{weight} >= $sp->{maxw} * 0.7) {
-      door_log_activity($DOOR_NAME, sprintf("%s caught a %s (%.2f lbs)", $info{'handle'}, $sp->{name}, $fish->{weight}));
-    }
-    if ($fish->{weight} >= $sp->{maxw} * 0.8) {
-      door_broadcast($DOOR_NAME,
-        sprintf("%s caught a trophy %s (%.2f lbs)!", $info{'handle'}, $sp->{name}, $fish->{weight}));
-    }
+  }
+
+  # Line 16: blank
+  writeline("", 1);
+
+  # Lines 17-20: Controls
+  writeline($config{'linecolor'} . ("-" x 60) . $RST, 1);
+  writeline($config{'systemcolor'} .
+    " [R]eel In    [B]ear Down    [G]ive Line    [P]ump Rod" . $RST, 1);
+  writeline($config{'systemcolor'} .
+    " [1]Loose Drag  [2]Med Drag  [3]Tight Drag" . $RST, 1);
+
+  # Line 21: prompt
+  writeline($config{'promptcolor'} . " Fight> " . $RST);
+}
+
+# Land a caught fish
+sub _bc_land_fish {
+  my ($g, $fish) = @_;
+  my $sp = $FISH[$fish->{species}];
+  my $skill = _bc_skill_level($g);
+
+  writeline("", 1);
+  writeline($config{'usercolor'} .
+    "     Landed! " . $sp->{name} . "!" . $RST, 1);
+  writeline($config{'datacolor'} .
+    "     Weight: " . sprintf("%.2f", $fish->{weight}) .
+    " lbs   Value: " . _bc_money($fish->{weight} * $sp->{price}) . $RST, 1);
+
+  if ($skill > 0) {
+    writeline($config{'systemcolor'} . "     Angler Skill: Level $skill" . $RST, 1);
+  }
+  writeline("", 1);
+
+  push @{$g->{livewell}}, {
+    species => $sp->{name}, weight => $fish->{weight}, price => $sp->{price},
+  };
+  $g->{total_caught}++;
+  $g->{biggest} = $fish->{weight} if $fish->{weight} > $g->{biggest};
+  $g->{species_caught}{$sp->{name}} = ($g->{species_caught}{$sp->{name}} // 0) + 1;
+
+  $g->{fish} = [grep { $_ != $fish } @{$g->{fish}}];
+  _bc_spawn_one($g);
+
+  if ($fish->{weight} >= $sp->{maxw} * 0.7) {
+    door_submit_score($DOOR_NAME, int($fish->{weight} * 100),
+      { species => $sp->{name}, weight => sprintf("%.2f lbs", $fish->{weight}) });
+    door_log_activity($DOOR_NAME, sprintf("%s caught a %s (%.2f lbs)",
+      $info{'handle'}, $sp->{name}, $fish->{weight}));
+  }
+  if ($fish->{weight} >= $sp->{maxw} * 0.8) {
+    door_broadcast($DOOR_NAME,
+      sprintf("%s caught a trophy %s (%.2f lbs)!",
+        $info{'handle'}, $sp->{name}, $fish->{weight}));
   }
   door_pause();
 }
@@ -1292,17 +1834,17 @@ sub _bc_duel_run {
     if (rand(100) < $catch_chance) {
       # Caught something - pick a random species from current lake
       my $lake = $LAKES[$g->{lake_idx}];
-      my $species = $lake->{species}[int(rand(scalar @{$lake->{species}}))];
-      my $sp = $SPECIES{$species};
-      my $weight = $sp->{min_wt} + rand($sp->{max_wt} - $sp->{min_wt});
+      my $sp_idx = $lake->{species}[int(rand(scalar @{$lake->{species}}))];
+      my $sp = $FISH[$sp_idx];
+      my $weight = $sp->{minw} + rand($sp->{maxw} - $sp->{minw});
       $weight *= (0.8 + rand(0.4));  # Some variation
 
-      writeline($config{'usercolor'} . " Caught: " . $config{'datacolor'} . $species .
+      writeline($config{'usercolor'} . " Caught: " . $config{'datacolor'} . $sp->{name} .
         " - " . sprintf("%.1f lbs", $weight) . "!" . $RST, 1);
 
       if ($weight > $my_best) {
         $my_best = $weight;
-        $my_best_name = $species;
+        $my_best_name = $sp->{name};
         writeline($config{'usercolor'} . " New best catch!" . $RST, 1);
       }
     } else {

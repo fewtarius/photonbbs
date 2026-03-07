@@ -21,9 +21,9 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 The latest version of this software can be downloaded from:
 https://github.com/fewtarius/photonbbs
 
-## Live Demo
+## Terminal Tavern BBS
 
-Try PhotonBBS and PhotonMUD live at **Terminal Tavern**:
+Join us at **Terminal Tavern** where you can chat, play games, and test out PhotonBBS and PhotonMUD!
 
 ```
 telnet bbs.terminaltavern.com
@@ -102,7 +102,23 @@ PhotonBBS also supports classic external BBS doors via drop files:
 
 ## Quick Start
 
-### Installation via Docker (Recommended)
+### Using Pre-Built Container (Fastest)
+
+```bash
+# Pull and run the latest image
+docker run -d --name photonbbs \
+  -p 23:23 \
+  --privileged \
+  -v photonbbs-data:/appdata \
+  ghcr.io/fewtarius/photonbbs:latest
+
+# Connect via telnet
+telnet localhost 23
+```
+
+Multi-architecture images (linux/amd64 and linux/arm64) are published automatically to [GitHub Container Registry](https://github.com/fewtarius/photonbbs/pkgs/container/photonbbs).
+
+### Building from Source
 
 ```bash
 # Clone the repository
@@ -117,6 +133,29 @@ telnet localhost 23
 ```
 
 That's it! PhotonBBS will build and start automatically.
+
+### SSH Access (Optional)
+
+PhotonBBS supports SSH access with public key authentication. Users manage their SSH keys from the BBS itself.
+
+**Enable SSH:**
+
+1. Set `PHOTONBBS_SSH_ENABLE=1` in your docker-compose environment
+2. Expose port 22 inside the container (mapped to 2222 by default to avoid conflicts)
+3. Restart the container
+
+**User setup (from the BBS):**
+```
+/set sshkey           - Paste your public key to enable SSH login
+/set sshkey remove    - Remove your SSH key
+```
+
+**Connect via SSH:**
+```bash
+ssh -p 2222 bbs@your-bbs-host
+```
+
+SSH users are automatically authenticated by their key - no password prompt. The connection is forced directly into the BBS client with no shell access.
 
 ### System Requirements
 
@@ -246,6 +285,20 @@ make docker-logs
 make docker-shell
 ```
 
+### Using Pre-Built Images
+
+Pre-built multi-architecture images are available from GitHub Container Registry:
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/fewtarius/photonbbs:latest
+
+# Or pull a specific version
+docker pull ghcr.io/fewtarius/photonbbs:20260307.1
+```
+
+See [GitHub Container Registry](https://github.com/fewtarius/photonbbs/pkgs/container/photonbbs) for all available tags.
+
 ### Makefile Targets
 
 **Docker operations:**
@@ -325,7 +378,7 @@ PhotonBBS implements several security features:
 
 - **GitHub**: https://github.com/fewtarius/photonbbs
 - **Issues**: Report bugs and feature requests via GitHub Issues
-- **Live Demo**: telnet bbs.terminaltavern.com
+- **Terminal Tavern BBS**: telnet bbs.terminaltavern.com
 
 ## Contributing
 

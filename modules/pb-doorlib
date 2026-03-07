@@ -394,7 +394,18 @@ sub _format_score {
 
 # Clear screen
 sub door_clear {
+  $idle = time;  # Reset idle timer during door game activity
+  $idlenotified = 0;
+  _door_broker_keepalive();
   writeline($CLR, 0);
+}
+
+# Reset BBS idle timer and send broker keepalive
+# Call this during long door game operations (AI turns, animations, etc.)
+sub door_keepalive {
+  $idle = time;
+  $idlenotified = 0;
+  _door_broker_keepalive();
 }
 
 # Standard door header
@@ -411,6 +422,8 @@ sub door_header {
 sub door_pause {
   my ($msg) = @_;
   $msg //= "Press any key to continue...";
+  $idle = time;
+  $idlenotified = 0;
   _door_broker_keepalive();
   writeline($config{'systemcolor'} . " $msg" . $RST);
   waitkey("");
@@ -439,7 +452,7 @@ sub door_noyes {
 sub door_getnum {
   my ($prompt, $max) = @_;
   writeline($config{'promptcolor'} . " $prompt" . $RST . " ");
-  my $input = getline(text, length("$max") + 1, "", 1);
+  my $input = getline('text', length("$max") + 1, "", 1);
   chomp $input;
   $input =~ s/\D//g;
   return 0 if $input eq "";
@@ -451,7 +464,7 @@ sub door_getnum {
 sub door_getamount {
   my ($prompt, $max) = @_;
   writeline($config{'promptcolor'} . " $prompt" . $RST . " ");
-  my $input = getline(text, 12, "", 1);
+  my $input = getline('text', 12, "", 1);
   chomp $input;
   $input =~ s/[^\d]//g;
   return 0 if $input eq "";
@@ -901,6 +914,110 @@ sub door_draw_slots {
   }
   writeline($mid, 1);
   writeline(" " . $lc . $bl . $h9 . $tu . $h9 . $tu . $h9 . $br . $RST, 1);
+}
+
+# ============================================================================
+# UNIFIED SLASH COMMANDS
+# ============================================================================
+# Door games call door_check_command() when the user presses '/' during input.
+# It reads a command via getline and dispatches it. Returns 1 if handled.
+
+my %_DOOR_COMMANDS = (
+  'who'     => \&_door_cmd_who,
+  'online'  => \&_door_cmd_who,
+  'w'       => \&_door_cmd_who,
+  'scores'  => \&_door_cmd_scores,
+  'top'     => \&_door_cmd_scores,
+  'chat'    => \&_door_cmd_chat,
+  'c'       => \&_door_cmd_chat,
+  'help'    => \&_door_cmd_help,
+  'h'       => \&_door_cmd_help,
+  '?'       => \&_door_cmd_help,
+);
+
+# Main entry: call when user presses '/' during a door game prompt.
+# $doorname = current game name, used for /scores and /chat
+# Returns: 'quit' if user wants to exit, 1 if command handled, 0 if not
+sub door_check_command {
+  my ($doorname) = @_;
+  writeline($config{'promptcolor'} . "/" . $RST);
+  my $cmd_line = getline('text', 60, "", 1);
+  return 0 unless defined $cmd_line && $cmd_line =~ /\S/;
+  $cmd_line =~ s/^\s+|\s+$//g;
+
+  my ($cmd, $args) = split(/\s+/, $cmd_line, 2);
+  $cmd = lc($cmd // '');
+  $args //= '';
+
+  # Check for quit/exit
+  if ($cmd eq 'quit' || $cmd eq 'exit' || $cmd eq 'q') {
+    return 'quit';
+  }
+
+  my $handler = $_DOOR_COMMANDS{$cmd};
+  if ($handler) {
+    $handler->($doorname, $args);
+    return 1;
+  }
+
+  writeline($config{'errorcolor'} . " Unknown command: /$cmd  (try /help)" . $RST, 1);
+  return 0;
+}
+
+sub _door_cmd_who {
+  my ($doorname, $args) = @_;
+  writeline("", 1);
+  if (defined &whosonline) {
+    whosonline();
+  } else {
+    # Fallback: show online players from door broker
+    my @players = door_get_online_players();
+    if (@players) {
+      writeline($config{'themecolor'} . " Online:" . $RST, 1);
+      for my $p (@players) {
+        writeline("  " . $config{'usercolor'} . $p . $RST, 1);
+      }
+    } else {
+      writeline($config{'systemcolor'} . " No other players online." . $RST, 1);
+    }
+  }
+  writeline("", 1);
+}
+
+sub _door_cmd_scores {
+  my ($doorname, $args) = @_;
+  writeline("", 1);
+  my $game = $args || $doorname;
+  door_show_scores($game, "$game High Scores", "Score");
+  writeline("", 1);
+}
+
+sub _door_cmd_chat {
+  my ($doorname, $args) = @_;
+  if ($args && $args =~ /\S/) {
+    door_chat_send($doorname, $args);
+    my $handle = $info{'handle'} // 'Unknown';
+    writeline($config{'usercolor'} . "<$handle>" . $config{'systemcolor'} . " $args" . $RST, 1);
+  } else {
+    door_chat_input($doorname);
+  }
+}
+
+sub _door_cmd_help {
+  my ($doorname, $args) = @_;
+  writeline("", 1);
+  writeline($config{'themecolor'} . " Door Game Commands:" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "/who" . $config{'themecolor'} .
+    " ....... " . $config{'usercolor'} . "Who's online" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "/scores" . $config{'themecolor'} .
+    " .... " . $config{'usercolor'} . "View high scores" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "/chat" . $config{'themecolor'} .
+    " ...... " . $config{'usercolor'} . "Send chat message" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "/quit" . $config{'themecolor'} .
+    " ...... " . $config{'usercolor'} . "Exit game" . $RST, 1);
+  writeline("  " . $config{'promptcolor'} . "/help" . $config{'themecolor'} .
+    " ...... " . $config{'usercolor'} . "This help" . $RST, 1);
+  writeline("", 1);
 }
 
 # ============================================================================

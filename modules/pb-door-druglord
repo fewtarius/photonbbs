@@ -792,6 +792,10 @@ sub _dl_trade_menu {
         $g->{quit} = 1;
         $trading = 0;
       }
+    } elsif ($choice eq '/') {
+      my $result = door_check_command($DOOR_NAME);
+      if ($result && $result eq 'quit') { $g->{quit} = 1; $trading = 0; }
+      else { door_pause() unless $result; }
     }
   }
 }

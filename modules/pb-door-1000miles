@@ -128,8 +128,24 @@ sub _mb_shuffle {
   }
 }
 
+# Reshuffle discards back into the deck when it runs out
+sub _mb_reshuffle {
+  my ($g) = @_;
+  my @pile = @{$g->{discard_pile} // []};
+  return unless @pile;
+  $g->{deck} = \@pile;
+  _mb_shuffle($g->{deck});
+  $g->{discard_pile} = [];
+  $g->{discard} = -1;
+  push @{$g->{action_log}}, "Deck empty - discard pile reshuffled (" . scalar(@pile) . " cards)";
+}
+
 sub _mb_draw {
   my ($g, $pi) = @_;
+  # If deck is empty, reshuffle discard pile
+  if (!@{$g->{deck}} && @{$g->{discard_pile} // []}) {
+    _mb_reshuffle($g);
+  }
   return -1 unless @{$g->{deck}};
   my $card = shift @{$g->{deck}};
   my $p = $g->{players}[$pi];
@@ -188,6 +204,7 @@ sub _mb_new_hand {
   _mb_shuffle($deck);
   $g->{deck} = $deck;
   $g->{discard} = -1;
+  $g->{discard_pile} = [];
   $g->{goal} = $GOAL_SHORT;
   $g->{extended} = 0;
   $g->{finished} = 0;
@@ -444,6 +461,7 @@ sub _mb_discard {
   my $card = $g->{players}[$pi]{hand}[$card_idx];
   return 0 if $card == -1 || _mb_is_safety($card);
   $g->{discard} = $card;
+  push @{$g->{discard_pile}}, $card;
   $g->{players}[$pi]{hand}[$card_idx] = -1;
   return 1;
 }
@@ -454,7 +472,10 @@ sub _mb_discard {
 
 sub _mb_check_stuck {
   my ($g) = @_;
+  # Not stuck if deck has cards or discard pile can be reshuffled
   return 0 if @{$g->{deck}};
+  return 0 if @{$g->{discard_pile} // []};
+  # Deck and discard pile both empty - check if anyone can still play
   for my $pi (0 .. $#{$g->{players}}) {
     my $p = $g->{players}[$pi];
     for my $i (0 .. $HAND_SZ - 1) {
@@ -643,10 +664,13 @@ sub _mb_show_board {
   }
 
   my $deck_left = scalar @{$g->{deck}};
+  my $pile_count = scalar @{$g->{discard_pile} // []};
   my $disc = $g->{discard} >= 0 ? $CARD_NAMES[$g->{discard}] : "---";
   writeline("", 1);
   writeline($config{'systemcolor'} . " Deck: " . $config{'datacolor'} .
-    "$deck_left" . $config{'systemcolor'} . "  Discard: " .
+    "$deck_left" . $config{'systemcolor'} . "  Pile: " .
+    $config{'datacolor'} . "$pile_count" .
+    $config{'systemcolor'} . "  Last: " .
     $config{'datacolor'} . $disc . $RST, 1);
 }
 
@@ -888,10 +912,15 @@ sub _mb_do_human_turn {
     }
 
     writeline("", 1);
-    writeline($config{'systemcolor'} . " [1-7] Play  [D+#] Discard  [S] Scores  [Q] Quit " . $config{'promptcolor'} . "> " . $RST);
+    writeline($config{'systemcolor'} . " [1-7] Play  [D+#] Discard  [S] Scores  [/] Cmds  [Q] Quit " . $config{'promptcolor'} . "> " . $RST);
     my $input = uc(waitkey(""));
     writeline("", 1);
 
+    if ($input eq '/') {
+      my $result = door_check_command($DOOR_NAME);
+      if ($result && $result eq 'quit') { $g->{quit} = 1; return 0; }
+      door_pause(); next;
+    }
     if ($input eq 'Q') { $g->{quit} = 1; return 0; }
     if ($input eq 'S') { _mb_show_scores($g); door_pause(); next; }
 
@@ -1057,9 +1086,18 @@ sub _mb_show_hand_result {
     writeline($config{'promptcolor'} . " " . $g->{players}[$winner]{name} .
       " reached " . $g->{players}[$winner]{mileage} . " km! Winner!" . $RST, 1);
   } else {
-    writeline($config{'systemcolor'} . " Hand over - deck exhausted." . $RST, 1);
-    writeline($config{'datacolor'} . " " . $g->{players}[$winner]{name} .
-      " wins with " . $best_miles . " km." . $RST, 1) if $winner >= 0;
+    writeline($config{'systemcolor'} . " Hand over - all cards exhausted!" . $RST, 1);
+    if ($winner >= 0) {
+      writeline($config{'promptcolor'} . " " . $g->{players}[$winner]{name} .
+        " wins with " . $best_miles . " km!" . $RST, 1);
+      # Show all players' mileage for context
+      for my $pi (0 .. $#{$g->{players}}) {
+        next if $pi == $winner;
+        my $m = $g->{players}[$pi]{mileage};
+        writeline($config{'systemcolor'} . "   " . $g->{players}[$pi]{name} .
+          ": " . $config{'datacolor'} . $m . " km" . $RST, 1);
+      }
+    }
   }
 
   writeline("", 1);
@@ -1258,6 +1296,7 @@ sub _mb_serialize_state {
     goal      => $g->{goal},
     extended  => $g->{extended},
     discard   => $g->{discard},
+    discard_pile => $g->{discard_pile},
     deck_size => scalar(@{$g->{deck} // []}),
     action_log => $g->{action_log},
     hands_played => $g->{hands_played},
@@ -1334,6 +1373,7 @@ sub _mb_merge_state {
   $g->{goal}         = $state->{goal}       if defined $state->{goal};
   $g->{extended}     = $state->{extended}   if defined $state->{extended};
   $g->{discard}      = $state->{discard}    if defined $state->{discard};
+  $g->{discard_pile} = $state->{discard_pile} if $state->{discard_pile};
   $g->{action_log}   = $state->{action_log} if $state->{action_log};
   $g->{hands_played} = $state->{hands_played} if defined $state->{hands_played};
 
@@ -1440,6 +1480,7 @@ sub onek_miles_main {
           $synced = 1;
           last;
         }
+        door_keepalive();
         select(undef, undef, undef, 0.5);
       }
     }
@@ -1493,6 +1534,7 @@ sub onek_miles_main {
         if (@log) {
           writeline($config{'systemcolor'} . " " . $log[-1] . $RST, 1);
         }
+        door_keepalive();
         select(undef, undef, undef, 1.5);
       }
 

@@ -189,8 +189,10 @@ The `pb-doorlib` module provides these functions:
 | `door_chat_poll($game)` | Poll for new chat messages (returns list) |
 | `door_chat_input($game)` | Interactive chat prompt |
 | `door_chat_display($game)` | Display and clear pending chat |
-| `door_clear()` | Clear screen |
-| `door_pause($msg)` | Wait for keypress |
+| `door_keepalive()` | Reset idle timer + broker heartbeat |
+| `door_check_command($game)` | Handle unified `/` commands (returns 'quit', 1, or 0) |
+| `door_clear()` | Clear screen (also calls keepalive) |
+| `door_pause($msg)` | Wait for keypress (also calls keepalive) |
 | `door_yesno($prompt)` | Y/N prompt (default Y) |
 | `door_noyes($prompt)` | Y/N prompt (default N) |
 | `door_getnum($prompt, $min, $max)` | Numeric input |
@@ -205,6 +207,49 @@ The `pb-doorlib` module provides these functions:
 | `door_broker_move($room)` | Move to different broker room |
 | `door_broker_disconnect()` | Disconnect from broker |
 | `door_broker_room_players()` | List players in current broker room |
+
+### Keepalive and Idle Prevention
+
+Door games that have wait loops (AI turns, multiplayer polling, `select()` delays)
+must call `door_keepalive()` to prevent the BBS idle timer from disconnecting the user.
+This is automatically called by `door_clear()` and `door_pause()`, but must be added
+explicitly before any `select()` or long processing loop:
+
+```perl
+# Before a select() wait
+door_keepalive();
+my $ready = select(undef, undef, undef, $timeout);
+
+# In an AI processing loop
+for my $ai_player (@ais) {
+    door_keepalive();
+    _process_ai_turn($ai_player);
+}
+```
+
+### Unified Slash Commands
+
+All door games support unified `/` commands via `door_check_command($game)`.
+To integrate, add a `/` handler in your game's input loop:
+
+```perl
+# For waitkey()-based games:
+my $cmd = uc(waitkey(""));
+if ($cmd eq '/') {
+    my $result = door_check_command($DOOR_NAME);
+    if ($result && $result eq 'quit') { $g->{quit} = 1; }
+    else { door_pause() unless $result; }
+    next;
+}
+
+# For getline()-based games (e.g. Sea Battle coordinate input):
+if ($input =~ /^\//) {
+    # Parse and dispatch manually - see pb-door-seabattle for example
+}
+```
+
+Available commands: `/who`, `/scores`, `/chat <msg>`, `/quit`, `/help`.
+Commands return 'quit' to exit, 1 if handled, 0 if unrecognized.
 
 ### Multiplayer Patterns
 

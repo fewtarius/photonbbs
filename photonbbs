@@ -214,7 +214,7 @@ unless (-d $datadir) {
 # Set permissions for the data directory recursively
 if (-d $datadir && defined $bbs_uid && defined $bbs_gid) {
     system("chown -R $config{'unixuser'}:$config{'unixuser'} $datadir $nodes_dir $nodeinfo_dir");
-    system("chmod -R 0750 $datadir $nodes_dir $nodeinfo_dir");
+    system("chmod -R 0770 $datadir $nodes_dir $nodeinfo_dir");
 } else {
     die "[bbsd] [ERROR] Data directory $datadir does not exist or $config{'unixuser'} user/group could not be created.\n";
 }

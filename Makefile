@@ -11,7 +11,7 @@ TARGET = $(BINDIR)/photonbbs-tty
 SOURCE = $(SRCDIR)/photonbbs-tty.c
 
 # Docker configuration
-DOCKER_IMAGE = fewtarius/photonbbs
+DOCKER_IMAGE = ghcr.io/fewtarius/photonbbs
 DOCKER_COMPOSE = docker-compose
 DOCKER_COMPOSE_FILE = docker/docker-compose.yml
 
@@ -34,7 +34,7 @@ INSTALL_BIN = $(PREFIX)/sbin
 INSTALL_OWNER ?= root
 INSTALL_GROUP ?= root
 
-.PHONY: all clean install uninstall help check-deps docker-build docker-up docker-down docker-logs docker-shell docker-clean
+.PHONY: all clean install uninstall help check-deps docker-pull docker-build docker-up docker-down docker-logs docker-shell docker-clean
 
 all: $(TARGET)
 
@@ -140,7 +140,8 @@ help:
 	@echo "  debug           Build with debug symbols"
 	@echo ""
 	@echo "Docker Targets:"
-	@echo "  docker-build    Build Docker image"
+	@echo "  docker-pull     Pull latest image from GitHub Container Registry"
+	@echo "  docker-build    Build Docker image from source"
 	@echo "  docker-up       Start PhotonBBS container (docker-compose up -d)"
 	@echo "  docker-down     Stop PhotonBBS container"
 	@echo "  docker-restart  Restart PhotonBBS container"
@@ -153,7 +154,7 @@ help:
 	@echo "  PREFIX          Installation prefix (default: /opt/photonbbs)"
 	@echo "  CC              C compiler (default: gcc)"
 	@echo "  CFLAGS          Compiler flags"
-	@echo "  DOCKER_IMAGE    Docker image name (default: fewtarius/photonbbs)"
+	@echo "  DOCKER_IMAGE    Docker image name (default: ghcr.io/fewtarius/photonbbs)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make                          # Build the TTY wrapper"
@@ -163,6 +164,11 @@ help:
 	@echo "  sudo make install             # Install TTY wrapper system-wide"
 
 # Docker build targets
+docker-pull:
+	@echo "Pulling latest PhotonBBS image from GitHub Container Registry..."
+	docker pull ghcr.io/fewtarius/photonbbs:latest
+	@echo "Pull complete. Run 'make docker-up' to start."
+
 docker-build:
 	@echo "Building PhotonBBS Docker image..."
 	cd docker && $(DOCKER_COMPOSE) build

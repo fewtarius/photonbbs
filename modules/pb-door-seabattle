@@ -263,6 +263,7 @@ sub _sb_play_pvp {
     }
     $ready = $s->{game_state}{"p${opp_idx}_ready"} // 0;
     writeline("\r" . $config{'systemcolor'} . " Waiting... " . (time() - $wait_start) . "s " . $RST, 0) unless $ready;
+    door_keepalive();
     select(undef, undef, undef, 1) unless $ready;
   }
 
@@ -393,6 +394,7 @@ sub _sb_play_pvp {
         }
 
         # Fall back to session file every 2 seconds
+        door_keepalive();
         select(undef, undef, undef, 1);
         my $s2 = door_session_poll($DOOR_NAME, $session_id);
         unless ($s2) {
@@ -859,10 +861,25 @@ sub _sb_show_ship_status {
 sub _sb_player_fire {
   my ($g) = @_;
 
-  writeline($config{'promptcolor'} . " Fire at (e.g. A5, Q to quit): " . $RST);
-  my $input = getline(text, 4, "", 1);
+  writeline($config{'promptcolor'} . " Fire at (e.g. A5, /cmd, Q to quit): " . $RST);
+  my $input = getline(text, 10, "", 1);
   chomp $input;
   return 'quit' if uc($input) eq 'Q';
+
+  # Handle slash commands
+  if ($input =~ /^\//) {
+    my $cmd_line = substr($input, 1);
+    $cmd_line =~ s/^\s+|\s+$//g;
+    my ($cmd, $args) = split(/\s+/, $cmd_line, 2);
+    $cmd = lc($cmd // '');
+    if ($cmd eq 'quit' || $cmd eq 'exit' || $cmd eq 'q') { return 'quit'; }
+    if ($cmd eq 'who' || $cmd eq 'w' || $cmd eq 'online') { _door_cmd_who($DOOR_NAME, $args); door_pause(); }
+    elsif ($cmd eq 'scores' || $cmd eq 'top') { _door_cmd_scores($DOOR_NAME, $args); door_pause(); }
+    elsif ($cmd eq 'chat' || $cmd eq 'c') { _door_cmd_chat($DOOR_NAME, $args); }
+    elsif ($cmd eq 'help' || $cmd eq 'h') { _door_cmd_help($DOOR_NAME, $args); door_pause(); }
+    else { writeline($config{'errorcolor'} . " Unknown: /$cmd (try /help)" . $RST, 1); door_pause(); }
+    return 'invalid';
+  }
 
   my ($ty, $tx) = _sb_parse_coord(uc($input));
   if ($ty < 0) {

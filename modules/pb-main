@@ -937,6 +937,12 @@ sub teleconf {
         writeline($RST,1);
         goto telemain;
       }
+      if ($setcommand =~/^SSHKEY/i) {
+        my (undef, undef, $subarg) = split(/\s+/, $chatline, 3);
+        chsshkey($subarg);
+        writeline($RST, 1);
+        goto telemain;
+      }
       writeline($BWH."Unknown ".$config{'usercolor'}."SET".$BWH." command",1);
       goto telemain;
     }

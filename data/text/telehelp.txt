@@ -48,6 +48,8 @@
   @THEMECLRPHONE                   @BGNSet your phone number
   @THEMECLRDOB                     @BGNChange your DOB
   @THEMECLRANSI                    @BGNChange your ANSI preference
+  @THEMECLRSSHKEY                  @BGNSet your SSH public key (paste key to add)
+  @THEMECLRSSHKEY REMOVE           @BGNRemove your SSH key
   @THEMECLRDEFAULT                 @BGNSets your default channel to the current channel
   @THEMECLRUNIXPWD                 @BGNChange your local unix password (LOCAL only)
 

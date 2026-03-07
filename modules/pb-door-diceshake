@@ -588,6 +588,7 @@ sub _ds_join_game {
       $game_state = $s->{game_state};
       last;
     }
+    door_keepalive();
     select(undef, undef, undef, 1);
   }
 
@@ -675,6 +676,7 @@ sub _ds_game_loop {
         if (@log) {
           writeline($config{'systemcolor'} . " " . $log[-1] . $RST, 1);
         }
+        door_keepalive();
         select(undef, undef, undef, 1.2);
       }
     }
@@ -807,6 +809,14 @@ sub _ds_human_turn {
         $g->{dice} = undef;
         return 'quit';
       }
+      next;
+    }
+
+    # Slash commands
+    if ($cmd eq '/') {
+      my $result = door_check_command($DOOR_NAME);
+      if ($result && $result eq 'quit') { $g->{dice} = undef; return 'quit'; }
+      door_pause() unless $result;
       next;
     }
 
