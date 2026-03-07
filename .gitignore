@@ -33,3 +33,4 @@ tools/telnet-test-proxy.py
 # CLIO (managed automatically)
 .clio/*
 !.clio/instructions.md
+modules/.pb-main.swp
