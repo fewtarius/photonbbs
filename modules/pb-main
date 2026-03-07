@@ -699,6 +699,22 @@ sub telechannel {
       if ($line eq $info{'handle'}) {
         next;
       }
+      # Skip users who are in a door game (not actively in chat)
+      my $in_chat = 1;
+      my ($tu_node) = $teleuser =~ /([^\/]+)$/;
+      my $node_file = $config{'home'} . $config{'nodes'} . "/" . $tu_node;
+      if (-e $node_file) {
+        if (open(my $nf, '<', $node_file)) {
+          my $ndata = <$nf>; close($nf);
+          if ($ndata) {
+            chomp $ndata;
+            my @nfields = split(/\|/, $ndata);
+            my $loc = $nfields[6] // '';
+            $in_chat = 0 unless $loc eq 'Chat' || $loc eq '';
+          }
+        }
+      }
+      next unless $in_chat;
       ++$usercount;
       if ($usercount gt 1) {
         $channelusers=$channelusers.", ".$line;
@@ -1490,7 +1506,14 @@ sub telesend {
       $broker_msg = "\@INPUTCLR" . $info{'handle'} . " " . $sendmessage . "\@INPUTCLR";
     }
 
-    # All delivery is via broker - excludes the sender
+    # Echo sender's own message locally (broker excludes sender)
+    unless ($leaving eq 1) {
+      my $width = $config{'terminal_width'} || 80;
+      print "\e[${width}D\e[2K";
+      writeline(colorline($broker_msg), 1);
+    }
+
+    # Deliver to others via broker
     if ($_TC_BROKER_SOCK && $_TC_BROKER_CHAN && defined &broker_send_room_message) {
       eval {
         broker_send_room_message($_TC_BROKER_SOCK, "tc-$_TC_BROKER_CHAN",
