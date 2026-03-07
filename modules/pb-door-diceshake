@@ -392,6 +392,7 @@ sub diceshake_main {
   # Init color codes after config loaded
   my $playing = 1;
   while ($playing) {
+    door_show_messages($DOOR_NAME);
     door_clear();
     writeline("", 1);
     writeline($config{'themecolor'} . "           D I C E   S H A K E" . $RST, 1);

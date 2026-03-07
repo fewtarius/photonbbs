@@ -44,7 +44,7 @@ sub mechwars_main {
         $player = mw_player_create($info{'handle'});
         unless ($player) {
             # User quit at mech selection
-            iamat($info{'handle'}, "At the main menu");
+            iamat($info{'handle'}, "Finished MechWars");
             return;
         }
     }
@@ -68,7 +68,7 @@ sub mechwars_main {
         writeline($config{'systemcolor'} . " Come back tomorrow for " . TURNS_PER_DAY . " fresh turns." . $RST, 1);
         door_pause();
         mw_player_save($player);
-        iamat($info{'handle'}, "At the main menu");
+        iamat($info{'handle'}, "Finished MechWars");
         return;
     }
 
@@ -107,7 +107,7 @@ sub mechwars_main {
     door_log_activity($DOOR_NAME,
         "$info{'handle'} signed off MechWars (L$player->{level} $player->{mech_type})");
 
-    iamat($info{'handle'}, "At the main menu");
+    iamat($info{'handle'}, "Finished MechWars");
 }
 
 # ============================================================================
@@ -183,8 +183,12 @@ sub _mw_command_loop {
     elsif ($cmd eq 'N') { mw_deploy_mines($player); }
     elsif ($cmd eq 'B') { mw_fortress_menu($player); }
     elsif ($cmd eq 'R') {
-        door_show_scores($DOOR_NAME, "MechWars Rankings", "Kills");
-        door_pause();
+        mw_show_scoreboard();
+        if (door_yesno("View universe statistics?")) {
+            mw_universe_stats();
+        } else {
+            door_pause();
+        }
     }
     elsif ($cmd eq 'H') { door_chat_input($DOOR_NAME); }
     elsif ($cmd eq '?') { _mw_help(); }
