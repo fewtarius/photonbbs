@@ -424,6 +424,7 @@ sub _st_command_menu {
       return 0;
     }
   }
+  elsif (door_check_shortcut($cmd, $DOOR_NAME)) { return 1; }
   elsif ($cmd eq '/') {
     my $result = door_check_command($DOOR_NAME);
     return 0 if ($result && $result eq 'quit');

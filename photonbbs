@@ -529,6 +529,7 @@ sub run_hourly_programs {
     };
     while (my $file = readdir($hdh)) {
         next if $file =~ /^\./;
+        next if $file =~ /\.(md|txt|log|bak)$/i;  # Skip documentation and non-script files
         my $full = "$hourly_dir/$file";
         next unless -f $full && -x $full;
         my $thr = threads->create(sub {
@@ -556,6 +557,7 @@ sub run_daily_programs {
     };
     while (my $file = readdir($ddh)) {
         next if $file =~ /^\./;
+        next if $file =~ /\.(md|txt|log|bak)$/i;  # Skip documentation and non-script files
         my $full = "$daily_dir/$file";
         next unless -f $full && -x $full;
         my $thr = threads->create(sub {

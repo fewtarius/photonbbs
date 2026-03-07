@@ -813,6 +813,7 @@ sub _ds_human_turn {
     }
 
     # Slash commands
+    next if door_check_shortcut($cmd, $DOOR_NAME);
     if ($cmd eq '/') {
       my $result = door_check_command($DOOR_NAME);
       if ($result && $result eq 'quit') { $g->{dice} = undef; return 'quit'; }

@@ -613,7 +613,7 @@ sub door_get_all_players {
   my @players;
   if (opendir(my $dh, $dir)) {
     for my $f (readdir($dh)) {
-      next unless $f =~ /^(.+)\.dat$/ && $f ne 'scores.dat' && $f !~ /^(universe|world|galaxy|shared)/;
+      next unless $f =~ /^(.+)\.dat$/ && $f !~ /^(scores|messages|universe|world|galaxy|shared|economy|news|bases|drones|planets|derby|sessions)/;
       my $name = $1;
       $name =~ s/_/ /g;
       push @players, $name;
@@ -630,7 +630,8 @@ sub door_load_player {
   return undef unless -e $file;
   my $data;
   eval { $data = lock_retrieve($file); };
-  return $@ ? undef : $data;
+  return undef if $@ || !$data || ref($data) ne 'HASH';
+  return $data;
 }
 
 # Save another player's data (after PvP attack modifies it)
@@ -935,6 +936,25 @@ my %_DOOR_COMMANDS = (
   'h'       => \&_door_cmd_help,
   '?'       => \&_door_cmd_help,
 );
+
+# Quick single-key shortcut handler for door games.
+# Call from waitkey() loop: next if door_check_shortcut($key, $DOOR_NAME);
+# Returns 1 if the key was a shortcut (handled), 0 if not.
+sub door_check_shortcut {
+  my ($key, $doorname) = @_;
+  if ($key eq '#') {
+    door_keepalive();
+    whosonline() if defined &whosonline;
+    door_pause();
+    return 1;
+  }
+  if ($key eq '%') {
+    door_keepalive();
+    oneliners() if defined &oneliners;
+    return 1;
+  }
+  return 0;
+}
 
 # Main entry: call when user presses '/' during a door game prompt.
 # $doorname = current game name, used for /scores and /chat
