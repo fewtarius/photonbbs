@@ -84,6 +84,9 @@ sub doevents {
       getpages();
     }
   }
+  # Keep broker connections alive during all waitkey/getline loops
+  # (door games, menus, etc.) - throttled internally to every 30s
+  eval { _door_broker_keepalive() } if defined &_door_broker_keepalive;
 }
 
 # Connect this session to the broker and join the global room for pages/broadcasts

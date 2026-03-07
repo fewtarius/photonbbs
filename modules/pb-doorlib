@@ -69,6 +69,7 @@ sub _door_broker_keepalive {
   $_DOOR_LAST_KEEPALIVE = $now;
   eval { broker_heartbeat($_BBS_BROKER_SOCK) } if $_BBS_BROKER_SOCK;
   eval { broker_heartbeat($_TC_BROKER_SOCK) }  if defined $_TC_BROKER_SOCK && $_TC_BROKER_SOCK;
+  eval { broker_heartbeat($_DOOR_BROKER_SOCK) } if $_DOOR_BROKER_SOCK;
 }
 
 # Send a chat message to the current door game room via broker

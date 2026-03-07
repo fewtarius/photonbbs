@@ -122,6 +122,7 @@ main: {
   $SIG{HUP}=sub { cbreak(off); errorout("SIGHUP.."); };
   $SIG{TERM}=sub { cbreak(off); errorout("SIGTERM.."); };
   $SIG{QUIT}=sub { cbreak(off); errorout("SIGQUIT.."); };
+  $SIG{PIPE}='IGNORE';  # Prevent crash on dead broker sockets
 
   $debug=1;
   hi();
