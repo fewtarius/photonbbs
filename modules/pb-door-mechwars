@@ -44,7 +44,7 @@ sub mechwars_main {
         $player = mw_player_create($info{'handle'});
         unless ($player) {
             # User quit at mech selection
-            iamat($info{'handle'}, "At the main menu");
+            iamat($info{'handle'}, "Finished MechWars");
             return;
         }
     }
@@ -68,7 +68,7 @@ sub mechwars_main {
         writeline($config{'systemcolor'} . " Come back tomorrow for " . TURNS_PER_DAY . " fresh turns." . $RST, 1);
         door_pause();
         mw_player_save($player);
-        iamat($info{'handle'}, "At the main menu");
+        iamat($info{'handle'}, "Finished MechWars");
         return;
     }
 
@@ -107,7 +107,7 @@ sub mechwars_main {
     door_log_activity($DOOR_NAME,
         "$info{'handle'} signed off MechWars (L$player->{level} $player->{mech_type})");
 
-    iamat($info{'handle'}, "At the main menu");
+    iamat($info{'handle'}, "Finished MechWars");
 }
 
 # ============================================================================
