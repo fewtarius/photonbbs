@@ -188,21 +188,41 @@ That's it! PhotonBBS will build and start automatically.
 
 ## Architecture
 
-PhotonBBS consists of several key components:
+PhotonBBS is a multi-process system with several key components:
 
-**photonbbs** - Main daemon handling connections, node management, and sessions
-**photonbbs-client** - Client application for user interaction
-**photonmud** - MUD game engine with world generation and combat
-**photonmud-monsterai** - AI system for monster behavior and spawning
-**pb-* modules** - Core BBS functionality (framework, doors, chat, etc.)
-**pm-* modules** - MUD game logic (combat, spells, rooms, monsters, etc.)
-**mw-* modules** - MechWars game engine (universe, combat, economy, guilds, etc.)
+### Executables
 
-The system uses:
-- Perl for core BBS and MUD logic
-- Storable for data persistence
-- Docker for containerized deployment
-- Shell scripts for door game integration
+| Component | Language | Purpose |
+|-----------|----------|---------|
+| **photonbbs** | Perl | Main daemon - binds port 23, manages nodes, forks per connection |
+| **photonbbs-tty** | C | Telnet protocol negotiation wrapper (NAWS, echo, SGA) |
+| **photonbbs-client** | Perl | Per-user session - menus, chat, door games, user management |
+| **photonmud** | Perl | MUD game engine - world, combat, spells, NPCs, economy |
+| **photonmud-monsterai** | Perl | Background daemon - monster spawning, AI behavior, boss management |
+| **photonmud-generator** | Perl | World generator - procedural rooms, dungeons, terrain |
+| **photonbbs-dooredit** | Perl | Operator tool - browse/edit door game player data and scores |
+| **useredit** | Perl | Operator tool - user account administration |
+| **bulledit** | Perl | Operator tool - bulletin management |
+
+### Module Prefixes
+
+| Prefix | Count | Purpose |
+|--------|-------|---------|
+| **pb-*** | 10+ | BBS core - framework, menus, chat, doors, security, user tools |
+| **pm-*** | 12+ | MUD engine - combat, rooms, monsters, spells, objects, NPCs |
+| **mw-*** | 12 | MechWars engine - universe, combat, economy, guilds, fortresses |
+| **pb-door-*** | 12 | Native door games - each is a standalone game module |
+
+### Key Technologies
+
+- **Perl 5** for all BBS, MUD, and game logic (no strict/package declarations)
+- **C** for the telnet protocol wrapper (photonbbs-tty)
+- **Storable** for all data persistence (player saves, game state, scores)
+- **Message broker** for real-time IPC (chat, multiplayer, door game sync)
+- **Docker** for containerized deployment with s6 process supervision
+- **flock()** for concurrent file access safety
+
+For detailed architecture documentation including data flows, IPC mechanisms, and module interactions, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Development
 
