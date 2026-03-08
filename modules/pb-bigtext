@@ -1217,12 +1217,14 @@ sub bigtext_chars {
 }
 
 sub _bt_font_photon {
-  # Photon BBS font - CP437 block characters, 9 rows uppercase / 6 rows lowercase
-  # Designed to match the PhotonBBS logo aesthetic.
-  # F = chr(219) full block, U = chr(223) upper half, L = chr(220) lower half
-  my $F = chr(219);
-  my $U = chr(223);
-  my $L = chr(220);
+  # Photon BBS font - block characters matching the PhotonBBS logo aesthetic.
+  # Uses Unicode block chars (also valid CP437 when telnet negotiates that mode).
+  # F = full block (U+2588 / CP437 219)
+  # U = upper half (U+2580 / CP437 223)
+  # L = lower half (U+2584 / CP437 220)
+  my $F = "\x{2588}";  # █
+  my $U = "\x{2580}";  # ▀
+  my $L = "\x{2584}";  # ▄
 
   my %uc;  # uppercase - 9 rows each
   my %lc;  # lowercase - 6 rows each

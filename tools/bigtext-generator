@@ -45,6 +45,7 @@ use open ':std', ':encoding(UTF-8)';
 use Getopt::Long;
 use File::Basename;
 use Cwd 'abs_path';
+use Encode qw(decode);
 
 # Find and load pb-bigtext module
 my $script_dir = dirname(abs_path($0));
@@ -116,6 +117,12 @@ my %ansi_colors = (
     '@ERRORCLR'  => "\e[0;31m",  '@PROMPTCLR' => "\e[0;37m",
     '@INPUTCLR'  => "\e[0;37m",  '@LINECLR'   => "\e[0;34m",
 );
+
+sub _cp437_preview {
+    my ($line) = @_;
+    # Decode CP437 bytes to Unicode for display on UTF-8 terminals
+    return decode('cp437', $line);
+}
 
 if ($opt_help) {
     print <<'HELP';
@@ -244,12 +251,12 @@ if ($opt_preview) {
     if ($opt_color && exists $ansi_colors{$opt_color}) {
         $ansi_color = $ansi_colors{$opt_color};
     } elsif ($opt_color) {
-        # Try to interpret as raw color
         $ansi_color = $opt_color;
     }
 
     for my $line (@lines) {
-        print $ansi_color . $line . "\e[0m\n";
+        my $out = $line;
+        print $ansi_color . $out . "\e[0m\n";
     }
     print "\n";
     my $w = bigtext_width($text, font => $opt_font, style => $opt_style,
