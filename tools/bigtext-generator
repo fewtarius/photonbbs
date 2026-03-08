@@ -144,6 +144,7 @@ Font Summary:
   bloody   10 rows, 29 chars, A-Z only, dramatic (Unicode)
   dosrebel  8 rows, 27 chars, A-Z only, bold blocks (Unicode)
   doom      8 rows, 57 chars, mixed case, classic ASCII art
+  photon    9 rows, 62+ chars, mixed case, original BBS block style (CP437)
 
 Examples:
   tools/bigtext-generator "PhotonBBS" --font=doom --color=@BCN --center
@@ -164,6 +165,7 @@ if ($opt_list_fonts) {
         'bloody'   => ['10 rows', '29 chars', 'A-Z only', 'Unicode shade gradients'],
         'dosrebel' => ['8 rows', '27 chars', 'A-Z only', 'Unicode full/shade blocks'],
         'doom'     => ['8 rows', '57 chars', 'Mixed case A-Za-z, punct', 'Pure ASCII art'],
+        'photon'   => ['9 rows', '62+ chars', 'Mixed case A-Za-z, 0-9, punct', 'CP437 blocks, original BBS style'],
     );
     for my $f (@fonts) {
         my $i = $info{$f};
